@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-9">
+  <META HTTP-EQUIV="Content-language" CONTENT="tr">
+  <meta http-equiv='cache-control' content='no-cache'>
+  <meta http-equiv='expires' content='0'>
+  <meta http-equiv='pragma' content='no-cache'>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Pirireis Bilişim - Web Globe API Example</title>
+
+  <style>
+    body {
+      padding: 0;
+      margin: 0;
+    }
+
+    .globeParent {
+      height: 100vh;
+    }
+  </style>
+</head>
+
+<body>
+  <style media="screen">
+    body {
+      overflow: auto;
+      /* Hide scrollbars */
+    }
+  </style>
+
+
+
+  <div class="globeParent" id="canvasdiv">
+    <canvas id="globe"></canvas>
+  </div>
+</body>
+
+<script type="text/javascript" src="./dem_request_logger.js" charset="utf-8"></script>
+<script type="text/javascript" src="./webgl_full_hook.js" charset="utf-8"></script>
+<script type="text/javascript" src="./libs/webglobe.js" charset="utf-8"></script>
+<script type="text/javascript" src="./libs/milsymbol.js" charset="utf-8"></script>
+<script type="text/javascript" src="./index.js" charset="utf-8"></script>
+
+</html>
