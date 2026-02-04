@@ -2,223 +2,240 @@
 
 #include "earth_camera.h"
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <functional>
-#include <deque>
+#include <cmath>
 
 namespace earth {
 
-// Google Earth parity constants
-constexpr double GLOBE_RADIUS_KM = 6378.137;
-constexpr double MIN_CAMERA_ALT_M = 10.0;
-constexpr double MAX_CAMERA_ALT_M = 100000000.0;
-constexpr double MOMENTUM_DURATION_S = 1.0;
-constexpr double DAMPING_COEFF = 6.0;
+// ============================================================================
+// GOOGLE EARTH CONFIGURATION PARAMETERS (from WASM reverse engineering)
+// Source: /mirth/camera/* configuration paths
+// ============================================================================
 
-// Easing functions
-namespace easing {
-    inline double QuadOut(double t) { return 1.0 - (1.0 - t) * (1.0 - t); }
-    inline double CubicOut(double t) { return 1.0 - std::pow(1.0 - t, 3.0); }
-}
+// Globe constants
+constexpr double EARTH_RADIUS_KM = 6378.137;
+constexpr double EARTH_RADIUS_M = EARTH_RADIUS_KM * 1000.0;
 
-// Altitude-based tilt limit (Google Earth style)
-// At very high altitude, limit tilt to prevent disorientation
-inline double GetMaxTiltForAltitude(double altitudeKm) {
-    if (altitudeKm > 10000.0) return 60.0;   // > 10,000 km (space view)
-    if (altitudeKm > 1000.0)  return 70.0;   // > 1,000 km
-    if (altitudeKm > 100.0)   return 80.0;   // > 100 km
-    return 89.0;                              // Normal max tilt
-}
+// MapCameraManipulator config
+constexpr double CAMERA_MIN_ALTITUDE_M = 10.0;
+constexpr double CAMERA_MAX_ALTITUDE_M = 50000000.0;
 
+// Tilt fade config (altitude-based tilt limiting)
+constexpr double BEGIN_TILT_FADE_KM = 500.0;
+constexpr double END_TILT_FADE_KM = 10000.0;
+
+// EarthPanRotateZoomAction config
+constexpr double HORIZON_PAN_THRESHOLD = 0.05;
+constexpr double TILT_ALTITUDE_ADJUST_LIMIT = 0.8;
+
+// OrbitAction config
+constexpr double HORIZON_TILT_THRESHOLD = 89.0;
+constexpr double HEADING_SENSITIVITY = 0.25;
+constexpr double TILT_SENSITIVITY = 0.15;
+
+// DampedVelocityAction config
+constexpr double DAMPING_COEFFICIENT = 4.0;
+constexpr double MIN_VELOCITY_THRESHOLD = 0.001;
+constexpr double MOMENTUM_TIMEOUT_SEC = 3.0;
+
+// Zoom config
+constexpr double ZOOM_SCROLL_STEP = 0.15;
+constexpr double ZOOM_DRAG_SENSITIVITY = 0.003;
+
+// Drag threshold (prevents accidental drags)
+constexpr double DRAG_THRESHOLD_PIXELS = 3.0;
+
+// ============================================================================
+// THROW ANIMATION TYPES (Google Earth: EarthPanRotateZoomAction::ThrowAnimation)
+// ============================================================================
+enum class ThrowAnimationType {
+    None,
+    Rotation,       // RotationThrowAnimation - Great circle rotation
+    Arcball,        // ArcballThrowAnimation - Arcball rotation (fallback)
+    Zoom,           // ZoomThrowAnimation - Zoom momentum
+    Lla             // LlaThrowAnimation - Lat/Lon/Alt based
+};
+
+// ============================================================================
+// TRAJECTORY MODE (Google Earth: TrajectoryMode)
+// ============================================================================
+enum class TrajectoryMode {
+    Direct,         // Straight line
+    Parabolic,      // Arc trajectory (for long distances)
+    Ballistic       // Ballistic arc
+};
+
+// ============================================================================
+// FLIGHT CONTROLLER - 100% Google Earth Parity
+// Based on: EarthPanRotateZoomAction, OrbitAction, DampedVelocityAction
+// ============================================================================
 class FlightController {
 public:
-    FlightController(PerspectiveCamera& camera);
-
-    // Input Events
+    explicit FlightController(PerspectiveCamera& camera);
+    
+    // === Input Events (MapCameraManipulator interface) ===
     void OnMouseDown(int button, double x, double y, double time);
     void OnMouseUp(int button, double time);
     void OnMouseMove(double x, double y, double time);
     void OnScroll(double xoffset, double yoffset);
     void OnDoubleClick(double x, double y);
-    void OnModifiers(bool shift, bool ctrl);
     void OnKeyDown(int key);
     void OnKeyUp(int key);
+    void OnModifiers(bool shift, bool ctrl);
     void OnWindowResize(int width, int height);
-
-    // Navigation API
-    void FlyToLocation(double lat, double lon, double altMeters, 
-                       double heading, double tilt, double duration = 1.5);
+    
+    // === Navigation API (CameraManager interface) ===
+    void FlyTo(double lat, double lon, double altM, double heading, double tilt,
+               double duration = 2.0, TrajectoryMode mode = TrajectoryMode::Parabolic);
+    void FlyToLocation(double lat, double lon, double altM, double heading, double tilt,
+                       double duration = 2.0) { FlyTo(lat, lon, altM, heading, tilt, duration); }
+    void SetCameraTo(double lat, double lon, double altM, double heading, double tilt);
     void StopAnimation();
-
-    // Configuration
+    
+    // === Configuration ===
     void SetNavigationSpeed(double speed) { m_navSpeed = speed; }
     void SetLockNorth(bool lock) { m_lockNorth = lock; }
-    void SetNavigationLimits(double minDist, double maxDist);
-    void SetMouseWheelSettings(bool zoomToCursor, bool reverse);
-
-    // Status
+    void SetZoomToCursor(bool enable) { m_zoomToCursor = enable; }
+    
+    // === Status ===
     bool IsMoving() const;
+    bool IsAnimating() const { return m_flyToActive || m_throwActive; }
     bool GetPivot(glm::dvec3& outPoint) const;
-
-    // Terrain picking callback
-    using PickCallback = std::function<bool(double x, double y, glm::dvec3& outPoint)>;
-    void SetPickCallback(PickCallback cb) { m_pickCallback = cb; }
-
-    // Update (call every frame)
+    
+    // === Terrain Picking ===
+    using PickCallback = std::function<bool(double x, double y, glm::dvec3& hitPoint)>;
+    void SetPickCallback(PickCallback cb) { m_pickCallback = std::move(cb); }
+    
+    // === Frame Update ===
     void Update(double dt, double currentTime);
 
 private:
     PerspectiveCamera& m_camera;
     PickCallback m_pickCallback;
     
+    // === Window State ===
     int m_windowW = 1280;
     int m_windowH = 720;
+    
+    // === Configuration ===
     double m_navSpeed = 1.0;
     bool m_lockNorth = false;
-    double m_minDist = MIN_CAMERA_ALT_M;
-    double m_maxDist = MAX_CAMERA_ALT_M;
-    bool m_wheelZoomToCursor = true;
-    bool m_wheelReverse = false;
-
-    // Modifier keys
+    bool m_zoomToCursor = true;
+    
+    // === Modifier Keys ===
     bool m_shiftDown = false;
     bool m_ctrlDown = false;
-
-    // Mouse state
+    
+    // === Mouse State ===
     double m_mouseX = 0.0;
     double m_mouseY = 0.0;
+    double m_mouseDownX = 0.0;
+    double m_mouseDownY = 0.0;
     double m_lastMoveTime = 0.0;
-
-    // Input Smoothing (Google Earth style - weighted multi-frame averaging)
-    struct InputSmoother {
-        static constexpr int HISTORY_SIZE = 5;
-        static constexpr double WEIGHTS[HISTORY_SIZE] = {0.35, 0.25, 0.20, 0.12, 0.08};
-        
-        struct Sample {
-            double x = 0.0, y = 0.0;
-            double time = 0.0;
-        };
-        Sample history[HISTORY_SIZE] = {};
-        int count = 0;
-        
-        void AddSample(double x, double y, double time) {
-            // Shift history
-            for (int i = HISTORY_SIZE - 1; i > 0; --i) {
-                history[i] = history[i - 1];
-            }
-            history[0] = {x, y, time};
-            if (count < HISTORY_SIZE) count++;
-        }
-        
-        void GetSmoothed(double& outX, double& outY) const {
-            if (count == 0) { outX = outY = 0.0; return; }
-            
-            double totalWeight = 0.0;
-            outX = outY = 0.0;
-            
-            for (int i = 0; i < count; ++i) {
-                outX += history[i].x * WEIGHTS[i];
-                outY += history[i].y * WEIGHTS[i];
-                totalWeight += WEIGHTS[i];
-            }
-            outX /= totalWeight;
-            outY /= totalWeight;
-        }
-        
-        void Reset() { count = 0; }
-    };
-    InputSmoother m_inputSmoother;
-
-    // Drag modes (mutually exclusive)
-    enum class DragMode { None, Pan, Orbit, Zoom };
-    DragMode m_dragMode = DragMode::None;
     double m_dragStartTime = 0.0;
-
-    // Pan state (Grab Earth)
-    glm::dvec3 m_panAnchor{0.0};      // Point on globe being dragged
-    double m_panAnchorRadius = GLOBE_RADIUS_KM;
-    glm::dvec3 m_panPrevHit{0.0};     // Previous frame's hit point
-    bool m_hasPanPrevHit = false;
-
-    // Orbit state (Shift+Left or Middle)
-    glm::dvec3 m_orbitPivot{0.0};     // Point we're orbiting around
+    bool m_dragThresholdExceeded = false;
+    double m_accumulatedDrag = 0.0;
+    
+    // === Action State (EarthPanRotateZoomAction) ===
+    enum class ActionMode { None, Pan, Orbit, Zoom };
+    ActionMode m_actionMode = ActionMode::None;
+    bool m_isDragging = false;
+    
+    // === Pan State ===
+    glm::dvec3 m_panAnchorWorld{0.0};    // World position of anchor point (with terrain height)
+    glm::dvec3 m_panAnchorDir{0.0};      // Normalized direction to anchor
+    double m_panAnchorHeight = 0.0;      // Terrain height at anchor (distance from sphere surface)
+    bool m_hasPanAnchor = false;
+    
+    // Screen position tracking for anchor stability
+    double m_panScreenX = 0.0;           // Current cursor X during pan
+    double m_panScreenY = 0.0;           // Current cursor Y during pan
+    
+    // Velocity tracking for pan momentum
+    glm::dvec3 m_lastPanAxis{0.0};
+    double m_lastPanAngle = 0.0;
+    double m_lastPanTime = 0.0;
+    
+    // === Orbit State (OrbitAction) ===
+    glm::dvec3 m_orbitPivot{0.0};
+    glm::dvec3 m_orbitStartPivotToCam{0.0};  // Baseline pivot-to-cam for total rotation
     bool m_hasOrbitPivot = false;
     double m_orbitStartHeading = 0.0;
     double m_orbitStartTilt = 0.0;
     double m_orbitStartX = 0.0;
     double m_orbitStartY = 0.0;
-    glm::dvec2 m_orbitPivotScreenPos{0.0}; // Screen position to maintain (for correction)
-
-    // Zoom state (Right drag)
+    
+    // Velocity tracking for orbit
+    double m_headingVelocity = 0.0;
+    double m_tiltVelocity = 0.0;
+    
+    // === Zoom State ===
     double m_zoomStartY = 0.0;
-    double m_zoomStartDist = 0.0;
-
-    // Zoom to cursor state
-    glm::dvec3 m_zoomTarget{0.0};
-    bool m_hasZoomTarget = false;
-
-    // Momentum (throw animation) - Google Earth style
-    struct Momentum {
-        bool active = false;
-        double startTime = 0.0;
-        
-        // Pan momentum
-        glm::dvec3 axis{0.0};         // Rotation axis
-        double velocity = 0.0;        // Angular velocity (rad/s)
-        
-        // Orbit momentum  
-        double headingVel = 0.0;      // Heading velocity (deg/s)
-        double tiltVel = 0.0;         // Tilt velocity (deg/s)
-        bool orbitMode = false;       // True if orbit momentum, false if pan
-        
-        // Zoom momentum (ZoomThrowAnimation - Google Earth style)
-        bool zoomMode = false;
-        double zoomVelocity = 0.0;    // Zoom velocity (log-space)
-        glm::dvec3 zoomTarget{0.0};   // Target point for point-stable zoom
-        bool hasZoomTarget = false;
-        
-        // Velocity history for smoothing
-        static constexpr int HISTORY_SIZE = 5;
-        double velHistory[HISTORY_SIZE] = {0};
-        int historyIndex = 0;
-        
-        // Friction parameters
-        double friction = 4.0;        // Deceleration rate
-        double minVelocity = 0.0001;  // Stop threshold
-    };
-    Momentum m_momentum;
+    double m_zoomVelocity = 0.0;
     
-    // Scroll momentum tracking
-    double m_lastScrollTime = 0.0;
-    double m_scrollVelocity = 0.0;
+    // === ThrowAnimation State (DampedVelocityAction) ===
+    bool m_throwActive = false;
+    double m_throwStartTime = 0.0;
+    ThrowAnimationType m_throwType = ThrowAnimationType::None;
     
-    // Velocity tracking during drag
-    double m_lastDragTime = 0.0;
-    glm::dvec3 m_lastDragAxis{0.0};
-    double m_lastDragVelocity = 0.0;
-
-    // FlyTo animation
-    struct FlyToAnim {
-        bool active = false;
-        double startTime = 0.0;
-        double duration = 1.5;
-        double startLat, startLon, startAlt;
-        double startHeading, startTilt;
-        double endLat, endLon, endAlt;
-        double endHeading, endTilt;
-    };
-    FlyToAnim m_flyTo;
-
-    // Helpers
-    bool IntersectGlobe(const glm::dvec3& origin, const glm::dvec3& dir, 
-                        glm::dvec3& outHit, double radius = GLOBE_RADIUS_KM);
-    void ApplyPanRotation(const glm::dvec3& axis, double angle);
-    void ApplyOrbit(double deltaHeading, double deltaTilt);
-    void ApplyZoom(double factor);
+    // RotationThrowAnimation data
+    glm::dvec3 m_throwRotationAxis{0.0};
+    double m_throwAngularVelocity = 0.0;
     
-    // ENU frame helpers (pole-safe)
-    void GetLocalENU(const glm::dvec3& point, glm::dvec3& east, glm::dvec3& north, glm::dvec3& up);
-    void ComputeHeadingTilt(const glm::dvec3& pos, const glm::dvec3& fwd,
-                            double fallbackHeading, double& outHeading, double& outTilt);
+    // OrbitThrowAnimation data  
+    double m_throwHeadingVel = 0.0;
+    double m_throwTiltVel = 0.0;
+    
+    // ZoomThrowAnimation data
+    double m_throwZoomVel = 0.0;
+    
+    // === FlyTo Animation State ===
+    bool m_flyToActive = false;
+    double m_flyToStartTime = 0.0;
+    double m_flyToDuration = 2.0;
+    TrajectoryMode m_flyToMode = TrajectoryMode::Parabolic;
+    
+    double m_flyToFromLat, m_flyToFromLon, m_flyToFromAlt;
+    double m_flyToFromHeading, m_flyToFromTilt;
+    double m_flyToToLat, m_flyToToLon, m_flyToToAlt;
+    double m_flyToToHeading, m_flyToToTilt;
+    double m_flyToPeakAlt = 0.0;
+    double m_flyToDistance = 0.0;
+    
+    // === Helper Methods ===
+    
+    // Ray casting
+    bool RayGlobeIntersect(const glm::dvec3& origin, const glm::dvec3& dir,
+                           glm::dvec3& outHit) const;
+    void ScreenToRay(double x, double y, glm::dvec3& origin, glm::dvec3& dir) const;
+    
+    // Camera manipulation
+    void RotateCameraGreatCircle(const glm::dvec3& axis, double angle);
+    double GetAltitudeM() const;
+    double GetAltitudeKm() const { return GetAltitudeM() / 1000.0; }
+    
+    // Tilt fade (MapCameraManipulator::GetTiltFadeFactor)
+    double GetTiltFadeFactor() const;
+    double GetMaxTilt() const;
+    
+    // Drag threshold filter (DragThresholdFilterActionAdapter)
+    bool CheckDragThreshold(double dx, double dy);
+    
+    // ThrowAnimation helpers
+    void StartThrowAnimation(ThrowAnimationType type, double time);
+    void UpdateThrowAnimation(double dt, double time);
+    void StopThrowAnimation();
+    
+    // FlyTo helpers
+    void UpdateFlyToAnimation(double time);
+    double CalculateGreatCircleDistance(double lat1, double lon1, double lat2, double lon2) const;
+    
+    // Easing function
+    static double EaseInOutCubic(double t) {
+        return t < 0.5 ? 4.0 * t * t * t : 1.0 - std::pow(-2.0 * t + 2.0, 3.0) / 2.0;
+    }
 };
 
 } // namespace earth

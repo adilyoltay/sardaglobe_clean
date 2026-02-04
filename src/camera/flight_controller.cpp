@@ -1,14 +1,18 @@
 #include "flight_controller.h"
 #include <algorithm>
-#include <cmath>
-#include <glm/gtx/vector_angle.hpp>
 #include <GLFW/glfw3.h>
 
 namespace earth {
 
-FlightController::FlightController(PerspectiveCamera& camera) 
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+FlightController::FlightController(PerspectiveCamera& camera)
     : m_camera(camera) {}
 
+// ============================================================================
+// WINDOW & MODIFIERS
+// ============================================================================
 void FlightController::OnWindowResize(int width, int height) {
     m_windowW = width;
     m_windowH = height;
@@ -19,20 +23,11 @@ void FlightController::OnModifiers(bool shift, bool ctrl) {
     m_ctrlDown = ctrl;
 }
 
+// ============================================================================
+// STATUS
+// ============================================================================
 bool FlightController::IsMoving() const {
-    return m_dragMode != DragMode::None || 
-           m_momentum.active || 
-           m_flyTo.active;
-}
-
-void FlightController::SetNavigationLimits(double minDist, double maxDist) {
-    m_minDist = minDist;
-    m_maxDist = maxDist;
-}
-
-void FlightController::SetMouseWheelSettings(bool zoomToCursor, bool reverse) {
-    m_wheelZoomToCursor = zoomToCursor;
-    m_wheelReverse = reverse;
+    return m_isDragging || m_throwActive || m_flyToActive;
 }
 
 bool FlightController::GetPivot(glm::dvec3& outPoint) const {
@@ -44,451 +39,565 @@ bool FlightController::GetPivot(glm::dvec3& outPoint) const {
 }
 
 // ============================================================================
-// SPHERE INTERSECTION
+// RAY-GLOBE INTERSECTION
 // ============================================================================
-bool FlightController::IntersectGlobe(const glm::dvec3& origin, const glm::dvec3& dir, 
-                                       glm::dvec3& outHit, double radius) {
+bool FlightController::RayGlobeIntersect(const glm::dvec3& origin,
+                                          const glm::dvec3& dir,
+                                          glm::dvec3& outHit) const {
+    // Camera uses KM units (R = 6378.137)
+    const double R = EARTH_RADIUS_KM;
+    double a = glm::dot(dir, dir);
     double b = 2.0 * glm::dot(origin, dir);
-    double c = glm::dot(origin, origin) - radius * radius;
-    double disc = b * b - 4.0 * c;
+    double c = glm::dot(origin, origin) - R * R;
+    double disc = b * b - 4.0 * a * c;
     
     if (disc < 0.0) return false;
     
-    double t = (-b - std::sqrt(disc)) / 2.0;
-    if (t < 0.0) t = (-b + std::sqrt(disc)) / 2.0;
+    double sqrtD = std::sqrt(disc);
+    double t = (-b - sqrtD) / (2.0 * a);
+    if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
     if (t < 0.0) return false;
     
     outHit = origin + dir * t;
     return true;
 }
 
+void FlightController::ScreenToRay(double x, double y,
+                                    glm::dvec3& origin, glm::dvec3& dir) const {
+    m_camera.GetRay(x, y, m_windowW, m_windowH, origin, dir);
+    dir = glm::normalize(dir);
+}
+
 // ============================================================================
-// LOCAL ENU FRAME (Pole-Safe)
+// CAMERA HELPERS
 // ============================================================================
-void FlightController::GetLocalENU(const glm::dvec3& point, 
-                                    glm::dvec3& east, glm::dvec3& north, glm::dvec3& up) {
-    up = glm::normalize(point);
+double FlightController::GetAltitudeM() const {
+    // Camera ECEF is in KM units, convert to meters
+    glm::dvec3 pos = m_camera.GetPositionECEF();
+    double altKm = glm::length(pos) - EARTH_RADIUS_KM;
+    return altKm * 1000.0;  // Convert km to meters
+}
+
+double FlightController::GetTiltFadeFactor() const {
+    double altKm = GetAltitudeKm();
+    if (altKm < BEGIN_TILT_FADE_KM) return 1.0;
+    if (altKm > END_TILT_FADE_KM) return 0.0;
+    return (END_TILT_FADE_KM - altKm) / (END_TILT_FADE_KM - BEGIN_TILT_FADE_KM);
+}
+
+double FlightController::GetMaxTilt() const {
+    double factor = GetTiltFadeFactor();
+    return HORIZON_TILT_THRESHOLD * factor + 45.0 * (1.0 - factor);
+}
+
+void FlightController::RotateCameraGreatCircle(const glm::dvec3& axis, double angle) {
+    if (std::abs(angle) < 1e-12) return;
     
-    // Check if near pole (up.z close to ±1)
-    double upZ = std::abs(up.z);
-    if (upZ > 0.999) {
-        // At pole: use camera heading to define east
-        double headingRad = glm::radians(m_camera.GetHeading());
-        // At north pole, "east" points toward lon=heading+90
-        // At south pole, sign flips
-        double sign = (up.z > 0) ? 1.0 : -1.0;
-        east = glm::dvec3(-std::sin(headingRad), std::cos(headingRad), 0.0);
-        north = sign * glm::dvec3(-std::cos(headingRad), -std::sin(headingRad), 0.0);
-    } else {
-        // Standard ENU: east = Z × up (normalized)
-        glm::dvec3 globalZ(0.0, 0.0, 1.0);
-        east = glm::normalize(glm::cross(globalZ, up));
-        north = glm::cross(up, east);
-    }
+    glm::dvec3 normAxis = glm::normalize(axis);
+    glm::dvec3 pos = m_camera.GetPositionECEF();
+    
+    glm::dmat4 rot = glm::rotate(glm::dmat4(1.0), angle, normAxis);
+    glm::dvec3 newPos = glm::dvec3(rot * glm::dvec4(pos, 1.0));
+    
+    double r = glm::length(newPos);
+    double lat = glm::degrees(std::asin(std::clamp(newPos.z / r, -1.0, 1.0)));
+    double lon = glm::degrees(std::atan2(newPos.y, newPos.x));
+    double altM = (r - EARTH_RADIUS_KM) * 1000.0;  // Convert km to meters
+    
+    m_camera.SetLatLonAlt(lat, lon, altM);
 }
 
-void FlightController::ComputeHeadingTilt(const glm::dvec3& pos, const glm::dvec3& fwd,
-                                          double fallbackHeading, 
-                                          double& outHeading, double& outTilt) {
-    double r = glm::length(pos);
-    if (r < 1e-9) {
-        outHeading = fallbackHeading;
-        outTilt = 0.0;
-        return;
+bool FlightController::CheckDragThreshold(double dx, double dy) {
+    if (m_dragThresholdExceeded) return true;
+    
+    m_accumulatedDrag += std::sqrt(dx * dx + dy * dy);
+    if (m_accumulatedDrag > DRAG_THRESHOLD_PIXELS) {
+        m_dragThresholdExceeded = true;
+        return true;
     }
+    return false;
+}
 
-    glm::dvec3 east, north, up;
-    GetLocalENU(pos, east, north, up);
-
-    // Tilt: angle from nadir (straight down)
-    glm::dvec3 f = glm::normalize(fwd);
-    double dotDown = glm::dot(f, -up);
-    outTilt = glm::degrees(std::acos(std::clamp(dotDown, -1.0, 1.0)));
-
-    // Heading: project forward onto horizontal plane
-    glm::dvec3 fHoriz = f - up * glm::dot(f, up);
-    if (glm::length(fHoriz) < 1e-9) {
-        outHeading = fallbackHeading;
-    } else {
-        fHoriz = glm::normalize(fHoriz);
-        outHeading = glm::degrees(std::atan2(glm::dot(fHoriz, east), glm::dot(fHoriz, north)));
-    }
+double FlightController::CalculateGreatCircleDistance(double lat1, double lon1,
+                                                       double lat2, double lon2) const {
+    double phi1 = glm::radians(lat1);
+    double phi2 = glm::radians(lat2);
+    double dPhi = phi2 - phi1;
+    double dLambda = glm::radians(lon2 - lon1);
+    
+    double a = std::sin(dPhi / 2.0) * std::sin(dPhi / 2.0) +
+               std::cos(phi1) * std::cos(phi2) *
+               std::sin(dLambda / 2.0) * std::sin(dLambda / 2.0);
+    double c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
+    
+    return EARTH_RADIUS_KM * c;
 }
 
 // ============================================================================
-// MOUSE DOWN
+// MOUSE DOWN (MapCameraManipulator::OnMouseDown)
 // ============================================================================
 void FlightController::OnMouseDown(int button, double x, double y, double time) {
-    // Stop any active momentum/animation
-    m_momentum.active = false;
-    m_flyTo.active = false;
+    StopThrowAnimation();
+    m_flyToActive = false;
     
     m_mouseX = x;
     m_mouseY = y;
+    m_mouseDownX = x;
+    m_mouseDownY = y;
     m_lastMoveTime = time;
     m_dragStartTime = time;
+    m_dragThresholdExceeded = false;
+    m_accumulatedDrag = 0.0;
+    m_isDragging = true;
     
-    // Reset input smoother for fresh drag
-    m_inputSmoother.Reset();
+    // Reset velocities
+    m_headingVelocity = 0.0;
+    m_tiltVelocity = 0.0;
+    m_zoomVelocity = 0.0;
     
-    // Raycast to globe
+    // Cast ray to globe
     glm::dvec3 origin, dir;
-    m_camera.GetRay(x, y, m_windowW, m_windowH, origin, dir);
-    dir = glm::normalize(dir);
+    ScreenToRay(x, y, origin, dir);
     
-    glm::dvec3 hit;
-    bool onGlobe = false;
+    glm::dvec3 hitPoint;
+    bool hitGlobe = false;
     
-    // Try terrain pick first
     if (m_pickCallback) {
-        onGlobe = m_pickCallback(x, y, hit);
+        hitGlobe = m_pickCallback(x, y, hitPoint);
     }
-    if (!onGlobe) {
-        onGlobe = IntersectGlobe(origin, dir, hit);
+    if (!hitGlobe) {
+        hitGlobe = RayGlobeIntersect(origin, dir, hitPoint);
     }
-
-    if (button == 0) { // Left mouse
+    
+    // LEFT BUTTON
+    if (button == 0) {
         if (m_shiftDown) {
-            // Shift+Left = Orbit
-            m_dragMode = DragMode::Orbit;
-            m_hasOrbitPivot = onGlobe;
-            if (onGlobe) {
-                m_orbitPivot = hit;
-            } else {
-                // Fallback: use screen center
-                glm::dvec3 cOrigin, cDir;
-                m_camera.GetRay(m_windowW/2.0, m_windowH/2.0, m_windowW, m_windowH, cOrigin, cDir);
-                m_hasOrbitPivot = IntersectGlobe(cOrigin, glm::normalize(cDir), m_orbitPivot);
-            }
-            m_orbitStartHeading = m_camera.GetHeading();
-            m_orbitStartTilt = m_camera.GetTilt();
+            // Shift+Left = Orbit (OrbitAction)
+            m_actionMode = ActionMode::Orbit;
+            m_hasOrbitPivot = hitGlobe;
+            m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
+            m_orbitStartPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;  // Baseline
             m_orbitStartX = x;
             m_orbitStartY = y;
-            m_orbitPivotScreenPos = {x, y}; // Save screen position for correction
+            m_orbitStartHeading = m_camera.GetHeading();
+            m_orbitStartTilt = m_camera.GetTilt();
         } else {
-            // Left = Pan (Grab Earth)
-            m_dragMode = DragMode::Pan;
-            if (onGlobe) {
-                m_panAnchor = hit;
-                m_panAnchorRadius = glm::length(hit);
-            } else {
-                m_panAnchorRadius = GLOBE_RADIUS_KM;
-            }
-            m_hasPanPrevHit = false;
+            // Left = Pan (EarthPanRotateZoomAction)
+            m_actionMode = ActionMode::Pan;
+            m_hasPanAnchor = hitGlobe;
+            m_panAnchorWorld = hitPoint;
+            m_panAnchorDir = hitGlobe ? glm::normalize(hitPoint) : glm::dvec3(0.0);
+            // Store terrain height (distance from sphere surface)
+            m_panAnchorHeight = hitGlobe ? (glm::length(hitPoint) - EARTH_RADIUS_KM) : 0.0;
+            m_panScreenX = x;
+            m_panScreenY = y;
+            m_lastPanTime = time;
+            m_lastPanAngle = 0.0;
         }
-    } 
-    else if (button == 1) { // Right = Zoom drag
-        m_dragMode = DragMode::Zoom;
-        m_zoomStartY = y;
-        m_zoomStartDist = glm::length(m_camera.GetPositionECEF());
     }
-    else if (button == 2) { // Middle = Orbit
-        m_dragMode = DragMode::Orbit;
-        m_hasOrbitPivot = onGlobe;
-        if (onGlobe) {
-            m_orbitPivot = hit;
-        } else {
-            glm::dvec3 cOrigin, cDir;
-            m_camera.GetRay(m_windowW/2.0, m_windowH/2.0, m_windowW, m_windowH, cOrigin, cDir);
-            m_hasOrbitPivot = IntersectGlobe(cOrigin, glm::normalize(cDir), m_orbitPivot);
-        }
-        m_orbitStartHeading = m_camera.GetHeading();
-        m_orbitStartTilt = m_camera.GetTilt();
+    // MIDDLE BUTTON = Orbit
+    else if (button == 2) {
+        m_actionMode = ActionMode::Orbit;
+        m_hasOrbitPivot = hitGlobe;
+        m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
+        m_orbitStartPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;  // Baseline
         m_orbitStartX = x;
         m_orbitStartY = y;
-        m_orbitPivotScreenPos = {x, y}; // Save screen position for correction
+        m_orbitStartHeading = m_camera.GetHeading();
+        m_orbitStartTilt = m_camera.GetTilt();
+    }
+    // RIGHT BUTTON = Zoom
+    else if (button == 1) {
+        m_actionMode = ActionMode::Zoom;
+        m_zoomStartY = y;
+        // Zoom target stored for potential future use
     }
 }
 
 // ============================================================================
-// MOUSE UP
+// MOUSE UP (MapCameraManipulator::OnMouseUp)
 // ============================================================================
 void FlightController::OnMouseUp(int button, double time) {
-    if (m_dragMode == DragMode::None) return;
+    if (!m_isDragging) return;
     
-    // Check if drag was long enough for momentum
     double dragDuration = time - m_dragStartTime;
-    double timeSinceMove = time - m_lastMoveTime;
+    bool quickDrag = dragDuration < 0.4;
     
-    // Only activate momentum if: moved recently (< 100ms) and dragged for > 50ms
-    bool shouldMomentum = (timeSinceMove < 0.1) && (dragDuration > 0.05);
-    
-    if (shouldMomentum) {
-        // Compute smoothed velocity from history
-        double avgVel = 0.0;
-        for (int i = 0; i < Momentum::HISTORY_SIZE; i++) {
-            avgVel += m_momentum.velHistory[i];
+    // Start throw animation based on mode
+    if (quickDrag && m_dragThresholdExceeded) {
+        if (m_actionMode == ActionMode::Pan) {
+            if (std::abs(m_lastPanAngle) > MIN_VELOCITY_THRESHOLD) {
+                m_throwRotationAxis = m_lastPanAxis;
+                m_throwAngularVelocity = m_lastPanAngle / std::max(time - m_lastPanTime, 0.001);
+                m_throwAngularVelocity = std::clamp(m_throwAngularVelocity, -3.0, 3.0);
+                StartThrowAnimation(ThrowAnimationType::Rotation, time);
+            }
         }
-        avgVel /= Momentum::HISTORY_SIZE;
-        
-        if (m_dragMode == DragMode::Pan && std::abs(avgVel) > 0.001) {
-            m_momentum.active = true;
-            m_momentum.orbitMode = false;
-            m_momentum.startTime = time;
-            m_momentum.velocity = avgVel;
-            m_momentum.axis = m_lastDragAxis;
-            // Adjust friction based on velocity - faster flicks have less friction
-            m_momentum.friction = 3.0 + 2.0 / (1.0 + std::abs(avgVel));
+        else if (m_actionMode == ActionMode::Orbit) {
+            if (std::abs(m_headingVelocity) > 0.5 || std::abs(m_tiltVelocity) > 0.5) {
+                m_throwHeadingVel = std::clamp(m_headingVelocity, -100.0, 100.0);
+                m_throwTiltVel = std::clamp(m_tiltVelocity, -50.0, 50.0);
+                StartThrowAnimation(ThrowAnimationType::Arcball, time);
+            }
         }
-        else if (m_dragMode == DragMode::Orbit) {
-            double orbitSpeed = std::sqrt(m_momentum.headingVel * m_momentum.headingVel + 
-                                          m_momentum.tiltVel * m_momentum.tiltVel);
-            if (orbitSpeed > 1.0) { // deg/s threshold
-                m_momentum.active = true;
-                m_momentum.orbitMode = true;
-                m_momentum.startTime = time;
-                m_momentum.friction = 4.0;
+        else if (m_actionMode == ActionMode::Zoom) {
+            // Zoom throw (ZoomThrowAnimation)
+            if (std::abs(m_zoomVelocity) > 0.01) {
+                m_throwZoomVel = std::clamp(m_zoomVelocity, -2.0, 2.0);
+                StartThrowAnimation(ThrowAnimationType::Zoom, time);
             }
         }
     }
     
-    m_dragMode = DragMode::None;
-    m_hasPanPrevHit = false;
+    m_isDragging = false;
+    m_actionMode = ActionMode::None;
+    m_hasPanAnchor = false;
 }
 
 // ============================================================================
-// MOUSE MOVE
+// MOUSE MOVE (MapCameraManipulator::OnMouseMove)
 // ============================================================================
 void FlightController::OnMouseMove(double x, double y, double time) {
     double dx = x - m_mouseX;
     double dy = y - m_mouseY;
-    
-    // Skip if no significant movement
-    if (std::abs(dx) < 0.5 && std::abs(dy) < 0.5) {
-        return;
-    }
-    
     double dt = time - m_lastMoveTime;
-    m_lastMoveTime = time;
+    
     m_mouseX = x;
     m_mouseY = y;
+    m_lastMoveTime = time;
     
-    if (m_dragMode == DragMode::None) return;
+    if (!m_isDragging || m_actionMode == ActionMode::None) return;
+    if (dt < 0.0001) return;
     
-    // Input smoothing: add sample and get smoothed delta
-    m_inputSmoother.AddSample(dx, dy, time);
-    double smoothDx, smoothDy;
-    m_inputSmoother.GetSmoothed(smoothDx, smoothDy);
-
-    // ========== PAN (Grab Earth) ==========
-    if (m_dragMode == DragMode::Pan) {
-        glm::dvec3 origin, dir;
-        m_camera.GetRay(x, y, m_windowW, m_windowH, origin, dir);
-        dir = glm::normalize(dir);
-        
-        glm::dvec3 currHit;
-        bool currOnGlobe = IntersectGlobe(origin, dir, currHit, m_panAnchorRadius);
-        
-        // Check if ray is near-tangent (horizon)
-        glm::dvec3 toCenter = -glm::normalize(origin);
-        bool nearHorizon = glm::dot(dir, toCenter) < 0.05;
-        
-        if (m_hasPanPrevHit && currOnGlobe && !nearHorizon) {
-            // Great Circle Pan: rotate camera so prevHit moves to currHit
-            // Google Earth style: Earth follows mouse (camera moves opposite)
-            glm::dvec3 vPrev = glm::normalize(m_panPrevHit);
-            glm::dvec3 vCurr = glm::normalize(currHit);
+    // Check drag threshold
+    if (!CheckDragThreshold(dx, dy)) return;
+    
+    // ========== PAN (EarthPanRotateZoomAction) ==========
+    if (m_actionMode == ActionMode::Pan) {
+        if (m_hasPanAnchor) {
+            // HEIGHT-AWARE ANCHOR ALGORITHM
+            // Goal: Keep the anchor point exactly under the cursor at all times
             
-            // Rotation axis = cross(prev, curr) - Earth follows mouse direction
-            glm::dvec3 axis = glm::cross(vPrev, vCurr);
-            double sinAngle = glm::length(axis);
+            // Get current cursor ray
+            glm::dvec3 origin, dir;
+            ScreenToRay(x, y, origin, dir);
             
-            if (sinAngle > 1e-6) {
-                double cosAngle = glm::dot(vPrev, vCurr);
-                double angle = std::atan2(sinAngle, cosAngle);
-                axis = glm::normalize(axis);
-                
-                ApplyPanRotation(axis, angle);
-                
-                // Track velocity for momentum (with history)
-                if (dt > 0.001) {
-                    double vel = std::min(angle / dt, 3.0); // Clamp max velocity
-                    
-                    // Store in velocity history for smoothing
-                    m_momentum.velHistory[m_momentum.historyIndex] = vel;
-                    m_momentum.historyIndex = (m_momentum.historyIndex + 1) % Momentum::HISTORY_SIZE;
-                    
-                    // Track last valid axis
-                    m_lastDragAxis = axis;
-                    m_lastDragVelocity = vel;
-                    m_lastDragTime = time;
+            // Calculate target point on sphere at anchor's height
+            // This is where the cursor is pointing on a sphere at anchor height
+            double targetRadius = EARTH_RADIUS_KM + m_panAnchorHeight;
+            
+            // Ray-sphere intersection at anchor height
+            double a = glm::dot(dir, dir);
+            double b = 2.0 * glm::dot(origin, dir);
+            double c = glm::dot(origin, origin) - targetRadius * targetRadius;
+            double disc = b * b - 4.0 * a * c;
+            
+            glm::dvec3 targetDir;
+            bool hasTarget = false;
+            
+            if (disc >= 0.0) {
+                double sqrtD = std::sqrt(disc);
+                double t = (-b - sqrtD) / (2.0 * a);
+                if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
+                if (t > 0.0) {
+                    glm::dvec3 targetPoint = origin + dir * t;
+                    targetDir = glm::normalize(targetPoint);
+                    hasTarget = true;
                 }
             }
-        }
-        
-        // Update prev hit for next frame (after rotation applied)
-        if (currOnGlobe && !nearHorizon) {
-            m_camera.GetRay(x, y, m_windowW, m_windowH, origin, dir);
-            if (IntersectGlobe(origin, glm::normalize(dir), currHit, m_panAnchorRadius)) {
-                m_panPrevHit = currHit;
-                m_hasPanPrevHit = true;
+            
+            // Fallback: use terrain pick or sphere intersection
+            if (!hasTarget) {
+                glm::dvec3 currentHit;
+                if (m_pickCallback && m_pickCallback(x, y, currentHit)) {
+                    targetDir = glm::normalize(currentHit);
+                    hasTarget = true;
+                } else if (RayGlobeIntersect(origin, dir, currentHit)) {
+                    targetDir = glm::normalize(currentHit);
+                    hasTarget = true;
+                }
             }
+            
+            if (hasTarget) {
+                // Calculate rotation to move anchor to target position
+                double cosAngle = glm::dot(m_panAnchorDir, targetDir);
+                cosAngle = std::clamp(cosAngle, -1.0, 1.0);
+                
+                if (cosAngle < 0.9999999) {
+                    double angle = std::acos(cosAngle);
+                    glm::dvec3 axis = glm::cross(targetDir, m_panAnchorDir);
+                    
+                    if (glm::length(axis) > 1e-10) {
+                        axis = glm::normalize(axis);
+                        
+                        // Apply rotation to camera
+                        RotateCameraGreatCircle(axis, angle);
+                        
+                        // Track for momentum
+                        m_lastPanAxis = axis;
+                        m_lastPanAngle = angle;
+                        m_lastPanTime = time;
+                        
+                        // UPDATE ANCHOR DIRECTION after rotation
+                        // The anchor should now be under the current cursor position
+                        // Recalculate from current cursor to verify stability
+                        glm::dvec3 newOrigin, newDir;
+                        ScreenToRay(x, y, newOrigin, newDir);
+                        
+                        // Intersect at anchor height
+                        a = glm::dot(newDir, newDir);
+                        b = 2.0 * glm::dot(newOrigin, newDir);
+                        c = glm::dot(newOrigin, newOrigin) - targetRadius * targetRadius;
+                        disc = b * b - 4.0 * a * c;
+                        
+                        if (disc >= 0.0) {
+                            double sqrtD = std::sqrt(disc);
+                            double t = (-b - sqrtD) / (2.0 * a);
+                            if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
+                            if (t > 0.0) {
+                                glm::dvec3 newAnchor = newOrigin + newDir * t;
+                                m_panAnchorWorld = newAnchor;
+                                m_panAnchorDir = glm::normalize(newAnchor);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Update screen position
+            m_panScreenX = x;
+            m_panScreenY = y;
+            
         } else {
-            m_hasPanPrevHit = false;
+            // Fallback: screen-space pan (for sky drag)
+            double sensitivity = 0.0002 * m_navSpeed * GetAltitudeKm();
+            
+            glm::dvec3 camPos = m_camera.GetPositionECEF();
+            glm::dvec3 up = glm::normalize(camPos);
+            glm::dvec3 fwd, camUp, right;
+            m_camera.GetBasisVectors(fwd, camUp, right);
+            
+            glm::dvec3 moveDir = -right * dx + camUp * dy;
+            moveDir = moveDir - up * glm::dot(moveDir, up);
+            
+            if (glm::length(moveDir) > 1e-8) {
+                glm::dvec3 axis = glm::normalize(glm::cross(camPos, moveDir));
+                double angle = glm::length(moveDir) * sensitivity;
+                RotateCameraGreatCircle(axis, angle);
+                
+                m_lastPanAxis = axis;
+                m_lastPanAngle = angle;
+                m_lastPanTime = time;
+            }
         }
     }
     
-    // ========== ORBIT (Heading/Tilt) ==========
-    else if (m_dragMode == DragMode::Orbit) {
-        double sensitivity = 0.3 * m_navSpeed;
-        // Use smoothed input for orbit
-        double deltaHeading = -smoothDx * sensitivity;
-        double deltaTilt = smoothDy * sensitivity;
+    // ========== ORBIT (OrbitAction - Pivot-Centered Rotation) ==========
+    else if (m_actionMode == ActionMode::Orbit) {
+        double totalDx = x - m_orbitStartX;
+        double totalDy = y - m_orbitStartY;
+        
+        double deltaHeading = -totalDx * HEADING_SENSITIVITY * m_navSpeed;
+        double deltaTilt = totalDy * TILT_SENSITIVITY * m_navSpeed;
         
         if (m_lockNorth) deltaHeading = 0.0;
         
-        ApplyOrbit(deltaHeading, deltaTilt);
+        // Track velocity for momentum
+        m_headingVelocity = -dx * HEADING_SENSITIVITY * m_navSpeed / dt;
+        m_tiltVelocity = dy * TILT_SENSITIVITY * m_navSpeed / dt;
         
-        // Track velocity for momentum (with smoothing)
-        if (dt > 0.001) {
-            double hVel = deltaHeading / dt;
-            double tVel = deltaTilt / dt;
-            m_momentum.headingVel = glm::mix(m_momentum.headingVel, hVel, 0.4);
-            m_momentum.tiltVel = glm::mix(m_momentum.tiltVel, tVel, 0.4);
+        // PIVOT-CENTERED ROTATION (Google Earth style)
+        // Apply TOTAL rotation to BASELINE pivot-to-cam to prevent overshoot
+        if (m_hasOrbitPivot) {
+            // Get pivot local frame (from start, not current)
+            glm::dvec3 pivotUp = glm::normalize(m_orbitPivot);
+            glm::dvec3 pivotEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), pivotUp));
+            if (glm::length(pivotEast) < 0.1) pivotEast = glm::dvec3(1, 0, 0);
+            
+            // Get initial view direction for tilt axis
+            glm::dvec3 startViewDir = glm::normalize(-m_orbitStartPivotToCam);
+            glm::dvec3 tiltAxis = glm::normalize(glm::cross(pivotUp, startViewDir));
+            if (glm::length(tiltAxis) < 0.1) tiltAxis = pivotEast;
+            
+            // Apply TOTAL rotation to BASELINE vector (not current)
+            double headingRad = glm::radians(deltaHeading);
+            glm::dmat4 headingRot = glm::rotate(glm::dmat4(1.0), headingRad, pivotUp);
+            
+            double tiltRad = glm::radians(deltaTilt);
+            glm::dmat4 tiltRot = glm::rotate(glm::dmat4(1.0), tiltRad, tiltAxis);
+            
+            // Apply rotations to BASELINE pivot-to-camera vector
+            glm::dvec3 newPivotToCam = glm::dvec3(headingRot * tiltRot * glm::dvec4(m_orbitStartPivotToCam, 0.0));
+            glm::dvec3 newCamPos = m_orbitPivot + newPivotToCam;
+            
+            // Clamp altitude (camera uses KM units)
+            double newR = glm::length(newCamPos);
+            double minR = EARTH_RADIUS_KM + CAMERA_MIN_ALTITUDE_M / 1000.0;
+            if (newR < minR) newCamPos = glm::normalize(newCamPos) * minR;
+            
+            // Update camera position
+            double r = glm::length(newCamPos);
+            double lat = glm::degrees(std::asin(std::clamp(newCamPos.z / r, -1.0, 1.0)));
+            double lon = glm::degrees(std::atan2(newCamPos.y, newCamPos.x));
+            double altM = (r - EARTH_RADIUS_KM) * 1000.0;
+            
+            m_camera.SetLatLonAlt(lat, lon, altM);
+            
+            // DERIVE HEADING/TILT FROM CAMERA->PIVOT VECTOR (pivot stays centered)
+            glm::dvec3 finalCamPos = m_camera.GetPositionECEF();
+            glm::dvec3 camToPivot = m_orbitPivot - finalCamPos;
+            glm::dvec3 camUp = glm::normalize(finalCamPos);
+            
+            // Tilt = angle between camera-up and camera-to-pivot
+            glm::dvec3 camToPivotDir = glm::normalize(camToPivot);
+            double dotUp = glm::dot(camUp, camToPivotDir);
+            double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
+            newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+            
+            // Heading = azimuth of pivot relative to camera's local north
+            glm::dvec3 camEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), camUp));
+            if (glm::length(camEast) < 0.1) camEast = glm::dvec3(1, 0, 0);
+            glm::dvec3 camNorth = glm::cross(camUp, camEast);
+            
+            // Project camToPivot onto horizontal plane
+            glm::dvec3 horizDir = camToPivotDir - camUp * glm::dot(camToPivotDir, camUp);
+            if (glm::length(horizDir) > 1e-6) {
+                horizDir = glm::normalize(horizDir);
+                double headingRad = std::atan2(glm::dot(horizDir, camEast), glm::dot(horizDir, camNorth));
+                double newHeading = glm::degrees(headingRad);
+                while (newHeading < 0.0) newHeading += 360.0;
+                while (newHeading >= 360.0) newHeading -= 360.0;
+                
+                if (!m_lockNorth) {
+                    m_camera.SetHeading(newHeading);
+                }
+            }
+            m_camera.SetTilt(newTilt);
+        } else {
+            // No pivot - just update heading/tilt from deltas
+            double newHeading = m_orbitStartHeading + deltaHeading;
+            double newTilt = m_orbitStartTilt + deltaTilt;
+            
+            while (newHeading > 360.0) newHeading -= 360.0;
+            while (newHeading < 0.0) newHeading += 360.0;
+            newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+            
+            m_camera.SetHeading(newHeading);
+            m_camera.SetTilt(newTilt);
         }
     }
     
-    // ========== ZOOM (Right drag) ==========
-    else if (m_dragMode == DragMode::Zoom) {
-        double factor = 1.0 + (y - m_zoomStartY) * 0.005;
-        factor = std::clamp(factor, 0.5, 2.0);
-        ApplyZoom(factor);
+    // ========== ZOOM (Right Drag) ==========
+    else if (m_actionMode == ActionMode::Zoom) {
+        double factor = 1.0 + (y - m_zoomStartY) * ZOOM_DRAG_SENSITIVITY;
+        factor = std::clamp(factor, 0.9, 1.1);
+        
+        double altM = GetAltitudeM();
+        double newAltM = altM * factor;
+        newAltM = std::clamp(newAltM, CAMERA_MIN_ALTITUDE_M, CAMERA_MAX_ALTITUDE_M);
+        
+        double lat, lon, oldAlt;
+        m_camera.GetLatLonAlt(lat, lon, oldAlt);
+        m_camera.SetLatLonAlt(lat, lon, newAltM);
+        
         m_zoomStartY = y;
+        m_zoomVelocity = (newAltM - altM) / altM / dt;
     }
 }
 
 // ============================================================================
-// SCROLL (Zoom or Shift+Tilt)
+// SCROLL (MapCameraManipulator::OnMouseWheel)
 // ============================================================================
 void FlightController::OnScroll(double xoffset, double yoffset) {
-    m_momentum.active = false;
-    m_flyTo.active = false;
+    StopThrowAnimation();
+    m_flyToActive = false;
     
-    // Shift+Scroll = Tilt change (with altitude-based limit)
+    // Shift+Scroll = Tilt
     if (m_shiftDown) {
-        double deltaTilt = yoffset * 5.0; // 5 degrees per notch
-        double t = m_camera.GetTilt() - deltaTilt;
-        
-        // Apply altitude-based tilt limit
-        glm::dvec3 camPos = m_camera.GetPositionECEF();
-        double altKm = glm::length(camPos) - GLOBE_RADIUS_KM;
-        double maxTilt = GetMaxTiltForAltitude(altKm);
-        
-        t = std::clamp(t, 0.1, maxTilt);
-        m_camera.SetTilt(t);
+        double deltaTilt = yoffset * 5.0;
+        double newTilt = m_camera.GetTilt() - deltaTilt;
+        newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+        m_camera.SetTilt(newTilt);
         return;
     }
     
-    // Normal scroll = Zoom to cursor (point-stable, logarithmic)
-    double scrollDir = m_wheelReverse ? -yoffset : yoffset;
+    // Logarithmic zoom (pre-clamp to prevent log(0) or log(negative))
+    double altM = std::max(GetAltitudeM(), CAMERA_MIN_ALTITUDE_M);
+    double logAlt = std::log(altM);
+    double logStep = yoffset * ZOOM_SCROLL_STEP;
+    double newAltM = std::exp(logAlt - logStep);
+    newAltM = std::clamp(newAltM, CAMERA_MIN_ALTITUDE_M, CAMERA_MAX_ALTITUDE_M);
     
-    // Get zoom target under cursor
-    glm::dvec3 origin, dir;
-    m_camera.GetRay(m_mouseX, m_mouseY, m_windowW, m_windowH, origin, dir);
-    dir = glm::normalize(dir);
-    
-    glm::dvec3 target;
-    bool hasTarget = false;
-    if (m_pickCallback) {
-        hasTarget = m_pickCallback(m_mouseX, m_mouseY, target);
-    }
-    if (!hasTarget) {
-        hasTarget = IntersectGlobe(origin, dir, target);
-    }
-    
-    if (hasTarget && m_wheelZoomToCursor) {
-        // Point-stable zoom with LOGARITHMIC interpolation
-        // Human perception of distance is logarithmic, not linear
-        glm::dvec3 camPos = m_camera.GetPositionECEF();
-        double camAlt = glm::length(camPos) - GLOBE_RADIUS_KM;
+    // Point-stable zoom (zoom toward/away from cursor - BOTH directions)
+    if (m_zoomToCursor) {
+        glm::dvec3 origin, dir;
+        ScreenToRay(m_mouseX, m_mouseY, origin, dir);
         
-        // Logarithmic zoom: equal scroll = equal perceived zoom at all distances
-        double logAlt = std::log(camAlt);
-        double logStep = scrollDir * 0.3; // Log-space step
-        double newLogAlt = logAlt - logStep;
-        double newAlt = std::exp(newLogAlt);
-        newAlt = std::clamp(newAlt, MIN_CAMERA_ALT_M / 1000.0, MAX_CAMERA_ALT_M / 1000.0);
+        glm::dvec3 target;
+        bool hasTarget = false;
         
-        // Calculate linear factor for position interpolation
-        double zoomFactor = newAlt / camAlt;
-        
-        // Interpolate camera position toward target based on zoom
-        double t = 1.0 - zoomFactor; // How much to move toward target
-        
-        glm::dvec3 camDir = glm::normalize(camPos);
-        glm::dvec3 targetDir = glm::normalize(target);
-        
-        // Spherical interpolation on unit sphere
-        double dot = glm::dot(camDir, targetDir);
-        dot = std::clamp(dot, -1.0, 1.0);
-        double theta = std::acos(dot);
-        
-        glm::dvec3 newDir;
-        if (theta < 1e-6) {
-            newDir = camDir;
-        } else {
-            // Slerp: move t fraction toward target
-            double moveAngle = theta * t;
-            glm::dvec3 axis = glm::cross(camDir, targetDir);
-            if (glm::length(axis) > 1e-6) {
-                axis = glm::normalize(axis);
-                glm::dmat4 rot = glm::rotate(glm::dmat4(1.0), moveAngle, axis);
-                newDir = glm::normalize(glm::dvec3(rot * glm::dvec4(camDir, 0.0)));
-            } else {
-                newDir = camDir;
-            }
+        if (m_pickCallback) {
+            hasTarget = m_pickCallback(m_mouseX, m_mouseY, target);
+        }
+        if (!hasTarget) {
+            hasTarget = RayGlobeIntersect(origin, dir, target);
         }
         
-        double newR = GLOBE_RADIUS_KM + newAlt;
-        glm::dvec3 newPos = newDir * newR;
-        
-        double lat = glm::degrees(std::asin(newPos.z / newR));
-        double lon = glm::degrees(std::atan2(newPos.y, newPos.x));
-        
-        m_camera.SetLatLonAlt(lat, lon, newAlt * 1000.0);
-    } else {
-        // Fallback: zoom along camera forward (logarithmic)
-        glm::dvec3 camPos = m_camera.GetPositionECEF();
-        double camAlt = glm::length(camPos) - GLOBE_RADIUS_KM;
-        double logAlt = std::log(camAlt);
-        double logStep = scrollDir * 0.3;
-        double newAlt = std::exp(logAlt - logStep);
-        newAlt = std::clamp(newAlt, MIN_CAMERA_ALT_M / 1000.0, MAX_CAMERA_ALT_M / 1000.0);
-        ApplyZoom(newAlt / camAlt);
+        if (hasTarget) {
+            glm::dvec3 camPos = m_camera.GetPositionECEF();
+            glm::dvec3 camDir = glm::normalize(camPos);
+            glm::dvec3 targetDir = glm::normalize(target);
+            
+            double dot = std::clamp(glm::dot(camDir, targetDir), -1.0, 1.0);
+            double theta = std::acos(dot);
+            
+            if (theta > 1e-6) {
+                double zoomRatio = newAltM / altM;
+                // For zoom in (yoffset > 0): move toward target
+                // For zoom out (yoffset < 0): move away from target
+                double moveAngle = theta * (1.0 - zoomRatio) * 0.4;
+                
+                glm::dvec3 axis = glm::cross(camDir, targetDir);
+                if (glm::length(axis) > 1e-8) {
+                    axis = glm::normalize(axis);
+                    RotateCameraGreatCircle(axis, moveAngle);
+                }
+            }
+        }
     }
+    
+    double lat, lon, oldAlt;
+    m_camera.GetLatLonAlt(lat, lon, oldAlt);
+    m_camera.SetLatLonAlt(lat, lon, newAltM);
 }
 
 // ============================================================================
-// DOUBLE CLICK (FlyTo)
+// DOUBLE CLICK
 // ============================================================================
 void FlightController::OnDoubleClick(double x, double y) {
-    m_momentum.active = false;
-    m_flyTo.active = false;
+    StopThrowAnimation();
+    m_flyToActive = false;
     
     glm::dvec3 origin, dir;
-    m_camera.GetRay(x, y, m_windowW, m_windowH, origin, dir);
+    ScreenToRay(x, y, origin, dir);
     
-    glm::dvec3 hit;
-    bool onGlobe = false;
+    glm::dvec3 hitPoint;
+    bool hit = false;
     
     if (m_pickCallback) {
-        onGlobe = m_pickCallback(x, y, hit);
+        hit = m_pickCallback(x, y, hitPoint);
     }
-    if (!onGlobe) {
-        onGlobe = IntersectGlobe(origin, glm::normalize(dir), hit);
+    if (!hit) {
+        hit = RayGlobeIntersect(origin, dir, hitPoint);
     }
     
-    if (onGlobe) {
-        double r = glm::length(hit);
-        double lat = glm::degrees(std::asin(hit.z / r));
-        double lon = glm::degrees(std::atan2(hit.y, hit.x));
+    if (hit) {
+        double r = glm::length(hitPoint);
+        double lat = glm::degrees(std::asin(hitPoint.z / r));
+        double lon = glm::degrees(std::atan2(hitPoint.y, hitPoint.x));
+        double newAltM = std::max(GetAltitudeM() * 0.25, CAMERA_MIN_ALTITUDE_M);
         
-        // Zoom in 4x - use current altitude / 4 (simpler, more reliable)
-        glm::dvec3 camPos = m_camera.GetPositionECEF();
-        double currentAltKm = glm::length(camPos) - GLOBE_RADIUS_KM;
-        double newAltM = std::max(currentAltKm * 0.25 * 1000.0, MIN_CAMERA_ALT_M);
-        
-        FlyToLocation(lat, lon, newAltM, m_camera.GetHeading(), m_camera.GetTilt(), 1.5);
+        FlyTo(lat, lon, newAltM, m_camera.GetHeading(), m_camera.GetTilt(), 1.5);
     }
 }
 
@@ -496,392 +605,243 @@ void FlightController::OnDoubleClick(double x, double y) {
 // KEYBOARD
 // ============================================================================
 void FlightController::OnKeyDown(int key) {
+    double altM = GetAltitudeM();
+    double moveAngle = altM * 0.00001 * m_navSpeed;
+    
     glm::dvec3 pos = m_camera.GetPositionECEF();
-    double alt = glm::length(pos) - GLOBE_RADIUS_KM;
-    double speed = std::max(alt * 0.001, 0.0001) * m_navSpeed;
-    
-    glm::dvec3 f, u, r;
-    m_camera.GetBasisVectors(f, u, r);
-    
     glm::dvec3 up = glm::normalize(pos);
-    glm::dvec3 fHoriz = glm::normalize(f - up * glm::dot(f, up));
-    glm::dvec3 rHoriz = glm::normalize(glm::cross(fHoriz, up));
+    glm::dvec3 fwd, camUp, right;
+    m_camera.GetBasisVectors(fwd, camUp, right);
+    
+    glm::dvec3 fwdH = fwd - up * glm::dot(fwd, up);
+    if (glm::length(fwdH) > 1e-6) fwdH = glm::normalize(fwdH);
+    glm::dvec3 rightH = glm::cross(fwdH, up);
     
     glm::dvec3 moveDir{0.0};
     
     switch (key) {
-        case GLFW_KEY_LEFT:  moveDir = -rHoriz; break;
-        case GLFW_KEY_RIGHT: moveDir = rHoriz; break;
-        case GLFW_KEY_UP:    moveDir = fHoriz; break;
-        case GLFW_KEY_DOWN:  moveDir = -fHoriz; break;
-        case GLFW_KEY_PAGE_UP:   ApplyZoom(0.9); return;
-        case GLFW_KEY_PAGE_DOWN: ApplyZoom(1.1); return;
+        case GLFW_KEY_LEFT:  case GLFW_KEY_A: moveDir = -rightH; break;
+        case GLFW_KEY_RIGHT: case GLFW_KEY_D: moveDir = rightH; break;
+        case GLFW_KEY_UP:    case GLFW_KEY_W: moveDir = fwdH; break;
+        case GLFW_KEY_DOWN:  case GLFW_KEY_S: moveDir = -fwdH; break;
+        case GLFW_KEY_Q: case GLFW_KEY_PAGE_UP: {
+            double newAlt = altM * 0.9;
+            double lat, lon, oldAlt;
+            m_camera.GetLatLonAlt(lat, lon, oldAlt);
+            m_camera.SetLatLonAlt(lat, lon, std::max(newAlt, CAMERA_MIN_ALTITUDE_M));
+            return;
+        }
+        case GLFW_KEY_E: case GLFW_KEY_PAGE_DOWN: {
+            double newAlt = altM * 1.1;
+            double lat, lon, oldAlt;
+            m_camera.GetLatLonAlt(lat, lon, oldAlt);
+            m_camera.SetLatLonAlt(lat, lon, std::min(newAlt, CAMERA_MAX_ALTITUDE_M));
+            return;
+        }
     }
     
     if (glm::length(moveDir) > 0.001) {
-        glm::dvec3 axis = glm::cross(pos, moveDir);
-        if (glm::length(axis) > 0.001) {
-            ApplyPanRotation(glm::normalize(axis), speed * 0.1);
-        }
+        glm::dvec3 axis = glm::normalize(glm::cross(pos, moveDir));
+        RotateCameraGreatCircle(axis, moveAngle);
     }
 }
 
-void FlightController::OnKeyUp(int key) {
-    // Nothing needed
+void FlightController::OnKeyUp(int key) {}
+
+// ============================================================================
+// THROW ANIMATION (DampedVelocityAction)
+// ============================================================================
+void FlightController::StartThrowAnimation(ThrowAnimationType type, double time) {
+    m_throwActive = true;
+    m_throwStartTime = time;
+    m_throwType = type;
+}
+
+void FlightController::StopThrowAnimation() {
+    m_throwActive = false;
+    m_throwType = ThrowAnimationType::None;
+}
+
+void FlightController::UpdateThrowAnimation(double dt, double time) {
+    if (!m_throwActive) return;
+    
+    double elapsed = time - m_throwStartTime;
+    if (elapsed > MOMENTUM_TIMEOUT_SEC) {
+        StopThrowAnimation();
+        return;
+    }
+    
+    double decay = std::exp(-DAMPING_COEFFICIENT * elapsed);
+    
+    switch (m_throwType) {
+        case ThrowAnimationType::Rotation: {
+            double vel = m_throwAngularVelocity * decay;
+            if (std::abs(vel) < MIN_VELOCITY_THRESHOLD) {
+                StopThrowAnimation();
+            } else {
+                RotateCameraGreatCircle(m_throwRotationAxis, vel * dt);
+            }
+            break;
+        }
+        
+        case ThrowAnimationType::Arcball: {
+            double headingVel = m_throwHeadingVel * decay;
+            double tiltVel = m_throwTiltVel * decay;
+            
+            if (std::abs(headingVel) < 0.1 && std::abs(tiltVel) < 0.1) {
+                StopThrowAnimation();
+            } else {
+                double newHeading = m_camera.GetHeading() + headingVel * dt;
+                double newTilt = m_camera.GetTilt() + tiltVel * dt;
+                
+                while (newHeading > 360.0) newHeading -= 360.0;
+                while (newHeading < 0.0) newHeading += 360.0;
+                newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+                
+                m_camera.SetHeading(newHeading);
+                m_camera.SetTilt(newTilt);
+            }
+            break;
+        }
+        
+        case ThrowAnimationType::Zoom: {
+            double vel = m_throwZoomVel * decay;
+            if (std::abs(vel) < 0.01) {
+                StopThrowAnimation();
+            } else {
+                double altM = GetAltitudeM();
+                // Positive velocity = zoom out (altitude increases)
+                // Negative velocity = zoom in (altitude decreases)
+                double newAltM = altM * std::exp(vel * dt);
+                newAltM = std::clamp(newAltM, CAMERA_MIN_ALTITUDE_M, CAMERA_MAX_ALTITUDE_M);
+                
+                double lat, lon, oldAlt;
+                m_camera.GetLatLonAlt(lat, lon, oldAlt);
+                m_camera.SetLatLonAlt(lat, lon, newAltM);
+            }
+            break;
+        }
+        
+        default:
+            StopThrowAnimation();
+            break;
+    }
 }
 
 // ============================================================================
-// APPLY PAN ROTATION
+// FLY TO (CameraManager::FlyCameraTo)
 // ============================================================================
-void FlightController::ApplyPanRotation(const glm::dvec3& axis, double angle) {
+void FlightController::FlyTo(double lat, double lon, double altM,
+                              double heading, double tilt, double duration,
+                              TrajectoryMode mode) {
+    StopThrowAnimation();
+    
     glm::dvec3 pos = m_camera.GetPositionECEF();
-    glm::dvec3 fwd, up, right;
-    m_camera.GetBasisVectors(fwd, up, right);
+    double r = glm::length(pos);
     
-    // Rotate position and forward vector
-    glm::dmat4 rot = glm::rotate(glm::dmat4(1.0), angle, axis);
-    glm::dvec3 newPos = glm::dvec3(rot * glm::dvec4(pos, 1.0));
-    glm::dvec3 newFwd = glm::dvec3(rot * glm::dvec4(fwd, 0.0));
+    m_flyToFromLat = glm::degrees(std::asin(pos.z / r));
+    m_flyToFromLon = glm::degrees(std::atan2(pos.y, pos.x));
+    m_flyToFromAlt = (r - EARTH_RADIUS_KM) * 1000.0;
+    m_flyToFromHeading = m_camera.GetHeading();
+    m_flyToFromTilt = m_camera.GetTilt();
     
-    // Convert back to LLA
-    double r = glm::length(newPos);
-    double lat = glm::degrees(std::asin(newPos.z / r));
-    double lon = glm::degrees(std::atan2(newPos.y, newPos.x));
-    double alt = (r - GLOBE_RADIUS_KM) * 1000.0; // meters
+    m_flyToToLat = lat;
+    m_flyToToLon = lon;
+    m_flyToToAlt = altM;
+    m_flyToToHeading = heading;
+    m_flyToToTilt = tilt;
     
-    // Compute new heading/tilt
-    double heading, tilt;
-    ComputeHeadingTilt(newPos, newFwd, m_camera.GetHeading(), heading, tilt);
+    m_flyToDistance = CalculateGreatCircleDistance(m_flyToFromLat, m_flyToFromLon, lat, lon);
+    m_flyToMode = mode;
     
-    // Apply
+    // Calculate peak altitude for parabolic trajectory
+    if (mode == TrajectoryMode::Parabolic && m_flyToDistance > 50.0) {
+        double maxAlt = std::max(m_flyToFromAlt, altM);
+        m_flyToPeakAlt = maxAlt + std::min(m_flyToDistance * 500.0, 5000000.0);
+    } else {
+        m_flyToPeakAlt = 0.0;
+    }
+    
+    // Duration guard - prevent division by zero
+    m_flyToDuration = std::max(duration, 0.1);
+    m_flyToStartTime = 0.0;
+    m_flyToActive = true;
+}
+
+void FlightController::SetCameraTo(double lat, double lon, double altM,
+                                    double heading, double tilt) {
+    StopThrowAnimation();
+    m_flyToActive = false;
+    
+    m_camera.SetLatLonAlt(lat, lon, altM);
+    m_camera.SetHeading(heading);
+    m_camera.SetTilt(tilt);
+}
+
+void FlightController::StopAnimation() {
+    StopThrowAnimation();
+    m_flyToActive = false;
+}
+
+void FlightController::UpdateFlyToAnimation(double time) {
+    if (!m_flyToActive) return;
+    
+    if (m_flyToStartTime == 0.0) {
+        m_flyToStartTime = time;
+    }
+    
+    double t = (time - m_flyToStartTime) / m_flyToDuration;
+    if (t >= 1.0) {
+        t = 1.0;
+        m_flyToActive = false;
+    }
+    
+    double st = EaseInOutCubic(t);
+    
+    // Interpolate lat/lon
+    double lat = glm::mix(m_flyToFromLat, m_flyToToLat, st);
+    
+    double lonDiff = m_flyToToLon - m_flyToFromLon;
+    if (lonDiff > 180.0) lonDiff -= 360.0;
+    if (lonDiff < -180.0) lonDiff += 360.0;
+    double lon = m_flyToFromLon + lonDiff * st;
+    
+    // Altitude with parabolic arc
+    double alt;
+    if (m_flyToMode == TrajectoryMode::Parabolic && m_flyToPeakAlt > 0.0) {
+        double arcT = 4.0 * st * (1.0 - st);
+        double baseAlt = glm::mix(m_flyToFromAlt, m_flyToToAlt, st);
+        alt = baseAlt + (m_flyToPeakAlt - baseAlt) * arcT;
+    } else {
+        alt = glm::mix(m_flyToFromAlt, m_flyToToAlt, st);
+    }
+    
+    // Heading with wrap
+    double h0 = m_flyToFromHeading;
+    double h1 = m_flyToToHeading;
+    double hDiff = h1 - h0;
+    if (hDiff > 180.0) h1 -= 360.0;
+    if (hDiff < -180.0) h1 += 360.0;
+    double heading = glm::mix(h0, h1, st);
+    
+    double tilt = glm::mix(m_flyToFromTilt, m_flyToToTilt, st);
+    
     m_camera.SetLatLonAlt(lat, lon, alt);
     m_camera.SetHeading(heading);
     m_camera.SetTilt(tilt);
 }
 
 // ============================================================================
-// APPLY ORBIT (Pivot-centered rotation - Google Earth style)
-// ============================================================================
-void FlightController::ApplyOrbit(double deltaHeading, double deltaTilt) {
-    // Get altitude-based tilt limit
-    glm::dvec3 camPos = m_camera.GetPositionECEF();
-    double altKm = glm::length(camPos) - GLOBE_RADIUS_KM;
-    double maxTilt = GetMaxTiltForAltitude(altKm);
-    
-    if (!m_hasOrbitPivot) {
-        // Fallback: just change heading/tilt without moving camera
-        double h = m_camera.GetHeading() + deltaHeading;
-        double t = m_camera.GetTilt() + deltaTilt;
-        while (h > 360.0) h -= 360.0;
-        while (h < 0.0) h += 360.0;
-        t = std::clamp(t, 0.1, maxTilt);
-        m_camera.SetHeading(h);
-        m_camera.SetTilt(t);
-        return;
-    }
-
-    // Get current camera state (camPos already defined above)
-    double heading = m_camera.GetHeading();
-    double tilt = m_camera.GetTilt();
-    
-    // Vector from pivot to camera
-    glm::dvec3 pivotToCam = camPos - m_orbitPivot;
-    double dist = glm::length(pivotToCam);
-    if (dist < 1e-6) return;
-    
-    // Get pivot's local ENU frame
-    glm::dvec3 pivotUp = glm::normalize(m_orbitPivot);
-    glm::dvec3 pivotEast, pivotNorth;
-    
-    double upZ = std::abs(pivotUp.z);
-    if (upZ > 0.999) {
-        double hRad = glm::radians(heading);
-        pivotEast = glm::dvec3(-std::sin(hRad), std::cos(hRad), 0.0);
-        pivotNorth = (pivotUp.z > 0 ? 1.0 : -1.0) * glm::dvec3(-std::cos(hRad), -std::sin(hRad), 0.0);
-    } else {
-        pivotEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), pivotUp));
-        pivotNorth = glm::cross(pivotUp, pivotEast);
-    }
-    
-    // Rotate camera position around pivot
-    // Heading rotation: around pivot's up axis
-    double headingRad = glm::radians(deltaHeading);
-    glm::dmat4 headingRot = glm::rotate(glm::dmat4(1.0), -headingRad, pivotUp);
-    
-    // Tilt rotation: around the horizontal axis perpendicular to view
-    glm::dvec3 viewDir = glm::normalize(-pivotToCam);
-    glm::dvec3 tiltAxis = glm::normalize(glm::cross(pivotUp, viewDir));
-    if (glm::length(tiltAxis) < 1e-6) tiltAxis = pivotEast;
-    
-    double tiltRad = glm::radians(deltaTilt);
-    glm::dmat4 tiltRot = glm::rotate(glm::dmat4(1.0), tiltRad, tiltAxis);
-    
-    // Apply rotations
-    glm::dvec3 newPivotToCam = glm::dvec3(headingRot * tiltRot * glm::dvec4(pivotToCam, 0.0));
-    glm::dvec3 newCamPos = m_orbitPivot + newPivotToCam;
-    
-    // Ensure camera stays above ground
-    double newR = glm::length(newCamPos);
-    double minR = GLOBE_RADIUS_KM + MIN_CAMERA_ALT_M / 1000.0;
-    if (newR < minR) {
-        newCamPos = glm::normalize(newCamPos) * minR;
-    }
-    
-    // Compute new forward (looking at pivot)
-    glm::dvec3 newFwd = glm::normalize(m_orbitPivot - newCamPos);
-    
-    // Convert to LLA
-    double r = glm::length(newCamPos);
-    double lat = glm::degrees(std::asin(newCamPos.z / r));
-    double lon = glm::degrees(std::atan2(newCamPos.y, newCamPos.x));
-    double alt = (r - GLOBE_RADIUS_KM) * 1000.0;
-    
-    // Compute heading/tilt from new position looking at pivot
-    double newHeading, newTilt;
-    ComputeHeadingTilt(newCamPos, newFwd, heading + deltaHeading, newHeading, newTilt);
-    
-    // Clamp tilt with altitude-based limit
-    double newAltKm = (r - GLOBE_RADIUS_KM);
-    double newMaxTilt = GetMaxTiltForAltitude(newAltKm);
-    newTilt = std::clamp(newTilt, 0.1, newMaxTilt);
-    
-    m_camera.SetLatLonAlt(lat, lon, alt);
-    m_camera.SetHeading(newHeading);
-    m_camera.SetTilt(newTilt);
-    
-    // Screen stability correction: keep pivot under original screen position
-    // Project pivot to screen and compute correction if needed
-    glm::dvec3 pivotDir = glm::normalize(m_orbitPivot - newCamPos);
-    glm::dvec3 fwd, up, right;
-    m_camera.GetBasisVectors(fwd, up, right);
-    
-    // Compute pivot's position in camera space
-    double dotFwd = glm::dot(pivotDir, fwd);
-    if (dotFwd > 0.1) { // Pivot is in front of camera
-        double dotRight = glm::dot(pivotDir, right);
-        double dotUp = glm::dot(pivotDir, up);
-        
-        // Convert to screen coordinates (approximate)
-        double fov = 45.0; // Assume default FOV
-        double aspect = static_cast<double>(m_windowW) / m_windowH;
-        double tanHalfFov = std::tan(glm::radians(fov / 2.0));
-        
-        double screenX = m_windowW / 2.0 + (dotRight / dotFwd / tanHalfFov / aspect) * (m_windowW / 2.0);
-        double screenY = m_windowH / 2.0 - (dotUp / dotFwd / tanHalfFov) * (m_windowH / 2.0);
-        
-        // Compute screen error
-        double errorX = m_orbitPivotScreenPos.x - screenX;
-        double errorY = m_orbitPivotScreenPos.y - screenY;
-        double errorMag = std::sqrt(errorX * errorX + errorY * errorY);
-        
-        // Apply micro-pan correction if error is significant but not too large
-        if (errorMag > 1.0 && errorMag < 50.0) {
-            double corrStrength = std::min(0.3, errorMag / 100.0);
-            double anglePerPixel = glm::radians(fov) / m_windowH;
-            
-            double corrYaw = -errorX * anglePerPixel * corrStrength;
-            double corrPitch = errorY * anglePerPixel * corrStrength;
-            
-            // Apply small rotation to correct pivot position
-            glm::dvec3 corrAxis = right * corrPitch + up * corrYaw;
-            double corrAngle = glm::length(corrAxis);
-            
-            if (corrAngle > 1e-8 && corrAngle < 0.05) {
-                corrAxis = glm::normalize(corrAxis);
-                ApplyPanRotation(corrAxis, corrAngle);
-            }
-        }
-    }
-}
-
-// ============================================================================
-// APPLY ZOOM
-// ============================================================================
-void FlightController::ApplyZoom(double factor) {
-    glm::dvec3 pos = m_camera.GetPositionECEF();
-    double r = glm::length(pos);
-    double alt = r - GLOBE_RADIUS_KM;
-    
-    double newAlt = alt * factor;
-    newAlt = std::clamp(newAlt, MIN_CAMERA_ALT_M / 1000.0, MAX_CAMERA_ALT_M / 1000.0);
-    
-    double newR = GLOBE_RADIUS_KM + newAlt;
-    glm::dvec3 newPos = glm::normalize(pos) * newR;
-    
-    double lat = glm::degrees(std::asin(newPos.z / newR));
-    double lon = glm::degrees(std::atan2(newPos.y, newPos.x));
-    
-    m_camera.SetLatLonAlt(lat, lon, newAlt * 1000.0);
-}
-
-// ============================================================================
-// FLY TO
-// ============================================================================
-void FlightController::FlyToLocation(double lat, double lon, double altMeters,
-                                      double heading, double tilt, double duration) {
-    m_momentum.active = false;
-    
-    glm::dvec3 pos = m_camera.GetPositionECEF();
-    double r = glm::length(pos);
-    
-    m_flyTo.startLat = glm::degrees(std::asin(pos.z / r));
-    m_flyTo.startLon = glm::degrees(std::atan2(pos.y, pos.x));
-    m_flyTo.startAlt = (r - GLOBE_RADIUS_KM) * 1000.0;
-    m_flyTo.startHeading = m_camera.GetHeading();
-    m_flyTo.startTilt = m_camera.GetTilt();
-    
-    m_flyTo.endLat = lat;
-    m_flyTo.endLon = lon;
-    m_flyTo.endAlt = altMeters;
-    m_flyTo.endHeading = heading;
-    m_flyTo.endTilt = tilt;
-    
-    m_flyTo.duration = duration;
-    m_flyTo.startTime = 0.0; // Will be set on first Update
-    m_flyTo.active = true;
-}
-
-void FlightController::StopAnimation() {
-    m_flyTo.active = false;
-    m_momentum.active = false;
-}
-
-// ============================================================================
-// UPDATE (Call every frame)
+// UPDATE (Called every frame)
 // ============================================================================
 void FlightController::Update(double dt, double currentTime) {
-    // ========== FlyTo Animation ==========
-    if (m_flyTo.active) {
-        if (m_flyTo.startTime == 0.0) {
-            m_flyTo.startTime = currentTime;
-        }
-        
-        double t = (currentTime - m_flyTo.startTime) / m_flyTo.duration;
-        if (t >= 1.0) {
-            t = 1.0;
-            m_flyTo.active = false;
-        }
-        
-        double st = easing::CubicOut(t);
-        
-        double lat = glm::mix(m_flyTo.startLat, m_flyTo.endLat, st);
-        double lon = glm::mix(m_flyTo.startLon, m_flyTo.endLon, st);
-        double alt = glm::mix(m_flyTo.startAlt, m_flyTo.endAlt, st);
-        
-        // Handle heading wrap-around
-        double h0 = m_flyTo.startHeading;
-        double h1 = m_flyTo.endHeading;
-        double hDiff = h1 - h0;
-        if (hDiff > 180.0) h1 -= 360.0;
-        if (hDiff < -180.0) h1 += 360.0;
-        
-        double heading = glm::mix(h0, h1, st);
-        double tilt = glm::mix(m_flyTo.startTilt, m_flyTo.endTilt, st);
-        
-        m_camera.SetLatLonAlt(lat, lon, alt);
-        m_camera.SetHeading(heading);
-        m_camera.SetTilt(tilt);
+    if (m_flyToActive) {
+        UpdateFlyToAnimation(currentTime);
         return;
     }
     
-    // ========== Momentum (Pan, Orbit, or Zoom) ==========
-    if (m_momentum.active && m_dragMode == DragMode::None) {
-        double elapsed = currentTime - m_momentum.startTime;
-        
-        // Friction-based deceleration (more natural than exponential decay)
-        // v(t) = v0 * e^(-friction * t)
-        double decay = std::exp(-m_momentum.friction * elapsed);
-        
-        if (m_momentum.zoomMode) {
-            // Zoom momentum (Google Earth ZoomThrowAnimation)
-            double vel = m_momentum.zoomVelocity * decay;
-            
-            if (std::abs(vel) < 0.01) { // Log-space threshold
-                m_momentum.active = false;
-                m_momentum.zoomVelocity = 0.0;
-                m_momentum.zoomMode = false;
-            } else {
-                // Apply zoom with decayed velocity
-                glm::dvec3 camPos = m_camera.GetPositionECEF();
-                double camAlt = glm::length(camPos) - GLOBE_RADIUS_KM;
-                
-                double logAlt = std::log(camAlt);
-                double newLogAlt = logAlt - vel * dt;
-                double newAlt = std::exp(newLogAlt);
-                newAlt = std::clamp(newAlt, MIN_CAMERA_ALT_M / 1000.0, MAX_CAMERA_ALT_M / 1000.0);
-                
-                if (m_momentum.hasZoomTarget) {
-                    // Point-stable zoom momentum
-                    double zoomFactor = newAlt / camAlt;
-                    double t = 1.0 - zoomFactor;
-                    
-                    glm::dvec3 camDir = glm::normalize(camPos);
-                    glm::dvec3 targetDir = glm::normalize(m_momentum.zoomTarget);
-                    
-                    double dotVal = std::clamp(glm::dot(camDir, targetDir), -1.0, 1.0);
-                    double theta = std::acos(dotVal);
-                    
-                    glm::dvec3 newDir = camDir;
-                    if (theta > 1e-6) {
-                        double moveAngle = theta * t;
-                        glm::dvec3 axis = glm::cross(camDir, targetDir);
-                        if (glm::length(axis) > 1e-6) {
-                            axis = glm::normalize(axis);
-                            glm::dmat4 rot = glm::rotate(glm::dmat4(1.0), moveAngle, axis);
-                            newDir = glm::normalize(glm::dvec3(rot * glm::dvec4(camDir, 0.0)));
-                        }
-                    }
-                    
-                    double newR = GLOBE_RADIUS_KM + newAlt;
-                    glm::dvec3 newPos = newDir * newR;
-                    
-                    double lat = glm::degrees(std::asin(newPos.z / newR));
-                    double lon = glm::degrees(std::atan2(newPos.y, newPos.x));
-                    m_camera.SetLatLonAlt(lat, lon, newAlt * 1000.0);
-                } else {
-                    // Simple zoom along current direction
-                    ApplyZoom(newAlt / camAlt);
-                }
-            }
-        } else if (m_momentum.orbitMode) {
-            // Orbit momentum - heading and tilt
-            double hVel = m_momentum.headingVel * decay;
-            double tVel = m_momentum.tiltVel * decay;
-            
-            double speed = std::sqrt(hVel * hVel + tVel * tVel);
-            if (speed < 0.1) { // deg/s threshold
-                m_momentum.active = false;
-                m_momentum.headingVel = 0.0;
-                m_momentum.tiltVel = 0.0;
-            } else {
-                // Apply orbit with decayed velocities
-                double h = m_camera.GetHeading() + hVel * dt;
-                double t = m_camera.GetTilt() + tVel * dt;
-                
-                while (h > 360.0) h -= 360.0;
-                while (h < 0.0) h += 360.0;
-                t = std::clamp(t, 0.1, 85.0);
-                
-                m_camera.SetHeading(h);
-                m_camera.SetTilt(t);
-            }
-        } else {
-            // Pan momentum - great circle rotation
-            double vel = m_momentum.velocity * decay;
-            
-            if (std::abs(vel) < m_momentum.minVelocity) {
-                m_momentum.active = false;
-                m_momentum.velocity = 0.0;
-            } else {
-                double angle = vel * dt;
-                ApplyPanRotation(m_momentum.axis, angle);
-            }
-        }
-        
-        // Maximum momentum duration (safety)
-        if (elapsed > 3.0) {
-            m_momentum.active = false;
-        }
+    if (m_throwActive && !m_isDragging) {
+        UpdateThrowAnimation(dt, currentTime);
     }
 }
 

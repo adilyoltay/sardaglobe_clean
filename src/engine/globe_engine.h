@@ -6,6 +6,7 @@
 #include "../scheduling/lod_selector.h"
 #include "../rendering/texture_manager.h"
 #include "../rendering/shader_manager.h"
+#include "../io/dem_manager.h"
 #include "../camera/earth_camera.h"
 #include "../camera/flight_controller.h"
 #include <glm/glm.hpp>
@@ -63,6 +64,7 @@ private:
     static void ScrollCallback(GLFWwindow* window, double xoffset, double yoffset);
     static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
     static void CursorPosCallback(GLFWwindow* window, double xpos, double ypos);
+    static void FramebufferSizeCallback(GLFWwindow* window, int width, int height);
     
     Config config_;
     GLFWwindow* window_ = nullptr;
@@ -75,6 +77,7 @@ private:
     std::unique_ptr<TileScheduler> scheduler_;
     std::unique_ptr<TextureManager> textureManager_;
     std::unique_ptr<ShaderManager> shaderManager_;
+    std::unique_ptr<DemManager> demManager_;
     LodSelector lodSelector_;
     
     // Tiles

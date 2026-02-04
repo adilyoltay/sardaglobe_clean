@@ -52,6 +52,7 @@ bool GlobeEngine::Init() {
     glfwSetScrollCallback(window_, ScrollCallback);
     glfwSetMouseButtonCallback(window_, MouseButtonCallback);
     glfwSetCursorPosCallback(window_, CursorPosCallback);
+    glfwSetFramebufferSizeCallback(window_, FramebufferSizeCallback);
     
     // Init GLAD
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -79,6 +80,16 @@ bool GlobeEngine::Init() {
     scheduler_ = std::make_unique<TileScheduler>(config_);
     textureManager_ = std::make_unique<TextureManager>(config_);
     shaderManager_ = std::make_unique<ShaderManager>();
+    
+    // Init DEM manager for terrain elevation
+    if (config_.demEnabled) {
+        DemManager::Config demConfig;
+        demConfig.baseUrl = config_.demBaseUrl;
+        demConfig.meshN = config_.demMeshN;
+        demConfig.cacheSize = config_.demCacheSize;
+        demConfig.debug = config_.demDebug;
+        demManager_ = std::make_unique<DemManager>(demConfig);
+    }
     
     // Set scheduler upload callback
     scheduler_->SetUploadCallback([this](Tile& tile) {
@@ -140,9 +151,11 @@ void GlobeEngine::Run() {
 void GlobeEngine::Shutdown() {
     ShutdownImGui();
     
+    if (demManager_) demManager_->Shutdown();
     scheduler_.reset();
     textureManager_.reset();
     shaderManager_.reset();
+    demManager_.reset();
     flightController_.reset();
     camera_.reset();
     
@@ -228,12 +241,52 @@ void GlobeEngine::Update(double dt, double currentTime) {
         tile.lastAccessTime = glfwGetTime();
         tile.accessCount++;
         
-        if (tile.state == TileState::Unloaded || tile.state == TileState::Failed) {
+        if (tile.state == TileState::Unloaded) {
             bool isLeaf = std::find(selection.leaves.begin(), selection.leaves.end(), key) 
                           != selection.leaves.end();
             Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
             scheduler_->Request(key, priority);
             tile.state = TileState::Scheduled;
+        }
+        else if (tile.state == TileState::Failed) {
+            // Exponential backoff for failed tiles (prevents hammering failed servers)
+            // Backoff: 1s, 2s, 4s, 8s, 16s, max 32s
+            double backoffSeconds = std::min(32.0, std::pow(2.0, tile.retryCount));
+            double timeSinceLastRetry = glfwGetTime() - tile.lastRetryTime;
+            
+            if (timeSinceLastRetry >= backoffSeconds && tile.retryCount < 5) {
+                bool isLeaf = std::find(selection.leaves.begin(), selection.leaves.end(), key) 
+                              != selection.leaves.end();
+                Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
+                scheduler_->Request(key, priority);
+                tile.state = TileState::Scheduled;
+            }
+        }
+    }
+    
+    // Prefetch tiles for smooth navigation (low priority)
+    // Limit prefetch to avoid overwhelming the network
+    int prefetchCount = 0;
+    const int maxPrefetch = 8;
+    for (const TileKey& key : selection.prefetch) {
+        if (prefetchCount >= maxPrefetch) break;
+        
+        auto it = tiles_.find(key);
+        if (it == tiles_.end()) {
+            // Create tile entry for prefetch
+            Tile tile(key);
+            tile.center = TileCenterWorld(key);
+            tile.boundingRadius = TileBoundingRadius(key);
+            tile.angularRadius = TileAngularRadius(key);
+            tiles_.emplace(key, std::move(tile));
+            it = tiles_.find(key);
+        }
+        
+        Tile& tile = it->second;
+        if (tile.state == TileState::Unloaded) {
+            scheduler_->Request(key, Priority::Low);  // Low priority prefetch
+            tile.state = TileState::Scheduled;
+            ++prefetchCount;
         }
     }
     
@@ -243,11 +296,28 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Process texture uploads (time-budgeted)
     textureManager_->ProcessUploads(tiles_, config_.uploadBudgetMs);
     
+    // Request DEM data for visible tiles
+    if (demManager_) {
+        for (const TileKey& key : selection.leaves) {
+            demManager_->Request(key);
+        }
+        demManager_->Update();
+    }
+    
     // Build meshes for ready tiles
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
-        if (it != tiles_.end() && it->second.IsReady() && !it->second.hasMesh) {
-            BuildTileMesh(it->second);
+        if (it != tiles_.end() && it->second.IsReady()) {
+            bool needsRebuild = !it->second.hasMesh;
+            
+            // Rebuild mesh if DEM data became available
+            if (demManager_ && it->second.demPending && demManager_->HasData(key)) {
+                needsRebuild = true;
+            }
+            
+            if (needsRebuild) {
+                BuildTileMesh(it->second);
+            }
         }
     }
     
@@ -274,18 +344,42 @@ void GlobeEngine::Render() {
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(1.0f, 1.0f);
     
-    // Collect tiles to render (avoid iterator invalidation during render)
-    std::vector<const Tile*> tilesToRender;
+    // Wireframe mode toggle
+    if (config_.wireframeMode) {
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    }
+    
+    // Collect tiles to render with fade-in animation (Google Earth style)
+    double currentTime = glfwGetTime();
+    std::vector<std::pair<Tile*, float>> tilesToRender;  // tile + fade alpha
     tilesToRender.reserve(tiles_.size());
-    for (const auto& [key, tile] : tiles_) {
+    
+    for (auto& [key, tile] : tiles_) {
         if (tile.IsReady() && tile.hasMesh && tile.textureId != 0) {
-            tilesToRender.push_back(&tile);
+            float alpha = tile.UpdateFade(currentTime);
+            tilesToRender.push_back({&tile, alpha});
         }
     }
     
-    // Render collected tiles
-    for (const Tile* tile : tilesToRender) {
+    // Sort by alpha for proper blending (opaque first, then transparent)
+    std::sort(tilesToRender.begin(), tilesToRender.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    
+    // Enable blending for fade-in effect
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    // Render collected tiles with fade
+    for (const auto& [tile, alpha] : tilesToRender) {
+        glUniform1f(shaderManager_->GetFadeLocation(), alpha);
         RenderTile(*tile, mvp);
+    }
+    
+    glDisable(GL_BLEND);
+    
+    // Reset polygon mode
+    if (config_.wireframeMode) {
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
     
     glDisable(GL_POLYGON_OFFSET_FILL);
@@ -310,8 +404,17 @@ void GlobeEngine::Render() {
 }
 
 void GlobeEngine::BuildTileMesh(Tile& tile) {
-    // Simple sphere segment mesh
-    const int segments = config_.meshSegments;
+    // Delete old mesh if rebuilding
+    if (tile.hasMesh) {
+        if (tile.vao != 0) glDeleteVertexArrays(1, &tile.vao);
+        if (tile.vbo != 0) glDeleteBuffers(1, &tile.vbo);
+        if (tile.ebo != 0) glDeleteBuffers(1, &tile.ebo);
+        tile.vao = tile.vbo = tile.ebo = 0;
+        tile.hasMesh = false;
+    }
+    
+    // Use more segments for terrain mesh when DEM is enabled
+    const int segments = demManager_ ? std::max(config_.meshSegments, 8) : config_.meshSegments;
     const int vertexCount = (segments + 1) * (segments + 1);
     const int indexCount = segments * segments * 6;
     
@@ -326,6 +429,15 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
     double latTop = Tile2Lat(tile.key.y, tile.key.level);
     double latBottom = Tile2Lat(tile.key.y + 1, tile.key.level);
     
+    // Get height sampler if DEM is available
+    HeightSampler heightSampler = nullptr;
+    if (demManager_) {
+        heightSampler = demManager_->GetHeightSampler();
+    }
+    
+    tile.demUsed = false;
+    tile.demPending = false;
+    
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
         double lat = latTop + (latBottom - latTop) * v;
@@ -336,10 +448,24 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
             double lon = lonLeft + (lonRight - lonLeft) * u;
             double lonRad = lon * M_PI / 180.0;
             
-            // Position
-            float x = static_cast<float>(std::cos(latRad) * std::cos(lonRad) * EARTH_RADIUS_KM);
-            float y = static_cast<float>(std::cos(latRad) * std::sin(lonRad) * EARTH_RADIUS_KM);
-            float z = static_cast<float>(std::sin(latRad) * EARTH_RADIUS_KM);
+            // Calculate radius with elevation
+            double radius = EARTH_RADIUS_KM;
+            if (heightSampler) {
+                double heightMeters = 0.0;
+                if (heightSampler(lon, lat, tile.key.level, heightMeters)) {
+                    // Apply height with exaggeration
+                    double heightKm = heightMeters * 0.001 * config_.demHeightScale;
+                    radius += heightKm;
+                    tile.demUsed = true;
+                } else {
+                    tile.demPending = true;
+                }
+            }
+            
+            // Position on sphere
+            float x = static_cast<float>(std::cos(latRad) * std::cos(lonRad) * radius);
+            float y = static_cast<float>(std::cos(latRad) * std::sin(lonRad) * radius);
+            float z = static_cast<float>(std::sin(latRad) * radius);
             
             // Normal (same as position, normalized)
             glm::vec3 normal = glm::normalize(glm::vec3(x, y, z));
@@ -418,7 +544,8 @@ bool GlobeEngine::PickGlobe(double screenX, double screenY, glm::dvec3& outPoint
     camera_->GetRay(screenX, screenY, config_.windowWidth, config_.windowHeight, rayOrigin, rayDir);
     
     // Ray-sphere intersection with Earth
-    const double R = EARTH_RADIUS_M;  // Use meters for precision
+    // Camera ECEF is in KM units, use shared constant
+    const double R = earth::EARTH_RADIUS_KM;
     glm::dvec3 oc = rayOrigin;  // Origin is camera position, sphere center is at (0,0,0)
     
     double a = glm::dot(rayDir, rayDir);
@@ -438,7 +565,7 @@ bool GlobeEngine::PickGlobe(double screenX, double screenY, glm::dvec3& outPoint
         return false;  // Behind camera
     }
     
-    outPoint = rayOrigin + t * rayDir;
+    outPoint = rayOrigin + t * rayDir;  // Result is in KM units
     return true;
 }
 
@@ -544,6 +671,28 @@ void GlobeEngine::CursorPosCallback(GLFWwindow* window, double xpos, double ypos
     engine->flightController_->OnMouseMove(xpos, ypos, glfwGetTime());
 }
 
+void GlobeEngine::FramebufferSizeCallback(GLFWwindow* window, int width, int height) {
+    auto* engine = static_cast<GlobeEngine*>(glfwGetWindowUserPointer(window));
+    if (width <= 0 || height <= 0) return;
+    
+    // Get window size (for cursor coordinate system - may differ from framebuffer on HiDPI)
+    int windowW, windowH;
+    glfwGetWindowSize(window, &windowW, &windowH);
+    
+    // Update config with WINDOW size (matches cursor coordinates)
+    engine->config_.windowWidth = windowW;
+    engine->config_.windowHeight = windowH;
+    
+    // Update camera aspect ratio (use window size for consistent NDC mapping)
+    engine->camera_->SetAspectRatio(static_cast<double>(windowW) / windowH);
+    
+    // Update flight controller with WINDOW size (cursor coords are in window space)
+    engine->flightController_->OnWindowResize(windowW, windowH);
+    
+    // Update OpenGL viewport with FRAMEBUFFER size
+    glViewport(0, 0, width, height);
+}
+
 // ============================================================================
 // IMGUI DEBUG PANEL
 // ============================================================================
@@ -617,6 +766,13 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Lon: %.4f", debugStats_.longitude);
             ImGui::Text("Heading: %.1f", debugStats_.heading);
             ImGui::Text("Tilt: %.1f", debugStats_.tilt);
+            
+            ImGui::Spacing();
+            
+            // Render Options
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Render Options");
+            ImGui::Separator();
+            ImGui::Checkbox("Wireframe Mode", &config_.wireframeMode);
             
             ImGui::Spacing();
             
