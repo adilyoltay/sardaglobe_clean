@@ -7,6 +7,9 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
+#include <fstream>
+#include <cstring>
+#include <filesystem>
 
 // ImGui
 #include <imgui.h>
@@ -222,13 +225,22 @@ void GlobeEngine::Update(double dt, double currentTime) {
     lodSettings.maxZoom = config_.maxZoom;
     lodSettings.sseThreshold = config_.sseThreshold;
     
+    // TiltFactor: reduce detail when camera is tilted toward horizon
+    // tilt=0 (looking down) → tiltFactor=1.0 (full detail)
+    // tilt=90 (looking at horizon) → tiltFactor=0.0 (reduced detail)
+    double tilt = camera_->GetTilt();  // degrees, 0=looking down, 90=looking at horizon
+    lodSettings.tiltFactor = static_cast<float>(1.0 - std::clamp(tilt / 90.0, 0.0, 1.0));
+    
     auto isReady = [this](const TileKey& key) -> bool {
         auto it = tiles_.find(key);
         return it != tiles_.end() && it->second.IsReady();
     };
     
+    // CRITICAL: Pass FOV directly from camera, not extracted from MVP
+    float fovDegrees = static_cast<float>(camera_->GetFov());
+    
     LodSelection selection = lodSelector_.Select(
-        cameraPos, mvp,
+        cameraPos, mvp, fovDegrees,
         config_.windowWidth, config_.windowHeight,
         isReady, lodSettings
     );
@@ -494,6 +506,13 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
     // WGS84 ellipsoid (km units for camera compatibility)
     const Ellipsoid& ellipsoid = Ellipsoid::WGS84_KM();
     
+    // Pre-calculate Mercator Y for top and bottom (for correct UV mapping)
+    // Web Mercator tiles are linear in Mercator Y space, NOT in latitude space
+    double latTopRad = latTop * M_PI / 180.0;
+    double latBottomRad = latBottom * M_PI / 180.0;
+    double mercatorYTop = std::log(std::tan(M_PI / 4.0 + latTopRad / 2.0));
+    double mercatorYBottom = std::log(std::tan(M_PI / 4.0 + latBottomRad / 2.0));
+    
     // Get height sampler if DEM is available
     HeightSampler heightSampler = nullptr;
     if (demManager_) {
@@ -508,8 +527,12 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
     
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
-        double lat = latTop + (latBottom - latTop) * v;
-        double latRad = lat * M_PI / 180.0;
+        
+        // CRITICAL: Interpolate in Mercator Y space, then convert to latitude
+        // This ensures mesh vertices match the Web Mercator tile texture sampling
+        double mercatorY = mercatorYTop + (mercatorYBottom - mercatorYTop) * v;
+        double latRad = 2.0 * std::atan(std::exp(mercatorY)) - M_PI / 2.0;
+        double lat = latRad * 180.0 / M_PI;
         
         // Check if this row is on North or South border
         bool isNorthBorder = (iy == 0);
@@ -573,7 +596,7 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
         }
     }
     
-    // Indices
+    // Indices for main grid
     for (int iy = 0; iy < segments; ++iy) {
         for (int ix = 0; ix < segments; ++ix) {
             unsigned int tl = iy * (segments + 1) + ix;
@@ -587,6 +610,108 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
             indices.push_back(tr);
             indices.push_back(bl);
             indices.push_back(br);
+        }
+    }
+    
+    // ========================================================================
+    // SKIRT GENERATION (Google Earth style - hides LOD seams)
+    // ========================================================================
+    const bool generateSkirts = true;
+    if (generateSkirts) {
+        const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
+        
+        // Calculate skirt depth based on tile size at this zoom level
+        double tileArcKm = 40075.0 / (1 << tile.key.level);
+        double skirtDepth = std::max(tileArcKm * 0.01, 0.001);  // 1% of tile or min 1m
+        skirtDepth = std::min(skirtDepth, tileArcKm * 0.5);     // Max 50% of tile
+        
+        // Lambda to add a skirt vertex
+        auto addSkirtVertex = [&](int mainIdx) {
+            float px = vertices[mainIdx * 8 + 0];
+            float py = vertices[mainIdx * 8 + 1];
+            float pz = vertices[mainIdx * 8 + 2];
+            float u = vertices[mainIdx * 8 + 6];
+            float v = vertices[mainIdx * 8 + 7];
+            
+            // Push vertex inward (toward Earth center)
+            glm::vec3 pos(px, py, pz);
+            glm::vec3 radialDir = glm::normalize(pos);
+            glm::vec3 skirtPos = pos - radialDir * static_cast<float>(skirtDepth);
+            
+            vertices.push_back(skirtPos.x);
+            vertices.push_back(skirtPos.y);
+            vertices.push_back(skirtPos.z);
+            vertices.push_back(radialDir.x);  // Normal
+            vertices.push_back(radialDir.y);
+            vertices.push_back(radialDir.z);
+            vertices.push_back(u);
+            vertices.push_back(v);
+        };
+        
+        // Add skirt vertices for all 4 edges
+        // North edge (top, iy=0)
+        for (int ix = 0; ix <= segments; ++ix) {
+            addSkirtVertex(ix);
+        }
+        unsigned int northSkirtStart = mainVertexCount;
+        
+        // South edge (bottom, iy=segments)
+        for (int ix = 0; ix <= segments; ++ix) {
+            addSkirtVertex(segments * (segments + 1) + ix);
+        }
+        unsigned int southSkirtStart = northSkirtStart + segments + 1;
+        
+        // West edge (left, ix=0)
+        for (int iy = 0; iy <= segments; ++iy) {
+            addSkirtVertex(iy * (segments + 1));
+        }
+        unsigned int westSkirtStart = southSkirtStart + segments + 1;
+        
+        // East edge (right, ix=segments)
+        for (int iy = 0; iy <= segments; ++iy) {
+            addSkirtVertex(iy * (segments + 1) + segments);
+        }
+        unsigned int eastSkirtStart = westSkirtStart + segments + 1;
+        
+        // Generate skirt triangles
+        // North edge skirt
+        for (int i = 0; i < segments; ++i) {
+            unsigned int v0 = i;
+            unsigned int v1 = i + 1;
+            unsigned int v2 = northSkirtStart + i;
+            unsigned int v3 = northSkirtStart + i + 1;
+            indices.push_back(v0); indices.push_back(v2); indices.push_back(v3);
+            indices.push_back(v0); indices.push_back(v3); indices.push_back(v1);
+        }
+        
+        // South edge skirt (reversed winding)
+        for (int i = 0; i < segments; ++i) {
+            unsigned int v0 = segments * (segments + 1) + i;
+            unsigned int v1 = segments * (segments + 1) + i + 1;
+            unsigned int v2 = southSkirtStart + i;
+            unsigned int v3 = southSkirtStart + i + 1;
+            indices.push_back(v0); indices.push_back(v3); indices.push_back(v2);
+            indices.push_back(v0); indices.push_back(v1); indices.push_back(v3);
+        }
+        
+        // West edge skirt (reversed winding)
+        for (int j = 0; j < segments; ++j) {
+            unsigned int v0 = j * (segments + 1);
+            unsigned int v1 = (j + 1) * (segments + 1);
+            unsigned int v2 = westSkirtStart + j;
+            unsigned int v3 = westSkirtStart + j + 1;
+            indices.push_back(v0); indices.push_back(v3); indices.push_back(v2);
+            indices.push_back(v0); indices.push_back(v1); indices.push_back(v3);
+        }
+        
+        // East edge skirt
+        for (int j = 0; j < segments; ++j) {
+            unsigned int v0 = j * (segments + 1) + segments;
+            unsigned int v1 = (j + 1) * (segments + 1) + segments;
+            unsigned int v2 = eastSkirtStart + j;
+            unsigned int v3 = eastSkirtStart + j + 1;
+            indices.push_back(v0); indices.push_back(v2); indices.push_back(v3);
+            indices.push_back(v0); indices.push_back(v3); indices.push_back(v1);
         }
     }
     
@@ -688,6 +813,20 @@ void GlobeEngine::KeyCallback(GLFWwindow* window, int key, int scancode, int act
     
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, true);
+        return;
+    }
+    
+    // Screenshot (S key)
+    if (key == GLFW_KEY_S && action == GLFW_PRESS) {
+        static int screenshotNum = 0;
+        std::string filename = "screenshot_" + std::to_string(screenshotNum++) + ".ppm";
+        engine->SaveScreenshot(filename);
+        return;
+    }
+    
+    // Visual LOD Test (T key)
+    if (key == GLFW_KEY_T && action == GLFW_PRESS) {
+        engine->RunVisualLodTest();
         return;
     }
     
@@ -1019,6 +1158,123 @@ void GlobeEngine::RenderPivot(const glm::mat4& viewProj) {
         
         glEnable(GL_DEPTH_TEST);
     }
+}
+
+// =============================================================================
+// SCREENSHOT CAPTURE (Visual Testing)
+// =============================================================================
+
+bool GlobeEngine::SaveScreenshot(const std::string& filename) {
+    // Use framebuffer size (not window size) for HiDPI support
+    int width, height;
+    glfwGetFramebufferSize(window_, &width, &height);
+    
+    // Set pack alignment to 1 to avoid row padding issues with RGB (3 bytes/pixel)
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    
+    std::vector<unsigned char> pixels(width * height * 3);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    
+    // Restore default alignment
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    
+    // Flip vertically (OpenGL has origin at bottom-left)
+    std::vector<unsigned char> flipped(width * height * 3);
+    for (int y = 0; y < height; ++y) {
+        memcpy(&flipped[y * width * 3], 
+               &pixels[(height - 1 - y) * width * 3], 
+               width * 3);
+    }
+    
+    // Write PPM file (simple format, no external dependencies)
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "Failed to open file: " << filename << std::endl;
+        return false;
+    }
+    
+    file << "P6\n" << width << " " << height << "\n255\n";
+    file.write(reinterpret_cast<char*>(flipped.data()), flipped.size());
+    file.close();
+    
+    std::cout << "Screenshot saved: " << filename << std::endl;
+    return true;
+}
+
+// =============================================================================
+// VISUAL LOD TEST - Automated screenshot capture at each LOD level
+// =============================================================================
+
+void GlobeEngine::RunVisualLodTest() {
+    std::cout << "\n";
+    std::cout << "╔══════════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║            VISUAL LOD TEST - Automated Screenshots               ║\n";
+    std::cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
+    
+    // Create screenshots directory (portable)
+    std::filesystem::create_directories("screenshots");
+    
+    struct LodTest {
+        int lod;
+        double alt;
+        double lat;
+        double lon;
+        const char* name;
+    };
+    
+    std::vector<LodTest> tests = {
+        {0, 25000000, 0.0, 0.0, "LOD0_World"},
+        {1, 15000000, 0.0, 0.0, "LOD1_Hemisphere"},
+        {2, 8000000, 39.0, 35.0, "LOD2_Turkey_Region"},
+        {3, 4000000, 39.0, 35.0, "LOD3_Turkey"},
+        {4, 2000000, 41.0, 29.0, "LOD4_Istanbul_Region"},
+        {5, 1000000, 41.0, 29.0, "LOD5_Istanbul"},
+        {6, 500000, 41.015, 28.98, "LOD6_Bosphorus"},
+        {7, 250000, 41.015, 28.98, "LOD7_Detail"},
+        {8, 100000, 41.015, 28.98, "LOD8_High_Detail"},
+    };
+    
+    for (const auto& test : tests) {
+        std::cout << "Testing LOD " << test.lod << ": " << test.name << "...\n";
+        
+        // Fly to location
+        FlyTo(test.lat, test.lon, test.alt, 0.0, 0.0, 0.1);
+        
+        // Wait for animation and tiles to load
+        for (int frame = 0; frame < 120; ++frame) {  // ~2 seconds at 60fps
+            double currentTime = glfwGetTime();
+            double dt = currentTime - lastFrameTime_;
+            lastFrameTime_ = currentTime;
+            
+            Update(dt, currentTime);
+            Render();
+            glfwSwapBuffers(window_);
+            glfwPollEvents();
+            
+            if (glfwWindowShouldClose(window_)) return;
+        }
+        
+        // Capture screenshot
+        std::string filename = "screenshots/" + std::string(test.name) + ".ppm";
+        SaveScreenshot(filename);
+        
+        // Get stats
+        int visibleTiles = 0;
+        int pendingTiles = 0;
+        for (const auto& [key, tile] : tiles_) {
+            if (currentLeafSet_.count(key) > 0) {
+                visibleTiles++;
+                if (tile.IsLoading()) pendingTiles++;
+            }
+        }
+        
+        std::cout << "  ✅ LOD " << test.lod << ": " << visibleTiles << " tiles visible, "
+                  << pendingTiles << " pending\n";
+    }
+    
+    std::cout << "\n╔══════════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║ Visual LOD Test Complete! Screenshots saved in ./screenshots/   ║\n";
+    std::cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
 }
 
 } // namespace globe

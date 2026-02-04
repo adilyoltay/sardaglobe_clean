@@ -105,7 +105,6 @@ add_executable(native_globe
   src/rendering/tile_renderer.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
-  src/core/quadtree_node.cpp
   src/core/layer_manager.cpp
   # Engine module
   src/engine/globe_engine.cpp
@@ -161,3 +160,16 @@ target_include_directories(edge_mask_test PRIVATE
 )
 target_link_libraries(edge_mask_test PRIVATE glm::glm)
 add_test(NAME EdgeMaskTest COMMAND edge_mask_test)
+
+# Globe System Validation Test (Comprehensive GIS Test)
+add_executable(globe_system_test
+  tests/globe_system_test.cpp
+  src/scheduling/lod_selector.cpp
+  src/core/ellipsoid.cpp
+)
+target_include_directories(globe_system_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(globe_system_test PRIVATE glm::glm)
+add_test(NAME GlobeSystemTest COMMAND globe_system_test)

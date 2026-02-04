@@ -4,6 +4,7 @@
 
 int main(int argc, char** argv) {
     globe::Config config;
+    bool runVisualTest = false;
     
     // Default tile URL (Pirireis HGM Orthofoto)
     config.tileUrl = "https://goksun.pirireis.com.tr/gorsun/gorsun/tile/HGM_Orthofoto/{z}/{x}/{y}";
@@ -24,6 +25,8 @@ int main(int argc, char** argv) {
             config.windowWidth = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
             config.windowHeight = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--test") == 0) {
+            runVisualTest = true;
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::cout << "Usage: native_globe [options]\n"
                       << "Options:\n"
@@ -34,6 +37,7 @@ int main(int argc, char** argv) {
                       << "  --max-zoom N      Maximum zoom level\n"
                       << "  --width N         Window width\n"
                       << "  --height N        Window height\n"
+                      << "  --test            Run visual LOD test\n"
                       << "  --help            Show this help\n";
             return 0;
         }
@@ -47,6 +51,10 @@ int main(int argc, char** argv) {
     if (!engine.Init()) {
         std::cerr << "Failed to initialize engine\n";
         return 1;
+    }
+    
+    if (runVisualTest) {
+        engine.RunVisualLodTest();
     }
     
     engine.Run();

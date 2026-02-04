@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 
 namespace globe {
 
@@ -60,7 +61,13 @@ void DemManager::Request(const TileKey& key) {
 bool DemManager::HasData(const TileKey& key) const {
     std::lock_guard<std::mutex> lock(cacheMutex_);
     auto it = cache_.find(key);
-    return it != cache_.end() && it->second.valid;
+    if (it != cache_.end() && it->second.valid) {
+        // Update access time for LRU eviction
+        auto now = std::chrono::steady_clock::now();
+        it->second.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+        return true;
+    }
+    return false;
 }
 
 double DemManager::Tile2Lon(int x, int z) {
@@ -95,6 +102,10 @@ bool DemManager::SampleHeight(double lonDeg, double latDeg, int level, double& h
     
     const DemGridData& data = it->second;
     
+    // Update access time for LRU eviction
+    auto now = std::chrono::steady_clock::now();
+    data.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+    
     // Calculate UV within tile
     double lonLeft = Tile2Lon(tileX, level);
     double lonRight = Tile2Lon(tileX + 1, level);
@@ -121,14 +132,14 @@ void DemManager::Update() {
     // Process completed requests - cache cleanup
     std::lock_guard<std::mutex> lock(cacheMutex_);
     
-    // Evict old entries if cache is too large
+    // Evict least recently used entries if cache is too large
     while (cache_.size() > config_.cacheSize) {
-        // Simple LRU: remove oldest entry
+        // True LRU: remove entry with oldest lastAccessTime
         double oldestTime = std::numeric_limits<double>::max();
         TileKey oldestKey;
         for (const auto& [key, data] : cache_) {
-            if (data.fetchTime < oldestTime) {
-                oldestTime = data.fetchTime;
+            if (data.lastAccessTime < oldestTime) {
+                oldestTime = data.lastAccessTime;
                 oldestKey = key;
             }
         }
@@ -161,6 +172,10 @@ void DemManager::WorkerLoop() {
         // Fetch DEM data
         DemGridData data;
         if (FetchDem(key, data)) {
+            // Set initial access time for LRU eviction
+            auto now = std::chrono::steady_clock::now();
+            data.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+            
             std::lock_guard<std::mutex> lock(cacheMutex_);
             cache_[key] = std::move(data);
         }
@@ -274,7 +289,7 @@ bool DemManager::ParseDemGrid(const std::string& payload, DemGridData& outData) 
     
     size_t expected = static_cast<size_t>(config_.meshN * config_.meshN);
     outData.valid = outData.heights.size() >= expected;
-    outData.fetchTime = 0.0;  // Will be set by caller if needed
+    // fetchTime will be set by WorkerLoop when caching
     
     if (config_.debug) {
         std::cerr << "[DEM] Parsed " << outData.heights.size() << " values"

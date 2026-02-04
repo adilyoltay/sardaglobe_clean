@@ -65,7 +65,15 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
     double startTime = glfwGetTime() * 1000.0;
     int uploadCount = 0;
     
+    // CRITICAL FIX: Also enforce maxUploadsPerFrame from config
+    const int maxUploads = config_.maxUploadsPerFrame;
+    
     while (!uploadQueue_.empty()) {
+        // Check upload count limit (prevents frame hitch during heavy decode)
+        if (uploadCount >= maxUploads) {
+            break;  // Max uploads reached
+        }
+        
         // Check time budget
         double elapsed = glfwGetTime() * 1000.0 - startTime;
         if (elapsed >= budgetMs && uploadCount > 0) {

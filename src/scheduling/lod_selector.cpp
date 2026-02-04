@@ -7,6 +7,7 @@ namespace globe {
 LodSelection LodSelector::Select(
     const glm::vec3& cameraPos,
     const glm::mat4& mvp,
+    float fovDegrees,
     int viewportWidth,
     int viewportHeight,
     const TileReadyFunc& isReady,
@@ -18,11 +19,10 @@ LodSelection LodSelector::Select(
     frustum_.Extract(mvp);
     horizon_.Update(cameraPos, static_cast<float>(EARTH_RADIUS_KM));
     
-    // Calculate FOV from projection matrix (use abs to handle flipped matrices)
-    float proj11 = std::abs(mvp[1][1]);
-    if (proj11 < 0.001f) proj11 = 1.0f;  // Fallback
-    fovDegrees_ = 2.0f * std::atan(1.0f / proj11) * 180.0f / static_cast<float>(M_PI);
-    fovDegrees_ = std::abs(fovDegrees_);  // Ensure positive
+    // Use FOV directly from camera (CRITICAL FIX: don't extract from MVP)
+    // MVP = proj * view, so view matrix contaminates FOV extraction
+    fovDegrees_ = fovDegrees;
+    if (fovDegrees_ < 1.0f) fovDegrees_ = 45.0f;  // Fallback
     
     // Start traversal from root tiles (level 0)
     for (int x = 0; x < 1; ++x) {

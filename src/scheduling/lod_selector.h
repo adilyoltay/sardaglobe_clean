@@ -41,9 +41,11 @@ public:
     LodSelector() = default;
     
     // Perform LOD selection
+    // fovDegrees should come directly from camera, NOT extracted from MVP
     LodSelection Select(
         const glm::vec3& cameraPos,
         const glm::mat4& mvp,
+        float fovDegrees,  // CRITICAL: Pass FOV directly from camera
         int viewportWidth,
         int viewportHeight,
         const TileReadyFunc& isReady,

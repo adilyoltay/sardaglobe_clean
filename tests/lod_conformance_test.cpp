@@ -107,6 +107,7 @@ int main() {
         
         LodSelection selection = selector.Select(
             tc.cameraPos, mvp,
+            45.0f,  // FOV degrees
             1920, 1080,
             AlwaysReady,
             settings

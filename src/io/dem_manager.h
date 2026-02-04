@@ -31,7 +31,7 @@ struct DemGridData {
     double minHeight = 0.0;
     double maxHeight = 0.0;
     bool valid = false;
-    double fetchTime = 0.0;       // Time when data was fetched
+    mutable double lastAccessTime = 0.0;  // LRU: updated on every access
 };
 
 // Height sampler callback type (for mesh builder)

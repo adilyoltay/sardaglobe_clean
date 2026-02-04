@@ -55,6 +55,12 @@ public:
     bool GetGeoFromScreenPoint(double screenX, double screenY, double& outLon, double& outLat);
     bool GetScreenPointFromGeo(double lon, double lat, double& outScreenX, double& outScreenY);
     
+    // Screenshot capture (Visual Testing)
+    bool SaveScreenshot(const std::string& filename);
+    
+    // Visual test mode
+    void RunVisualLodTest();
+    
 private:
     // Frame phases (Google Earth style game loop)
     void ProcessInput(double currentTime);
