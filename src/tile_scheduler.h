@@ -94,6 +94,7 @@ private:
   
   int maxActiveFetches_ = 64;   // Increased for faster loading
   int maxActiveDecodes_ = 32;   // Increased for faster decoding
+  int maxPendingDecodes_ = 256; // P1 Fix: Max pending decode queue size to prevent memory bloat
   int activeFetches_ = 0;
   int activeDecodes_ = 0;
   

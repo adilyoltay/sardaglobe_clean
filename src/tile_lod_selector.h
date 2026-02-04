@@ -1,5 +1,19 @@
 #pragma once
 
+// ============================================================================
+// DEPRECATED: TileLodSelector
+// This class is currently NOT USED due to rendering bugs.
+// The legacy BuildVisibleTileSets() in globe_engine.cpp is used instead.
+// 
+// TODO: Either fix the SSE calculation bugs and enable this class, or
+// remove it entirely if the legacy approach is sufficient.
+// 
+// Known issues:
+// - SSE threshold calibration differs from legacy implementation
+// - Edge case handling for polar regions needs work
+// - Fallback tile selection logic incomplete
+// ============================================================================
+
 #include "tile.h"
 #include "tile_key.h"
 #include <glm/glm.hpp>

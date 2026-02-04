@@ -98,8 +98,7 @@ add_executable(native_globe
   src/tile_manager.cpp
   src/tile_mesh_builder.cpp
   src/tile_lod_selector.cpp
-  src/tile_texture_manager.cpp
-  src/tile_renderer.cpp
+  src/texture_manager.cpp
 )
 
 target_include_directories(native_globe PRIVATE

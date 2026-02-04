@@ -152,7 +152,23 @@ void TileScheduler::Update(std::function<Tile*(const SchedulerKey&)> tileResolve
              }
           } else if (decoder_) {
             // Queue for decode (Phase 5 fix: enforce limits)
-            pendingDecodes_.push(std::move(res));
+            // P1 Fix: Use queueMutex_ to protect pendingDecodes_ and enforce max size
+            bool queued = false;
+            {
+                std::lock_guard<std::mutex> decLock(queueMutex_);
+                if (pendingDecodes_.size() < static_cast<size_t>(maxPendingDecodes_)) {
+                    pendingDecodes_.push(std::move(res));
+                    queued = true;
+                }
+            }
+            if (!queued) {
+                // Queue full: drop this decode and mark tile failed to allow retry
+                tile->loadState = TileLoadState::FAILED;
+                tile->retryCount++;
+                tile->lastRetryTime = currentTime;
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                pendingKeys_.erase(res.key);
+            }
           } else {
             // No decoder, assume ready (or sync decode elsewhere)
             tile->loadState = TileLoadState::READY;
@@ -182,16 +198,17 @@ void TileScheduler::Update(std::function<Tile*(const SchedulerKey&)> tileResolve
   }
   
   // Process pending decodes respecting limits
-  while (!pendingDecodes_.empty()) {
+  // P1 Fix: Protect pendingDecodes_ access with queueMutex_
+  while (true) {
+      Result res;
       int active = 0;
       {
           std::lock_guard<std::mutex> lock(queueMutex_);
           active = activeDecodes_;
+          if (active >= maxActiveDecodes_ || pendingDecodes_.empty()) break;
+          res = std::move(pendingDecodes_.front());
+          pendingDecodes_.pop();
       }
-      if (active >= maxActiveDecodes_) break;
-      
-      auto res = std::move(pendingDecodes_.front());
-      pendingDecodes_.pop();
       
       Tile* tile = tileResolver(res.key);
       if (tile && tile->loadState == TileLoadState::FETCHING) {

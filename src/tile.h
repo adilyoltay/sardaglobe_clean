@@ -31,6 +31,12 @@ enum EdgeFlag {
   EDGE_BOTTOM = 1 << 3   // Bottom edge needs stitching
 };
 
+// ============================================================================
+// DEPRECATED: TextureState
+// This enum is kept for JS parity compatibility but TileLoadState is the
+// canonical state machine. TextureState is auto-synced from TileLoadState
+// in SyncRasterTiles(). New code should use TileLoadState exclusively.
+// ============================================================================
 // JS parity: Texture loading state machine (main.js tr_* constants)
 enum class TextureState {
   NONE = 0,           // Initial state, no texture
@@ -40,6 +46,11 @@ enum class TextureState {
   LOAD_NO_INTERNET = 4// tr_load_NoInternet - network error
 };
 
+// ============================================================================
+// CANONICAL STATE MACHINE: TileLoadState
+// This is the primary state machine for tile lifecycle management.
+// Use this for all new code. TextureState is auto-synced for legacy compat.
+// ============================================================================
 // Google Earth style tile lifecycle state machine
 // Provides fine-grained control over tile loading and rendering
 enum class TileLoadState {
@@ -76,6 +87,12 @@ enum class SupportMode {
   OUT_OF_BBOX = 3
 };
 
+// ============================================================================
+// DEPRECATED: TileSelectionState  
+// This enum is NOT USED anywhere in the codebase. It was intended for
+// Cesium-style LOD transitions but the TileLodSelector that would use it
+// is also deprecated. Consider removing in future cleanup.
+// ============================================================================
 // Cesium-style tile selection state for stable LOD transitions
 enum class TileSelectionState {
   NONE = 0,              // Not visited this frame

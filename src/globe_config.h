@@ -166,4 +166,14 @@ struct GlobeConfig {
   
   // Phase 3: Hybrid LOD (SSE vs Distance Table)
   bool useLegacyDistanceLOD = false;              // Use table-based LOD selection
+  
+  // ============================================================================
+  // SCHEDULER CONFIGURATION
+  // The TileScheduler provides Google Earth-style tile lifecycle management.
+  // Currently DISABLED by default because the legacy download system provides
+  // faster initial loading. Enable for more sophisticated priority management.
+  // ============================================================================
+  bool useScheduler = false;                      // Enable TileScheduler for tile loading
+  int schedulerMaxFetches = 64;                   // Max concurrent fetches (scheduler mode)
+  int schedulerMaxDecodes = 32;                   // Max concurrent decodes (scheduler mode)
 };

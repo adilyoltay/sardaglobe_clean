@@ -1,3 +1,25 @@
+// ============================================================================
+// GLOBE ENGINE - Main Implementation
+// ============================================================================
+// This file is 11,500+ lines and needs refactoring.
+// See docs/GLOBE_ENGINE_REFACTORING_PLAN.md for the refactoring roadmap.
+//
+// FILE STRUCTURE (approximate line numbers):
+// - [0000-0200]    Includes and forward declarations
+// - [0200-1800]    Helper functions (URL, coordinates, tile math)
+// - [1800-2000]    Texture creation (see also texture_manager.h)
+// - [2000-3600]    Tile synchronization (SyncRasterTiles, etc.)
+// - [3600-4500]    Scheduler integration (ITileFetcher, ITileDecoder)
+// - [4500-5500]    Impl struct definition
+// - [5500-7500]    DEM/Terrain handling
+// - [7500-8500]    Download workers
+// - [8500-9500]    Rendering (RenderTiles, RenderVectors, etc.)
+// - [9500-11500]   Public API, tests, main loop
+//
+// MUTEX LOCK HIERARCHY (to prevent deadlocks):
+// configMutex (L1) → downloadMutex (L2) → pendingMutex (L3) → cancelMutex (L4)
+// ============================================================================
+
 #include "globe_engine.h"
 #include "layer_manager.h"
 #include "earth_camera.h"
@@ -51,8 +73,6 @@
 #include "tile_scheduler.h"
 #include "tile_mesh_builder.h"
 #include "tile_lod_selector.h"
-#include "tile_texture_manager.h"
-#include "tile_renderer.h"
 #include "label_manager.h"
 #include "icon_map.h"
 #include "json_parser.h"
@@ -1977,27 +1997,30 @@ TileMesh BuildTileMesh(int x, int y, int z, int segments, int edgeFlags,
 }
 
 // Compute edge flags for a tile based on visible tile set
+// P0 Fix: Check multiple ancestor levels (not just parent) to handle 2+ LOD differences
 int ComputeEdgeFlags(int z, int x, int y, const std::unordered_set<std::string>& availableKeys, bool debug = false) {
   int flags = EDGE_NONE;
   int n = 1 << z;
   
-  // Check each neighbor - if neighbor at same zoom doesn't exist but parent does,
+  // Check each neighbor - if neighbor at same zoom doesn't exist but ANY ancestor does,
   // this edge needs stitching
   auto checkNeighbor = [&](int nx, int ny, int edgeFlag) {
     nx = (nx + n) % n;  // Wrap X
     if (ny < 0 || ny >= n) return;  // Clamp Y
     
     std::string neighborKey = MakeTileKey(z, nx, ny);
-    if (availableKeys.find(neighborKey) == availableKeys.end()) {
-      // Neighbor not visible at same zoom - check if we need to stitch with parent
-      int parentZ = z - 1;
-      if (parentZ >= 0) {
-        int parentX = x / 2;
-        int parentY = y / 2;
-        std::string parentKey = MakeTileKey(parentZ, parentX, parentY);
-        if (availableKeys.find(parentKey) != availableKeys.end()) {
-          flags |= edgeFlag;
-        }
+    if (availableKeys.find(neighborKey) != availableKeys.end()) return;
+
+    // Neighbor not visible at same zoom - check its ancestors up to 3 levels
+    const int maxLevels = std::min(3, z);
+    for (int level = 1; level <= maxLevels; ++level) {
+      int ancestorZ = z - level;
+      int ancestorX = nx >> level;
+      int ancestorY = ny >> level;
+      std::string ancestorKey = MakeTileKey(ancestorZ, ancestorX, ancestorY);
+      if (availableKeys.find(ancestorKey) != availableKeys.end()) {
+        flags |= edgeFlag;
+        break;  // Found an ancestor, no need to check further
       }
     }
   };
@@ -2791,21 +2814,36 @@ bool LoadTileData(const GlobeConfig& config, const std::string& urlTemplate, int
   return true;
 }
 
+// EnqueueDownload - Thread-safe download job enqueue
+// LOCK HIERARCHY: Acquires downloadMutex first, then pendingMutex (Level 2 → Level 3)
+// Caller must NOT hold pendingMutex when calling this function!
 void EnqueueDownload(std::unordered_set<std::string>& pending,
                      std::priority_queue<DownloadJob, std::vector<DownloadJob>, DownloadJobComparator>& queue,
-                     std::mutex& mutex,
+                     std::mutex& downloadMutex,
                      std::condition_variable& cv,
-                     DownloadJob job) {
+                     DownloadJob job,
+                     std::mutex* pendingMutex = nullptr) {
   std::string key = MakeTileKey(job.z, job.x, job.y);
-  if (pending.find(key) != pending.end()) {
-    return;
-  }
-  pending.insert(key);
   job.queueTime = glfwGetTime();
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    queue.push(std::move(job));
+  
+  // Acquire locks in hierarchy order: downloadMutex (L2) → pendingMutex (L3)
+  std::lock_guard<std::mutex> dlLock(downloadMutex);
+  
+  if (pendingMutex) {
+    std::lock_guard<std::mutex> pendLock(*pendingMutex);
+    if (pending.find(key) != pending.end()) {
+      return;
+    }
+    pending.insert(key);
+  } else {
+    // Caller guarantees thread safety for pending set
+    if (pending.find(key) != pending.end()) {
+      return;
+    }
+    pending.insert(key);
   }
+  
+  queue.push(std::move(job));
   cv.notify_one();
 }
 
@@ -2855,6 +2893,12 @@ void CollectVisibleTilesRecursive(const std::array<Plane, 6>& frustum,
                                   int maxDivision) {
   // Guard against runaway recursion
   if (g_recursionDepth >= MAX_RECURSION_DEPTH || g_totalCalls >= MAX_TOTAL_CALLS) {
+    // P0 Fix: Add current tile as fallback to prevent visual holes
+    if (renderList) {
+      std::string fallbackKey = MakeTileKey(z, x, y);
+      loadList.insert(fallbackKey);
+      renderList->push_back(fallbackKey);
+    }
     return;
   }
   ++g_recursionDepth;
@@ -3462,12 +3506,8 @@ void QueueTileDownload(TileSyncContext& ctx, Tile& tile, const std::string& key,
   job.priority = PRIORITY_VISIBLE_LEAF;
   job.priorityScore = ComputeDownloadPriorityScore(tile, ctx.cameraPos, ctx.mvp, ctx.currentZoom, isLeaf);
   
-  if (ctx.pendingMutex) {
-    std::lock_guard<std::mutex> lock(*ctx.pendingMutex);
-    EnqueueDownload(ctx.pending, ctx.downloadQueue, ctx.downloadMutex, ctx.downloadCv, job);
-  } else {
-    EnqueueDownload(ctx.pending, ctx.downloadQueue, ctx.downloadMutex, ctx.downloadCv, job);
-  }
+  // Pass pendingMutex to EnqueueDownload - it handles lock ordering internally
+  EnqueueDownload(ctx.pending, ctx.downloadQueue, ctx.downloadMutex, ctx.downloadCv, job, ctx.pendingMutex);
   tile.textureState = TextureState::LOADING;
   ++ctx.queueSize;
 }
@@ -3824,12 +3864,8 @@ void SyncRasterTiles(DeferredQueue* queue,
             job.priorityScore = score;
           }
           
-          if (pendingMutex) {
-              std::lock_guard<std::mutex> lock(*pendingMutex);
-              EnqueueDownload(pending, downloadQueue, downloadMutex, downloadCv, job);
-          } else {
-              EnqueueDownload(pending, downloadQueue, downloadMutex, downloadCv, job);
-          }
+          // Pass pendingMutex to EnqueueDownload - it handles lock ordering internally
+          EnqueueDownload(pending, downloadQueue, downloadMutex, downloadCv, job, pendingMutex);
           existing->second.textureState = TextureState::LOADING;  // JS parity: set state
           ++queueSize;
         }
@@ -4632,8 +4668,6 @@ struct GlobeEngine::Impl {
   // Modular Tile System (high-performance)
   earth::TileMeshBuilder meshBuilder;
   earth::TileLodSelector lodSelector;
-  earth::TileTextureManager textureManager;
-  earth::TileRenderer tileRenderer;
   
   // Pivot Gizmo (Google Earth style target)
   GLuint pivotVao = 0;
@@ -4665,22 +4699,27 @@ struct GlobeEngine::Impl {
   size_t meshUrlIndex = 0;
   std::mutex meshUrlMutex;
 
-  mutable std::mutex configMutex;  // Guards config.rasterLayers access across threads
-  std::mutex downloadMutex;
+  // ============================================================================
+  // MUTEX LOCK HIERARCHY (to prevent deadlocks)
+  // Always acquire in this order: configMutex → downloadMutex → pendingMutex → cancelMutex
+  // Never hold a lower mutex while acquiring a higher one.
+  // ============================================================================
+  mutable std::mutex configMutex;  // Level 1: Guards config.rasterLayers access across threads
+  std::mutex downloadMutex;        // Level 2: Guards downloadQueue and readyQueue
   std::condition_variable downloadCv;
   std::priority_queue<DownloadJob, std::vector<DownloadJob>, DownloadJobComparator> downloadQueue;
   std::queue<DownloadResult> readyQueue;
   std::atomic<bool> workerRunning{false};
   static constexpr int kNumDownloadWorkers = 8;  // Multiple concurrent downloads
   std::vector<std::thread> workers;
-  std::mutex pendingMutex;
+  std::mutex pendingMutex;           // Level 3: Guards pending* sets
   std::unordered_set<std::string> pendingRaster;
   std::unordered_set<std::string> pendingVector;
   std::unordered_map<std::string, std::unordered_set<std::string>> pendingLayerDownloads;  // Per-layer pending
   std::unordered_map<std::string, std::unordered_set<std::string>> pendingLayerSupportDownloads;
   
   // Cancelled job tracking for bandwidth optimization
-  std::mutex cancelMutex;
+  std::mutex cancelMutex;            // Level 4: Guards cancelledKeys
   std::unordered_set<SchedulerKey, SchedulerKey::Hash> cancelledKeys;
   std::mutex demMutex;
   std::condition_variable demCv;
@@ -7170,12 +7209,12 @@ struct GlobeEngine::Impl {
       ImGui::Text("Tiles Rendered: %zu", visibleTiles.size());
       ImGui::Text("LOD Selection: %d refined", cellDivisionCount);
       
-      // Texture cache stats
-      auto& texStats = textureManager.GetStats();
-      ImGui::Text("Tex Cache: %.1f MB / %.1f MB", 
-                  texStats.currentBytes / (1024.0 * 1024.0),
-                  textureManager.GetConfig().maxCacheBytes / (1024.0 * 1024.0));
-      ImGui::Text("Tex Count: %zu", texStats.textureCount);
+      // Texture cache stats (from tile map)
+      size_t texCount = 0;
+      for (const auto& kv : tiles) {
+          if (kv.second.ownsTexture && kv.second.texture != 0) texCount++;
+      }
+      ImGui::Text("Tex Count: %zu", texCount);
       
       // DEM/Terrain stats
       ImGui::Separator();
@@ -7844,7 +7883,8 @@ struct GlobeEngine::Impl {
       }
 
       // OPTIMIZATION: Decode image in worker thread (offload from main thread)
-      if (result.ok && !result.isVector && job.layerId.empty() && !job.isSupportRequest) {
+      // P0 Fix: Skip worker decode if callback path is used (scheduler expects raw data)
+      if (result.ok && !result.isVector && job.layerId.empty() && !job.isSupportRequest && !job.callback) {
         result.decodeSuccess = DecodeImageRGBA(result.data, result.decodedPixels, 
                                                 result.decodedWidth, result.decodedHeight);
         if (result.decodeSuccess) {
@@ -7855,6 +7895,7 @@ struct GlobeEngine::Impl {
       }
 
       if (job.callback) {
+        // Scheduler path: pass raw data (not decoded)
         job.callback(std::move(result.data), result.ok);
       } else {
         std::lock_guard<std::mutex> lock(downloadMutex);
@@ -8176,10 +8217,8 @@ struct GlobeEngine::Impl {
             job.priority = PRIORITY_VISIBLE_LEAF;
             job.isSupportRequest = true;
             job.supportMode = mode;
-            {
-                std::lock_guard<std::mutex> lock(pendingMutex);
-                EnqueueDownload(pendingLayerSupportDownloads[res.layerId], downloadQueue, downloadMutex, downloadCv, job);
-            }
+            // Pass pendingMutex to EnqueueDownload - it handles lock ordering internally
+            EnqueueDownload(pendingLayerSupportDownloads[res.layerId], downloadQueue, downloadMutex, downloadCv, job, &pendingMutex);
             return true;
           };
 
@@ -8734,11 +8773,6 @@ void main() {
   // Initialize pivot gizmo (requires OpenGL context)
   impl_->InitPivotGizmo();
   
-  // Initialize modular tile renderer
-  if (!impl_->tileRenderer.Initialize()) {
-    std::cerr << "[Warning] Failed to initialize TileRenderer, using legacy renderer" << std::endl;
-  }
-
   impl_->loadingTexture = CreateLoadingTexture();
 
   // HS-style pole mesh initialization
@@ -9008,7 +9042,8 @@ void GlobeEngine::Impl::RenderTiles(const glm::mat4& mvp, const std::array<Plane
     glm::vec3 cameraPos = glm::vec3(eyeWorld);
     float fovRad = glm::radians(GLOBE_FOV);
 
-    // Use legacy BuildVisibleTileSets (TileLodSelector has rendering bugs)
+    // DEPRECATED: TileLodSelector bypassed - see tile_lod_selector.h for details
+    // Using legacy BuildVisibleTileSets until SSE-based LOD is fixed
     BuildVisibleTileSets(frustum, mvp, cameraPos, fovRad, config.windowWidth, config.windowHeight,
                          config.sseThresholdPx, tiltFactor, config.minZoom, baseLayerMaxZoom,
                          tiles, requiredTiles, leafTiles, &cellDivisionCount,
@@ -9099,14 +9134,17 @@ void GlobeEngine::Impl::RenderTiles(const glm::mat4& mvp, const std::array<Plane
       queueSize = downloadQueue.size();
     }
 
-    // TEMP: Disable scheduler, use legacy download system for faster loading
+    // Scheduler controlled by config.useScheduler flag (see globe_config.h)
+    // Legacy download system is faster for initial loading, scheduler provides
+    // more sophisticated priority management for interactive use
+    TileScheduler* activeScheduler = config.useScheduler ? scheduler.get() : nullptr;
     SyncRasterTiles(&deferredQueue, tiles, visibleTiles, config, loadingTexture,
                     requiredTiles, leafTiles, pendingRaster, downloadQueue,
                     downloadMutex, downloadCv, config.segments,
                     heightSamplerPtr,
                     meshRebuilds, maxRebuilds, queueSize,
                     textureUploads, maxUploads,
-                    nullptr,  // scheduler disabled
+                    activeScheduler,
                     static_cast<uint32_t>(frameCount),
                     &pendingMutex,
                     &cameraPos, currentZoom, &mvp);
@@ -9164,10 +9202,6 @@ void GlobeEngine::Impl::RenderTiles(const glm::mat4& mvp, const std::array<Plane
     }
 
     ProcessReadyDownloads();
-    
-    // Process any queued texture uploads from TileTextureManager
-    textureManager.ProcessUploads(static_cast<uint32_t>(frameCount));
-    textureManager.ResetFrameStats();
 
     glState.UseProgram(program);
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
