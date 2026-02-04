@@ -15,6 +15,7 @@ namespace globe {
 struct LodSelection {
     std::unordered_set<TileKey> required;  // All tiles needed (ancestors + leaves)
     std::vector<TileKey> leaves;           // Tiles to render
+    std::vector<TileKey> prefetch;         // Tiles to prefetch (neighbors, next zoom)
     int refinedCount = 0;                  // Number of subdivisions
 };
 

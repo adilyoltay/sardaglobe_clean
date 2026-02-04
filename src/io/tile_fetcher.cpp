@@ -92,7 +92,8 @@ void TileFetcher::WorkerLoop() {
             if (!running_) break;
             if (queue_.empty()) continue;
             
-            request = std::move(const_cast<FetchRequest&>(queue_.top()));
+            // Copy then pop - avoids UB from const_cast + move on priority_queue::top()
+            request = queue_.top();
             queue_.pop();
         }
         

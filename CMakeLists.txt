@@ -95,12 +95,14 @@ add_executable(native_globe
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
   src/io/tile_cache.cpp
+  src/io/dem_manager.cpp
   # Scheduling module
   src/scheduling/tile_scheduler.cpp
   src/scheduling/lod_selector.cpp
   # Rendering module
   src/rendering/texture_manager.cpp
   src/rendering/shader_manager.cpp
+  src/rendering/tile_renderer.cpp
   # Engine module
   src/engine/globe_engine.cpp
 )

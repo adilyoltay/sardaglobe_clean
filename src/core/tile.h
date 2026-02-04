@@ -51,6 +51,27 @@ struct Tile {
     bool demUsed = false;
     bool demPending = false;
     
+    // Fade-in animation (Google Earth style smooth appearance)
+    float fadeAlpha = 0.0f;          // Current fade value (0=invisible, 1=fully visible)
+    double fadeStartTime = 0.0;       // When fade started
+    bool fadeComplete = false;        // True when fade finished
+    static constexpr float FADE_DURATION = 0.3f;  // 300ms fade-in
+    
+    // Update fade animation, returns current alpha
+    float UpdateFade(double currentTime) {
+        if (fadeComplete) return 1.0f;
+        if (fadeStartTime == 0.0) {
+            fadeStartTime = currentTime;
+        }
+        float elapsed = static_cast<float>(currentTime - fadeStartTime);
+        fadeAlpha = std::min(1.0f, elapsed / FADE_DURATION);
+        if (fadeAlpha >= 1.0f) {
+            fadeComplete = true;
+            fadeAlpha = 1.0f;
+        }
+        return fadeAlpha;
+    }
+    
     // Usage tracking
     uint64_t lastFrameUsed = 0;
     uint32_t accessCount = 0;

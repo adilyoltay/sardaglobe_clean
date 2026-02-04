@@ -37,10 +37,17 @@ struct Config {
     double uploadBudgetMs = TEXTURE_UPLOAD_BUDGET_MS;
     
     // Features
-    bool demEnabled = false;
+    bool demEnabled = true;           // Enable terrain elevation
     bool vectorEnabled = false;
     bool wireframeMode = false;
     bool is2D = false;
+    
+    // DEM/Terrain settings (PiriReis mesh service)
+    std::string demBaseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
+    int demMeshN = 5;                 // Grid resolution per tile (5x5)
+    size_t demCacheSize = 256;        // Max cached DEM tiles
+    double demHeightScale = 1.0;      // Height exaggeration (1.0 = realistic)
+    bool demDebug = false;            // Enable DEM debug logging
     
     // Debug
     bool showDebugInfo = true;

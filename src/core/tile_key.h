@@ -63,6 +63,15 @@ struct TileKey {
         if (ny < 0 || ny >= n) return TileKey(-1, -1, -1);  // Invalid
         return TileKey(level, nx, ny);
     }
+    
+    // All 8 neighbors (for prefetch)
+    std::array<TileKey, 8> Neighbors() const {
+        return {{
+            Neighbor(-1, -1), Neighbor(0, -1), Neighbor(1, -1),
+            Neighbor(-1,  0),                  Neighbor(1,  0),
+            Neighbor(-1,  1), Neighbor(0,  1), Neighbor(1,  1)
+        }};
+    }
 
     // String conversion "z/x/y"
     std::string ToString() const {

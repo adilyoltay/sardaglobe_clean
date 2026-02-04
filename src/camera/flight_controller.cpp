@@ -174,9 +174,26 @@ void FlightController::OnMouseDown(int button, double x, double y, double time) 
         if (m_shiftDown) {
             // Shift+Left = Orbit (OrbitAction)
             m_actionMode = ActionMode::Orbit;
-            m_hasOrbitPivot = hitGlobe;
-            m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
-            m_orbitBaselineSet = false;  // Will be set on first move after threshold
+            
+            if (m_orbitPivotMode == OrbitPivotMode::ScreenCenter) {
+                // Screen center pivot (Google Earth default)
+                double centerX = m_windowW * 0.5;
+                double centerY = m_windowH * 0.5;
+                glm::dvec3 centerHitPoint;
+                bool centerHit = m_pickCallback ? m_pickCallback(centerX, centerY, centerHitPoint) : false;
+                if (!centerHit) {
+                    glm::dvec3 org, d;
+                    ScreenToRay(centerX, centerY, org, d);
+                    centerHit = RayGlobeIntersect(org, d, centerHitPoint);
+                }
+                m_hasOrbitPivot = centerHit;
+                m_orbitPivot = centerHit ? centerHitPoint : glm::dvec3(0.0);
+            } else {
+                // CursorPick mode: use cursor position (no snap)
+                m_hasOrbitPivot = hitGlobe;
+                m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
+            }
+            m_orbitBaselineSet = false;
         } else {
             // Left = Pan (EarthPanRotateZoomAction)
             m_actionMode = ActionMode::Pan;
@@ -194,9 +211,26 @@ void FlightController::OnMouseDown(int button, double x, double y, double time) 
     // MIDDLE BUTTON = Orbit
     else if (button == 2) {
         m_actionMode = ActionMode::Orbit;
-        m_hasOrbitPivot = hitGlobe;
-        m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
-        m_orbitBaselineSet = false;  // Will be set on first move after threshold
+        
+        if (m_orbitPivotMode == OrbitPivotMode::ScreenCenter) {
+            // Screen center pivot (Google Earth default)
+            double centerX = m_windowW * 0.5;
+            double centerY = m_windowH * 0.5;
+            glm::dvec3 centerHitPoint;
+            bool centerHit = m_pickCallback ? m_pickCallback(centerX, centerY, centerHitPoint) : false;
+            if (!centerHit) {
+                glm::dvec3 org, d;
+                ScreenToRay(centerX, centerY, org, d);
+                centerHit = RayGlobeIntersect(org, d, centerHitPoint);
+            }
+            m_hasOrbitPivot = centerHit;
+            m_orbitPivot = centerHit ? centerHitPoint : glm::dvec3(0.0);
+        } else {
+            // CursorPick mode: use cursor position (no snap)
+            m_hasOrbitPivot = hitGlobe;
+            m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
+        }
+        m_orbitBaselineSet = false;
     }
     // RIGHT BUTTON = Zoom
     else if (button == 1) {
@@ -233,6 +267,10 @@ void FlightController::OnMouseUp(int button, double time) {
                 m_throwHasOrbitPivot = m_hasOrbitPivot;
                 m_throwOrbitPivot = m_orbitPivot;
                 m_throwPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;
+                // Store current forward for CursorPick throw
+                glm::dvec3 fwd, up, right;
+                m_camera.GetBasisVectors(fwd, up, right);
+                m_throwForward = fwd;
                 StartThrowAnimation(ThrowAnimationType::Arcball, time);
             }
         }
@@ -399,6 +437,10 @@ void FlightController::OnMouseMove(double x, double y, double time) {
             m_orbitStartPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;
             m_orbitStartHeading = m_camera.GetHeading();
             m_orbitStartTilt = m_camera.GetTilt();
+            // Store baseline forward for CursorPick mode (world-space)
+            glm::dvec3 fwd, up, right;
+            m_camera.GetBasisVectors(fwd, up, right);
+            m_orbitStartForward = fwd;
             m_orbitBaselineSet = true;
             // Zero velocities on baseline frame to prevent spike
             m_headingVelocity = 0.0;
@@ -457,36 +499,60 @@ void FlightController::OnMouseMove(double x, double y, double time) {
             
             m_camera.SetLatLonAlt(lat, lon, altM);
             
-            // DERIVE HEADING/TILT FROM CAMERA->PIVOT VECTOR (pivot stays centered)
-            glm::dvec3 finalCamPos = m_camera.GetPositionECEF();
-            glm::dvec3 camToPivot = m_orbitPivot - finalCamPos;
-            glm::dvec3 camUp = glm::normalize(finalCamPos);
-            
-            // Tilt = angle between camera-up and camera-to-pivot
-            glm::dvec3 camToPivotDir = glm::normalize(camToPivot);
-            double dotUp = glm::dot(camUp, camToPivotDir);
-            double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
-            newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
-            
-            // Heading = azimuth of pivot relative to camera's local north
-            glm::dvec3 camEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), camUp));
-            if (glm::length(camEast) < 0.1) camEast = glm::dvec3(1, 0, 0);
-            glm::dvec3 camNorth = glm::cross(camUp, camEast);
-            
-            // Project camToPivot onto horizontal plane
-            glm::dvec3 horizDir = camToPivotDir - camUp * glm::dot(camToPivotDir, camUp);
-            if (glm::length(horizDir) > 1e-6) {
-                horizDir = glm::normalize(horizDir);
-                double headingRad = std::atan2(glm::dot(horizDir, camEast), glm::dot(horizDir, camNorth));
-                double newHeading = glm::degrees(headingRad);
-                while (newHeading < 0.0) newHeading += 360.0;
-                while (newHeading >= 360.0) newHeading -= 360.0;
+            // Heading/Tilt update depends on pivot mode
+            if (m_orbitPivotMode == OrbitPivotMode::ScreenCenter) {
+                // ScreenCenter: derive heading/tilt from camera->pivot (pivot stays centered)
+                glm::dvec3 finalCamPos = m_camera.GetPositionECEF();
+                glm::dvec3 camToPivot = m_orbitPivot - finalCamPos;
+                glm::dvec3 camUp = glm::normalize(finalCamPos);
                 
-                if (!m_lockNorth) {
-                    m_camera.SetHeading(newHeading);
+                glm::dvec3 camToPivotDir = glm::normalize(camToPivot);
+                double dotUp = glm::dot(camUp, camToPivotDir);
+                double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
+                newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+                
+                glm::dvec3 camEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), camUp));
+                if (glm::length(camEast) < 0.1) camEast = glm::dvec3(1, 0, 0);
+                glm::dvec3 camNorth = glm::cross(camUp, camEast);
+                
+                glm::dvec3 horizDir = camToPivotDir - camUp * glm::dot(camToPivotDir, camUp);
+                if (glm::length(horizDir) > 1e-6) {
+                    horizDir = glm::normalize(horizDir);
+                    double hRad = std::atan2(glm::dot(horizDir, camEast), glm::dot(horizDir, camNorth));
+                    double newHeading = glm::degrees(hRad);
+                    while (newHeading < 0.0) newHeading += 360.0;
+                    while (newHeading >= 360.0) newHeading -= 360.0;
+                    if (!m_lockNorth) m_camera.SetHeading(newHeading);
                 }
+                m_camera.SetTilt(newTilt);
+            } else {
+                // CursorPick: apply SAME rotation to forward vector, then derive heading/tilt
+                // This prevents drift caused by ENU frame change as camera moves
+                glm::dvec3 rotatedForward = glm::normalize(glm::dvec3(tiltRot * headingRot * glm::dvec4(m_orbitStartForward, 0.0)));
+                
+                // Derive heading/tilt from rotated forward in new camera's local frame
+                glm::dvec3 newCamUp = glm::normalize(m_camera.GetPositionECEF());
+                glm::dvec3 newCamEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), newCamUp));
+                if (glm::length(newCamEast) < 0.1) newCamEast = glm::dvec3(1, 0, 0);
+                glm::dvec3 newCamNorth = glm::cross(newCamUp, newCamEast);
+                
+                // Tilt = angle between forward and horizontal plane
+                double dotUp = glm::dot(rotatedForward, newCamUp);
+                double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
+                newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+                
+                // Heading = azimuth of forward in horizontal plane
+                glm::dvec3 horizFwd = rotatedForward - newCamUp * dotUp;
+                if (glm::length(horizFwd) > 1e-6) {
+                    horizFwd = glm::normalize(horizFwd);
+                    double hRad = std::atan2(glm::dot(horizFwd, newCamEast), glm::dot(horizFwd, newCamNorth));
+                    double newHeading = glm::degrees(hRad);
+                    while (newHeading < 0.0) newHeading += 360.0;
+                    while (newHeading >= 360.0) newHeading -= 360.0;
+                    if (!m_lockNorth) m_camera.SetHeading(newHeading);
+                }
+                m_camera.SetTilt(newTilt);
             }
-            m_camera.SetTilt(newTilt);
         } else {
             // No pivot - just update heading/tilt from deltas
             double newHeading = m_orbitStartHeading + deltaHeading;
@@ -744,25 +810,52 @@ void FlightController::UpdateThrowAnimation(double dt, double time) {
                     double altM = (r - EARTH_RADIUS_KM) * 1000.0;
                     m_camera.SetLatLonAlt(lat, lon, altM);
                     
-                    // Derive heading/tilt from camera->pivot
-                    glm::dvec3 camUp = glm::normalize(newCamPos);
-                    glm::dvec3 camToPivot = glm::normalize(m_throwOrbitPivot - newCamPos);
-                    double dotUp = glm::dot(camUp, camToPivot);
-                    double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
-                    newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
-                    
-                    glm::dvec3 camEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), camUp));
-                    if (glm::length(camEast) < 0.1) camEast = glm::dvec3(1, 0, 0);
-                    glm::dvec3 camNorth = glm::cross(camUp, camEast);
-                    glm::dvec3 horizDir = camToPivot - camUp * glm::dot(camToPivot, camUp);
-                    if (glm::length(horizDir) > 1e-6) {
-                        horizDir = glm::normalize(horizDir);
-                        double hRad = std::atan2(glm::dot(horizDir, camEast), glm::dot(horizDir, camNorth));
-                        double newHeading = glm::degrees(hRad);
-                        while (newHeading < 0.0) newHeading += 360.0;
-                        m_camera.SetHeading(newHeading);
+                    // Heading/Tilt update depends on pivot mode
+                    if (m_orbitPivotMode == OrbitPivotMode::ScreenCenter) {
+                        // ScreenCenter: derive heading/tilt from camera->pivot
+                        glm::dvec3 camUp = glm::normalize(newCamPos);
+                        glm::dvec3 camToPivot = glm::normalize(m_throwOrbitPivot - newCamPos);
+                        double dotUp = glm::dot(camUp, camToPivot);
+                        double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
+                        newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+                        
+                        glm::dvec3 camEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), camUp));
+                        if (glm::length(camEast) < 0.1) camEast = glm::dvec3(1, 0, 0);
+                        glm::dvec3 camNorth = glm::cross(camUp, camEast);
+                        glm::dvec3 horizDir = camToPivot - camUp * glm::dot(camToPivot, camUp);
+                        if (glm::length(horizDir) > 1e-6 && !m_lockNorth) {
+                            horizDir = glm::normalize(horizDir);
+                            double hRad = std::atan2(glm::dot(horizDir, camEast), glm::dot(horizDir, camNorth));
+                            double newHeading = glm::degrees(hRad);
+                            while (newHeading < 0.0) newHeading += 360.0;
+                            m_camera.SetHeading(newHeading);
+                        }
+                        m_camera.SetTilt(newTilt);
+                    } else {
+                        // CursorPick: apply SAME rotation to forward, then derive heading/tilt
+                        // This prevents drift caused by ENU frame change
+                        m_throwForward = glm::normalize(glm::dvec3(tiltRot * headingRot * glm::dvec4(m_throwForward, 0.0)));
+                        
+                        glm::dvec3 newCamUp = glm::normalize(newCamPos);
+                        glm::dvec3 newCamEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), newCamUp));
+                        if (glm::length(newCamEast) < 0.1) newCamEast = glm::dvec3(1, 0, 0);
+                        glm::dvec3 newCamNorth = glm::cross(newCamUp, newCamEast);
+                        
+                        double dotUp = glm::dot(m_throwForward, newCamUp);
+                        double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
+                        newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+                        
+                        glm::dvec3 horizFwd = m_throwForward - newCamUp * dotUp;
+                        if (glm::length(horizFwd) > 1e-6 && !m_lockNorth) {
+                            horizFwd = glm::normalize(horizFwd);
+                            double hRad = std::atan2(glm::dot(horizFwd, newCamEast), glm::dot(horizFwd, newCamNorth));
+                            double newHeading = glm::degrees(hRad);
+                            while (newHeading < 0.0) newHeading += 360.0;
+                            while (newHeading >= 360.0) newHeading -= 360.0;
+                            m_camera.SetHeading(newHeading);
+                        }
+                        m_camera.SetTilt(newTilt);
                     }
-                    m_camera.SetTilt(newTilt);
                 } else {
                     // No pivot - just heading/tilt (lockNorth already applied to headingVel)
                     double newTilt = m_camera.GetTilt() + tiltVel * dt;

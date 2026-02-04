@@ -130,9 +130,24 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
         const TileKey& key = candidates[i].second;
         auto it = tiles.find(key);
         if (it != tiles.end()) {
-            if (it->second.ownsTexture && it->second.textureId != 0) {
-                DeleteTexture(it->second.textureId);
+            Tile& tile = it->second;
+            
+            // Delete texture
+            if (tile.ownsTexture && tile.textureId != 0) {
+                DeleteTexture(tile.textureId);
             }
+            
+            // Delete mesh (VAO/VBO/EBO) - CRITICAL: Prevents memory leak
+            if (tile.vao != 0) {
+                glDeleteVertexArrays(1, &tile.vao);
+            }
+            if (tile.vbo != 0) {
+                glDeleteBuffers(1, &tile.vbo);
+            }
+            if (tile.ebo != 0) {
+                glDeleteBuffers(1, &tile.ebo);
+            }
+            
             tiles.erase(it);
         }
     }

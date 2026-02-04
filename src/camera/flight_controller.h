@@ -68,6 +68,14 @@ enum class TrajectoryMode {
 };
 
 // ============================================================================
+// ORBIT PIVOT MODE
+// ============================================================================
+enum class OrbitPivotMode {
+    ScreenCenter,   // Pivot from screen center (Google Earth default)
+    CursorPick      // Pivot from cursor position (no snap)
+};
+
+// ============================================================================
 // FLIGHT CONTROLLER - 100% Google Earth Parity
 // Based on: EarthPanRotateZoomAction, OrbitAction, DampedVelocityAction
 // ============================================================================
@@ -98,6 +106,8 @@ public:
     void SetNavigationSpeed(double speed) { m_navSpeed = speed; }
     void SetLockNorth(bool lock) { m_lockNorth = lock; }
     void SetZoomToCursor(bool enable) { m_zoomToCursor = enable; }
+    void SetOrbitPivotMode(OrbitPivotMode mode) { m_orbitPivotMode = mode; }
+    OrbitPivotMode GetOrbitPivotMode() const { return m_orbitPivotMode; }
     
     // === Status ===
     bool IsMoving() const;
@@ -123,6 +133,7 @@ private:
     double m_navSpeed = 1.0;
     bool m_lockNorth = false;
     bool m_zoomToCursor = true;
+    OrbitPivotMode m_orbitPivotMode = OrbitPivotMode::CursorPick;  // Default: cursor pick (no snap)
     
     // === Modifier Keys ===
     bool m_shiftDown = false;
@@ -161,6 +172,7 @@ private:
     // === Orbit State (OrbitAction) ===
     glm::dvec3 m_orbitPivot{0.0};
     glm::dvec3 m_orbitStartPivotToCam{0.0};  // Baseline pivot-to-cam for total rotation
+    glm::dvec3 m_orbitStartForward{0.0, 1.0, 0.0};  // Baseline camera forward (for CursorPick)
     bool m_hasOrbitPivot = false;
     bool m_orbitBaselineSet = false;         // True after first move (prevents flick)
     double m_orbitStartHeading = 0.0;
@@ -190,6 +202,7 @@ private:
     double m_throwTiltVel = 0.0;
     glm::dvec3 m_throwOrbitPivot{0.0};      // Pivot point for orbit throw
     glm::dvec3 m_throwPivotToCam{0.0};      // Current pivot-to-cam for throw
+    glm::dvec3 m_throwForward{0.0, 1.0, 0.0}; // Current forward for CursorPick throw
     bool m_throwHasOrbitPivot = false;
     
     // ZoomThrowAnimation data

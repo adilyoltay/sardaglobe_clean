@@ -2,37 +2,37 @@
 	"sources" : 
 	[
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/CMakeFiles/glm-populate"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/CMakeFiles/glm-populate"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/CMakeFiles/glm-populate.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/CMakeFiles/glm-populate.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/CMakeFiles/glm-populate-complete.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/CMakeFiles/glm-populate-complete.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-build.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-build.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-configure.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-configure.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-download.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-download.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-install.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-install.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-mkdir.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-mkdir.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-patch.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-patch.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-test.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-test.rule"
 		},
 		{
-			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-update.rule"
+			"file" : "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/glm-subbuild/glm-populate-prefix/src/glm-populate-stamp/glm-populate-update.rule"
 		}
 	],
 	"target" : 

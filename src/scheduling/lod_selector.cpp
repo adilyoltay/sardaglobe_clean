@@ -95,6 +95,32 @@ void LodSelector::TraverseTile(
     if (!subdivide) {
         // This is a leaf
         result.leaves.push_back(key);
+        
+        // Prefetch: add neighbors for smooth panning (Google Earth style)
+        auto neighbors = key.Neighbors();
+        for (const auto& neighbor : neighbors) {
+            // Skip invalid neighbors (at edges)
+            if (!neighbor.IsValid()) continue;
+            
+            if (result.required.find(neighbor) == result.required.end()) {
+                // Check if neighbor is visible (roughly)
+                glm::vec3 neighborCenter = TileCenterWorld(neighbor);
+                float neighborRadius = TileBoundingRadius(neighbor);
+                if (frustum_.IsSphereVisible(neighborCenter, neighborRadius * 1.5f)) {
+                    result.prefetch.push_back(neighbor);
+                }
+            }
+        }
+        
+        // Prefetch: add children for zoom-in anticipation
+        if (key.level < settings.maxZoom - 1) {
+            auto children = key.Children();
+            for (const auto& child : children) {
+                if (result.required.find(child) == result.required.end()) {
+                    result.prefetch.push_back(child);
+                }
+            }
+        }
         return;
     }
     

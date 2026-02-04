@@ -1,7 +1,7 @@
 # Distributed under the OSI-approved BSD 3-Clause License.  See accompanying
-# file Copyright.txt or https://cmake.org/licensing for details.
+# file LICENSE.rst or https://cmake.org/licensing for details.
 
-cmake_minimum_required(VERSION 3.31.6)
+cmake_minimum_required(VERSION 4.1.2)
 
 # Reject any attempt to use a toolchain file. We must not use one because
 # we could be downloading it here. If the CMAKE_TOOLCHAIN_FILE environment
@@ -19,17 +19,17 @@ project(protozero-populate NONE)
 # Pass through things we've already detected in the main project to avoid
 # paying the cost of redetecting them again in ExternalProject_Add()
 set(GIT_EXECUTABLE [==[/usr/bin/git]==])
-set(GIT_VERSION_STRING [==[2.39.5 (Apple Git-154)]==])
+set(GIT_VERSION_STRING [==[2.50.1 (Apple Git-155)]==])
 set_property(GLOBAL PROPERTY _CMAKE_FindGit_GIT_EXECUTABLE_VERSION
-  [==[/usr/bin/git;2.39.5 (Apple Git-154)]==]
+  [==[/usr/bin/git;2.50.1 (Apple Git-155)]==]
 )
 
 
 include(ExternalProject)
 ExternalProject_Add(protozero-populate
                      "UPDATE_DISCONNECTED" "False" "GIT_REPOSITORY" "https://github.com/mapbox/protozero.git" "EXTERNALPROJECT_INTERNAL_ARGUMENT_SEPARATOR" "GIT_TAG" "v1.7.1"
-                    SOURCE_DIR          "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/protozero-src"
-                    BINARY_DIR          "/Users/adilyoltay/Desktop/native_globe_clean/build/_deps/protozero-build"
+                    SOURCE_DIR          "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/protozero-src"
+                    BINARY_DIR          "/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/protozero-build"
                     CONFIGURE_COMMAND   ""
                     BUILD_COMMAND       ""
                     INSTALL_COMMAND     ""
