@@ -90,6 +90,7 @@ bool GlobeEngine::Init() {
     textureManager_ = std::make_unique<TextureManager>(config_);
     shaderManager_ = std::make_unique<ShaderManager>();
     tileRenderer_ = std::make_unique<TileRenderer>(*shaderManager_);
+    renderFrame_ = std::make_unique<RenderFrame>(*tileRenderer_, *shaderManager_);
     
     // Init DEM manager for terrain elevation
     if (config_.demEnabled) {
@@ -416,43 +417,11 @@ void GlobeEngine::Render() {
     glm::dmat4 projD = camera_->GetProjectionMatrix();
     glm::mat4 mvp = glm::mat4(projD * viewD);
     
-    // Collect tiles to render with fade-in animation (Google Earth style)
-    // Only render current leaves (not stale non-leaf tiles)
+    // Draw tiles via RenderFrame (GE-style separation)
     double currentTime = glfwGetTime();
-    std::vector<std::pair<Tile*, float>> tilesToRender;  // tile + fade alpha
-    tilesToRender.reserve(currentLeafSet_.size());
-    
-    for (const TileKey& key : currentLeafSet_) {
-        auto it = tiles_.find(key);
-        if (it != tiles_.end()) {
-            Tile& tile = it->second;
-            if (tile.IsReady() && tile.hasMesh && tile.textureId != 0) {
-                float alpha = tile.UpdateFade(currentTime);
-                tilesToRender.push_back({&tile, alpha});
-            }
-        }
-    }
-    
-    // Sort by alpha for proper blending (opaque first, then transparent)
-    std::sort(tilesToRender.begin(), tilesToRender.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
-    
-    // Use TileRenderer for unified render path
-    tileRenderer_->BeginBatch(mvp, config_.wireframeMode);
-    
-    // Enable blending for fade-in effect
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    
-    // Render collected tiles with fade
-    for (const auto& [tile, alpha] : tilesToRender) {
-        glUniform1f(shaderManager_->GetFadeLocation(), alpha);
-        tileRenderer_->RenderTile(*tile);
-    }
-    
-    glDisable(GL_BLEND);
-    
-    tileRenderer_->EndBatch();
+    auto drawStats = renderFrame_->DrawTiles(
+        currentLeafSet_, tiles_, mvp, currentTime, config_.wireframeMode
+    );
     
     // Render pivot gizmo (Google Earth style target icon)
     RenderPivot(mvp);
@@ -462,8 +431,8 @@ void GlobeEngine::Render() {
     debugStats_.tileCount = static_cast<int>(tiles_.size());
     debugStats_.pendingFetches = scheduler_->GetPendingFetches();
     debugStats_.pendingDecodes = scheduler_->GetPendingDecodes();
-    debugStats_.readyTiles = static_cast<int>(tilesToRender.size());
-    debugStats_.visibleTiles = static_cast<int>(tilesToRender.size());
+    debugStats_.readyTiles = drawStats.tilesRendered;
+    debugStats_.visibleTiles = drawStats.tilesRendered;
     debugStats_.currentZoom = GetCurrentZoom();
     camera_->GetLatLonAlt(debugStats_.latitude, debugStats_.longitude, debugStats_.altitude);
     debugStats_.heading = camera_->GetHeading();

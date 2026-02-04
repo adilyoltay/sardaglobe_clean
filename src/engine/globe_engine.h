@@ -9,6 +9,7 @@
 #include "../rendering/texture_manager.h"
 #include "../rendering/shader_manager.h"
 #include "../rendering/tile_renderer.h"
+#include "../rendering/render_frame.h"
 #include "../io/dem_manager.h"
 #include "../camera/earth_camera.h"
 #include "../camera/flight_controller.h"
@@ -99,6 +100,7 @@ private:
     std::unique_ptr<DemManager> demManager_;
     TilePyramid tilePyramid_;
     JobSystem jobSystem_;
+    std::unique_ptr<RenderFrame> renderFrame_;
     LayerManager layerManager_;
     
     // Tiles

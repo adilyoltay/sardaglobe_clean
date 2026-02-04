@@ -147,23 +147,21 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
         return;
     }
     
-    // Safety check: if pinned set is >= maxTiles, we can't evict anything useful
-    // This prevents unbounded memory growth - pinned set should be smaller than maxTiles
-    int pinnedCount = static_cast<int>(pinnedKeys_.size());
-    if (pinnedCount >= maxTiles) {
-        // Over budget with pinned tiles - eviction won't help
-        // This is a configuration issue (maxTiles too low or too many visible tiles)
-        return;
-    }
-    
-    // Build list of eviction candidates (ready tiles sorted by last access)
-    // CRITICAL: Skip pinned tiles - they are protected from eviction
+    // Build list of eviction candidates and count actual pinned tiles
+    // CRITICAL: Count pinned based on tiles that actually exist and own textures
+    // (pinnedKeys_ may contain keys not yet loaded)
     std::vector<std::pair<double, TileKey>> candidates;
+    int actualPinnedCount = 0;
+    
     for (const auto& [key, tile] : tiles) {
         if (tile.state == TileState::Ready && tile.ownsTexture) {
-            // Skip pinned tiles (GE-style cache policy)
-            if (pinnedKeys_.count(key) > 0) continue;
-            candidates.emplace_back(tile.lastAccessTime, key);
+            if (pinnedKeys_.count(key) > 0) {
+                // This tile is pinned and loaded - count it
+                ++actualPinnedCount;
+            } else {
+                // Unpinned tile - candidate for eviction
+                candidates.emplace_back(tile.lastAccessTime, key);
+            }
         }
     }
     
@@ -171,10 +169,9 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
     std::sort(candidates.begin(), candidates.end());
     
     // Evict oldest unpinned tiles
-    // Adjust target to account for pinned tiles that can't be evicted
-    int unpinnedTarget = maxTiles - pinnedCount;
-    int unpinnedCount = static_cast<int>(tiles.size()) - pinnedCount;
-    int toEvict = std::max(0, unpinnedCount - unpinnedTarget);
+    // When pinned >= maxTiles, unpinnedTarget clamps to 0 → evict ALL unpinned
+    int unpinnedTarget = std::max(0, maxTiles - actualPinnedCount);
+    int toEvict = std::max(0, static_cast<int>(candidates.size()) - unpinnedTarget);
     for (int i = 0; i < toEvict && i < static_cast<int>(candidates.size()); ++i) {
         const TileKey& key = candidates[i].second;
         auto it = tiles.find(key);

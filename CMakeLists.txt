@@ -107,6 +107,7 @@ add_executable(native_globe
   src/rendering/shader_manager.cpp
   src/rendering/tile_renderer.cpp
   src/rendering/tile_mesh_builder.cpp
+  src/rendering/render_frame.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
   src/core/layer_manager.cpp
