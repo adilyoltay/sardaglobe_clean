@@ -119,15 +119,50 @@ void TextureManager::DeleteTexture(uint32_t textureId) {
     }
 }
 
+// Pin/Unpin API (GE-style cache policy)
+void TextureManager::Pin(const TileKey& key) {
+    pinnedKeys_.insert(key);
+}
+
+void TextureManager::Unpin(const TileKey& key) {
+    pinnedKeys_.erase(key);
+}
+
+void TextureManager::SetPinnedSet(const std::unordered_set<TileKey>& keys) {
+    pinnedKeys_ = keys;
+}
+
+void TextureManager::ClearPinned() {
+    pinnedKeys_.clear();
+}
+
+bool TextureManager::IsPinned(const TileKey& key) const {
+    return pinnedKeys_.count(key) > 0;
+}
+
 void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int maxTiles) {
+    lastEvictedCount_ = 0;
+    
     if (static_cast<int>(tiles.size()) <= maxTiles) {
         return;
     }
     
+    // Safety check: if pinned set is >= maxTiles, we can't evict anything useful
+    // This prevents unbounded memory growth - pinned set should be smaller than maxTiles
+    int pinnedCount = static_cast<int>(pinnedKeys_.size());
+    if (pinnedCount >= maxTiles) {
+        // Over budget with pinned tiles - eviction won't help
+        // This is a configuration issue (maxTiles too low or too many visible tiles)
+        return;
+    }
+    
     // Build list of eviction candidates (ready tiles sorted by last access)
+    // CRITICAL: Skip pinned tiles - they are protected from eviction
     std::vector<std::pair<double, TileKey>> candidates;
     for (const auto& [key, tile] : tiles) {
         if (tile.state == TileState::Ready && tile.ownsTexture) {
+            // Skip pinned tiles (GE-style cache policy)
+            if (pinnedKeys_.count(key) > 0) continue;
             candidates.emplace_back(tile.lastAccessTime, key);
         }
     }
@@ -135,8 +170,11 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
     // Sort by access time (oldest first)
     std::sort(candidates.begin(), candidates.end());
     
-    // Evict oldest tiles
-    int toEvict = static_cast<int>(tiles.size()) - maxTiles;
+    // Evict oldest unpinned tiles
+    // Adjust target to account for pinned tiles that can't be evicted
+    int unpinnedTarget = maxTiles - pinnedCount;
+    int unpinnedCount = static_cast<int>(tiles.size()) - pinnedCount;
+    int toEvict = std::max(0, unpinnedCount - unpinnedTarget);
     for (int i = 0; i < toEvict && i < static_cast<int>(candidates.size()); ++i) {
         const TileKey& key = candidates[i].second;
         auto it = tiles.find(key);
@@ -160,6 +198,7 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
             }
             
             tiles.erase(it);
+            ++lastEvictedCount_;
         }
     }
 }

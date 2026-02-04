@@ -240,8 +240,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // CRITICAL: Pass FOV directly from camera, not extracted from MVP
     float fovDegrees = static_cast<float>(camera_->GetFov());
     
+    // Get view direction from camera for center bias scoring
+    glm::dvec3 forward, up, right;
+    camera_->GetBasisVectors(forward, up, right);
+    glm::vec3 viewDir = glm::vec3(forward);
+    
     const LodSelection& selection = tilePyramid_.Select(
-        cameraPos, mvp, fovDegrees,
+        cameraPos, viewDir, mvp, fovDegrees,
         config_.windowWidth, config_.windowHeight,
         tiles_
     );
@@ -249,8 +254,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Store leafSet for render filtering
     currentLeafSet_ = selection.leafSet;
     
-    // Request required tiles
-    for (const TileKey& key : selection.required) {
+    // Request required tiles using ranked list (GE-style SSE + center bias priority)
+    for (const RankedTile& ranked : tilePyramid_.GetRankedRequired()) {
+        const TileKey& key = ranked.key;
+        
         auto it = tiles_.find(key);
         if (it == tiles_.end()) {
             // Create tile entry
@@ -265,11 +272,12 @@ void GlobeEngine::Update(double dt, double currentTime) {
         Tile& tile = it->second;
         tile.lastAccessTime = glfwGetTime();
         tile.accessCount++;
+        tile.importance = ranked.score;  // Store score for eviction decisions
         
         if (tile.state == TileState::Unloaded) {
             bool isLeaf = selection.leafSet.count(key) > 0;
             Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
-            scheduler_->Request(key, priority);
+            scheduler_->Request(key, priority, ranked.score);
             TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
         }
         else if (tile.state == TileState::Failed) {
@@ -281,18 +289,22 @@ void GlobeEngine::Update(double dt, double currentTime) {
             if (timeSinceLastRetry >= backoffSeconds && tile.retryCount < 5) {
                 bool isLeaf = selection.leafSet.count(key) > 0;
                 Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
-                scheduler_->Request(key, priority);
+                scheduler_->Request(key, priority, ranked.score);
                 TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
             }
         }
     }
     
-    // Prefetch tiles for smooth navigation (low priority)
-    // Limit prefetch to avoid overwhelming the network
+    // Prefetch tiles using ranked list (low priority, score-ordered)
     int prefetchCount = 0;
     const int maxPrefetch = 8;
-    for (const TileKey& key : selection.prefetch) {
+    for (const RankedTile& ranked : tilePyramid_.GetRankedPrefetch()) {
         if (prefetchCount >= maxPrefetch) break;
+        
+        const TileKey& key = ranked.key;
+        
+        // Skip if already required
+        if (tilePyramid_.IsRequired(key)) continue;
         
         auto it = tiles_.find(key);
         if (it == tiles_.end()) {
@@ -306,8 +318,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
         
         Tile& tile = it->second;
+        tile.importance = ranked.score;
+        
         if (tile.state == TileState::Unloaded) {
-            scheduler_->Request(key, Priority::Low);  // Low priority prefetch
+            scheduler_->Request(key, Priority::Low, ranked.score);  // Low priority prefetch with score
             TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
             ++prefetchCount;
         }
@@ -385,7 +399,11 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Process queued mesh rebuilds with frame budget
     ProcessMeshRebuildQueue();
     
-    // Evict old tiles
+    // Pin visible tiles to protect from eviction (GE-style cache policy)
+    // Required tiles (leaves + ancestors) are pinned
+    textureManager_->SetPinnedSet(selection.required);
+    
+    // Evict old tiles (respects pinned tiles)
     textureManager_->EvictIfNeeded(tiles_, config_.maxTiles);
 }
 

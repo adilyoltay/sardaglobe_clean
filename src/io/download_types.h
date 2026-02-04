@@ -26,10 +26,15 @@ struct FetchRequest {
     FetchCompleteCallback onComplete;  // Optional per-request callback
 };
 
-// Comparison for priority queue (higher priority first)
+// Comparison for priority queue (higher priority first, then higher score)
 struct FetchRequestCompare {
     bool operator()(const FetchRequest& a, const FetchRequest& b) const {
-        return a.priority < b.priority;  // Reversed for max-heap
+        // Primary: priority (higher first, so reversed for max-heap)
+        if (a.priority != b.priority) {
+            return a.priority < b.priority;
+        }
+        // Secondary: score (higher score = more important, so reversed)
+        return a.score < b.score;
     }
 };
 
