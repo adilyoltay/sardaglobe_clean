@@ -162,6 +162,7 @@ private:
     glm::dvec3 m_orbitPivot{0.0};
     glm::dvec3 m_orbitStartPivotToCam{0.0};  // Baseline pivot-to-cam for total rotation
     bool m_hasOrbitPivot = false;
+    bool m_orbitBaselineSet = false;         // True after first move (prevents flick)
     double m_orbitStartHeading = 0.0;
     double m_orbitStartTilt = 0.0;
     double m_orbitStartX = 0.0;
@@ -184,9 +185,12 @@ private:
     glm::dvec3 m_throwRotationAxis{0.0};
     double m_throwAngularVelocity = 0.0;
     
-    // OrbitThrowAnimation data  
+    // OrbitThrowAnimation data (pivot-centered)
     double m_throwHeadingVel = 0.0;
     double m_throwTiltVel = 0.0;
+    glm::dvec3 m_throwOrbitPivot{0.0};      // Pivot point for orbit throw
+    glm::dvec3 m_throwPivotToCam{0.0};      // Current pivot-to-cam for throw
+    bool m_throwHasOrbitPivot = false;
     
     // ZoomThrowAnimation data
     double m_throwZoomVel = 0.0;

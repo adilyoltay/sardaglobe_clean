@@ -176,11 +176,7 @@ void FlightController::OnMouseDown(int button, double x, double y, double time) 
             m_actionMode = ActionMode::Orbit;
             m_hasOrbitPivot = hitGlobe;
             m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
-            m_orbitStartPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;  // Baseline
-            m_orbitStartX = x;
-            m_orbitStartY = y;
-            m_orbitStartHeading = m_camera.GetHeading();
-            m_orbitStartTilt = m_camera.GetTilt();
+            m_orbitBaselineSet = false;  // Will be set on first move after threshold
         } else {
             // Left = Pan (EarthPanRotateZoomAction)
             m_actionMode = ActionMode::Pan;
@@ -200,11 +196,7 @@ void FlightController::OnMouseDown(int button, double x, double y, double time) 
         m_actionMode = ActionMode::Orbit;
         m_hasOrbitPivot = hitGlobe;
         m_orbitPivot = hitGlobe ? hitPoint : glm::dvec3(0.0);
-        m_orbitStartPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;  // Baseline
-        m_orbitStartX = x;
-        m_orbitStartY = y;
-        m_orbitStartHeading = m_camera.GetHeading();
-        m_orbitStartTilt = m_camera.GetTilt();
+        m_orbitBaselineSet = false;  // Will be set on first move after threshold
     }
     // RIGHT BUTTON = Zoom
     else if (button == 1) {
@@ -237,6 +229,10 @@ void FlightController::OnMouseUp(int button, double time) {
             if (std::abs(m_headingVelocity) > 0.5 || std::abs(m_tiltVelocity) > 0.5) {
                 m_throwHeadingVel = std::clamp(m_headingVelocity, -100.0, 100.0);
                 m_throwTiltVel = std::clamp(m_tiltVelocity, -50.0, 50.0);
+                // Store pivot data for pivot-centered throw
+                m_throwHasOrbitPivot = m_hasOrbitPivot;
+                m_throwOrbitPivot = m_orbitPivot;
+                m_throwPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;
                 StartThrowAnimation(ThrowAnimationType::Arcball, time);
             }
         }
@@ -252,6 +248,8 @@ void FlightController::OnMouseUp(int button, double time) {
     m_isDragging = false;
     m_actionMode = ActionMode::None;
     m_hasPanAnchor = false;
+    // Keep m_hasOrbitPivot during throw for gizmo visibility
+    // It will be cleared when throw stops or on next mouse down
 }
 
 // ============================================================================
@@ -394,6 +392,20 @@ void FlightController::OnMouseMove(double x, double y, double time) {
     
     // ========== ORBIT (OrbitAction - Pivot-Centered Rotation) ==========
     else if (m_actionMode == ActionMode::Orbit) {
+        // Reset baseline on first move after drag threshold (prevents flick)
+        if (!m_orbitBaselineSet) {
+            m_orbitStartX = x;
+            m_orbitStartY = y;
+            m_orbitStartPivotToCam = m_camera.GetPositionECEF() - m_orbitPivot;
+            m_orbitStartHeading = m_camera.GetHeading();
+            m_orbitStartTilt = m_camera.GetTilt();
+            m_orbitBaselineSet = true;
+            // Zero velocities on baseline frame to prevent spike
+            m_headingVelocity = 0.0;
+            m_tiltVelocity = 0.0;
+            return;  // Skip this frame - no rotation, no velocity sampling
+        }
+        
         double totalDx = x - m_orbitStartX;
         double totalDy = y - m_orbitStartY;
         
@@ -402,32 +414,34 @@ void FlightController::OnMouseMove(double x, double y, double time) {
         
         if (m_lockNorth) deltaHeading = 0.0;
         
-        // Track velocity for momentum
-        m_headingVelocity = -dx * HEADING_SENSITIVITY * m_navSpeed / dt;
+        // Track velocity for momentum (respect lockNorth)
+        m_headingVelocity = m_lockNorth ? 0.0 : -dx * HEADING_SENSITIVITY * m_navSpeed / dt;
         m_tiltVelocity = dy * TILT_SENSITIVITY * m_navSpeed / dt;
         
         // PIVOT-CENTERED ROTATION (Google Earth style)
         // Apply TOTAL rotation to BASELINE pivot-to-cam to prevent overshoot
         if (m_hasOrbitPivot) {
-            // Get pivot local frame (from start, not current)
+            // Get pivot local frame (from pivot position)
             glm::dvec3 pivotUp = glm::normalize(m_orbitPivot);
             glm::dvec3 pivotEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), pivotUp));
             if (glm::length(pivotEast) < 0.1) pivotEast = glm::dvec3(1, 0, 0);
-            
-            // Get initial view direction for tilt axis
-            glm::dvec3 startViewDir = glm::normalize(-m_orbitStartPivotToCam);
-            glm::dvec3 tiltAxis = glm::normalize(glm::cross(pivotUp, startViewDir));
-            if (glm::length(tiltAxis) < 0.1) tiltAxis = pivotEast;
-            
-            // Apply TOTAL rotation to BASELINE vector (not current)
+
+            // Apply TOTAL heading first, then compute a tilt axis from the heading-rotated view.
+            // This avoids "vertical drift" artifacts when combining total heading+tilt.
             double headingRad = glm::radians(deltaHeading);
             glm::dmat4 headingRot = glm::rotate(glm::dmat4(1.0), headingRad, pivotUp);
-            
+            glm::dvec3 pivotToCamAfterHeading =
+                glm::dvec3(headingRot * glm::dvec4(m_orbitStartPivotToCam, 0.0));
+
+            glm::dvec3 viewDirAfterHeading = glm::normalize(-pivotToCamAfterHeading);
+            glm::dvec3 tiltAxis = glm::normalize(glm::cross(pivotUp, viewDirAfterHeading));
+            if (glm::length(tiltAxis) < 0.1) tiltAxis = pivotEast;
+
             double tiltRad = glm::radians(deltaTilt);
             glm::dmat4 tiltRot = glm::rotate(glm::dmat4(1.0), tiltRad, tiltAxis);
-            
-            // Apply rotations to BASELINE pivot-to-camera vector
-            glm::dvec3 newPivotToCam = glm::dvec3(headingRot * tiltRot * glm::dvec4(m_orbitStartPivotToCam, 0.0));
+
+            glm::dvec3 newPivotToCam =
+                glm::dvec3(tiltRot * glm::dvec4(pivotToCamAfterHeading, 0.0));
             glm::dvec3 newCamPos = m_orbitPivot + newPivotToCam;
             
             // Clamp altitude (camera uses KM units)
@@ -660,6 +674,7 @@ void FlightController::StartThrowAnimation(ThrowAnimationType type, double time)
 void FlightController::StopThrowAnimation() {
     m_throwActive = false;
     m_throwType = ThrowAnimationType::None;
+    m_hasOrbitPivot = false;  // Clear pivot when throw ends
 }
 
 void FlightController::UpdateThrowAnimation(double dt, double time) {
@@ -685,21 +700,82 @@ void FlightController::UpdateThrowAnimation(double dt, double time) {
         }
         
         case ThrowAnimationType::Arcball: {
-            double headingVel = m_throwHeadingVel * decay;
+            // Respect lockNorth during throw
+            double headingVel = m_lockNorth ? 0.0 : m_throwHeadingVel * decay;
             double tiltVel = m_throwTiltVel * decay;
             
             if (std::abs(headingVel) < 0.1 && std::abs(tiltVel) < 0.1) {
                 StopThrowAnimation();
             } else {
-                double newHeading = m_camera.GetHeading() + headingVel * dt;
-                double newTilt = m_camera.GetTilt() + tiltVel * dt;
-                
-                while (newHeading > 360.0) newHeading -= 360.0;
-                while (newHeading < 0.0) newHeading += 360.0;
-                newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
-                
-                m_camera.SetHeading(newHeading);
-                m_camera.SetTilt(newTilt);
+                if (m_throwHasOrbitPivot) {
+                    // PIVOT-CENTERED ORBIT THROW
+                    glm::dvec3 pivotUp = glm::normalize(m_throwOrbitPivot);
+                    glm::dvec3 pivotEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), pivotUp));
+                    if (glm::length(pivotEast) < 0.1) pivotEast = glm::dvec3(1, 0, 0);
+                    
+                    // Incremental rotation (skip heading if lockNorth)
+                    double headingRad = m_lockNorth ? 0.0 : glm::radians(headingVel * dt);
+                    double tiltRad = glm::radians(tiltVel * dt);
+                    
+                    glm::dmat4 headingRot = glm::rotate(glm::dmat4(1.0), headingRad, pivotUp);
+
+                    // Apply heading first, then compute tilt axis from the heading-rotated view direction.
+                    glm::dvec3 pivotToCamAfterHeading =
+                        glm::dvec3(headingRot * glm::dvec4(m_throwPivotToCam, 0.0));
+                    glm::dvec3 viewDirAfterHeading = glm::normalize(-pivotToCamAfterHeading);
+                    glm::dvec3 tiltAxis = glm::normalize(glm::cross(pivotUp, viewDirAfterHeading));
+                    if (glm::length(tiltAxis) < 0.1) tiltAxis = pivotEast;
+                    glm::dmat4 tiltRot = glm::rotate(glm::dmat4(1.0), tiltRad, tiltAxis);
+
+                    // Update pivot-to-cam
+                    m_throwPivotToCam =
+                        glm::dvec3(tiltRot * glm::dvec4(pivotToCamAfterHeading, 0.0));
+                    glm::dvec3 newCamPos = m_throwOrbitPivot + m_throwPivotToCam;
+                    
+                    // Clamp altitude
+                    double newR = glm::length(newCamPos);
+                    double minR = EARTH_RADIUS_KM + CAMERA_MIN_ALTITUDE_M / 1000.0;
+                    if (newR < minR) newCamPos = glm::normalize(newCamPos) * minR;
+                    
+                    // Update camera position
+                    double r = glm::length(newCamPos);
+                    double lat = glm::degrees(std::asin(std::clamp(newCamPos.z / r, -1.0, 1.0)));
+                    double lon = glm::degrees(std::atan2(newCamPos.y, newCamPos.x));
+                    double altM = (r - EARTH_RADIUS_KM) * 1000.0;
+                    m_camera.SetLatLonAlt(lat, lon, altM);
+                    
+                    // Derive heading/tilt from camera->pivot
+                    glm::dvec3 camUp = glm::normalize(newCamPos);
+                    glm::dvec3 camToPivot = glm::normalize(m_throwOrbitPivot - newCamPos);
+                    double dotUp = glm::dot(camUp, camToPivot);
+                    double newTilt = glm::degrees(std::acos(std::clamp(-dotUp, -1.0, 1.0)));
+                    newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+                    
+                    glm::dvec3 camEast = glm::normalize(glm::cross(glm::dvec3(0, 0, 1), camUp));
+                    if (glm::length(camEast) < 0.1) camEast = glm::dvec3(1, 0, 0);
+                    glm::dvec3 camNorth = glm::cross(camUp, camEast);
+                    glm::dvec3 horizDir = camToPivot - camUp * glm::dot(camToPivot, camUp);
+                    if (glm::length(horizDir) > 1e-6) {
+                        horizDir = glm::normalize(horizDir);
+                        double hRad = std::atan2(glm::dot(horizDir, camEast), glm::dot(horizDir, camNorth));
+                        double newHeading = glm::degrees(hRad);
+                        while (newHeading < 0.0) newHeading += 360.0;
+                        m_camera.SetHeading(newHeading);
+                    }
+                    m_camera.SetTilt(newTilt);
+                } else {
+                    // No pivot - just heading/tilt (lockNorth already applied to headingVel)
+                    double newTilt = m_camera.GetTilt() + tiltVel * dt;
+                    newTilt = std::clamp(newTilt, 0.1, GetMaxTilt());
+                    m_camera.SetTilt(newTilt);
+                    
+                    if (!m_lockNorth) {
+                        double newHeading = m_camera.GetHeading() + headingVel * dt;
+                        while (newHeading > 360.0) newHeading -= 360.0;
+                        while (newHeading < 0.0) newHeading += 360.0;
+                        m_camera.SetHeading(newHeading);
+                    }
+                }
             }
             break;
         }
