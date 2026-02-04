@@ -99,10 +99,14 @@ add_executable(native_globe
   # Scheduling module
   src/scheduling/tile_scheduler.cpp
   src/scheduling/lod_selector.cpp
+  src/scheduling/tile_state_machine.cpp
+  src/scheduling/tile_pyramid.cpp
+  src/scheduling/job_system.cpp
   # Rendering module
   src/rendering/texture_manager.cpp
   src/rendering/shader_manager.cpp
   src/rendering/tile_renderer.cpp
+  src/rendering/tile_mesh_builder.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
   src/core/layer_manager.cpp

@@ -1,4 +1,5 @@
 #include "tile_scheduler.h"
+#include "tile_state_machine.h"
 #include <regex>
 #include <iostream>
 
@@ -89,9 +90,7 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             
             auto it = tiles.find(key);
             if (it != tiles.end()) {
-                it->second.state = TileState::Failed;
-                it->second.retryCount++;
-                it->second.lastRetryTime = currentTime;
+                TileStateMachine::Advance(it->second, TileStateMachine::Event::Drop, currentTime);
             }
         }
     }
@@ -109,12 +108,10 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             }
             
             if (!result.success) {
-                // Mark tile as failed
+                // Mark tile as failed via state machine
                 auto it = tiles.find(result.key);
                 if (it != tiles.end()) {
-                    it->second.state = TileState::Failed;
-                    it->second.retryCount++;
-                    it->second.lastRetryTime = currentTime;
+                    TileStateMachine::Advance(it->second, TileStateMachine::Event::FetchFail, currentTime);
                 }
                 continue;
             }
@@ -133,10 +130,10 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             dreq.data = std::move(result.data);
             decoder_->Decode(std::move(dreq));
             
-            // Update tile state
+            // Update tile state via state machine
             auto it = tiles.find(result.key);
             if (it != tiles.end()) {
-                it->second.state = TileState::Decoding;
+                TileStateMachine::Advance(it->second, TileStateMachine::Event::FetchOk, currentTime);
             }
         }
     }
@@ -157,7 +154,7 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             if (it == tiles.end()) continue;
             
             if (!result.success) {
-                it->second.state = TileState::Failed;
+                TileStateMachine::Advance(it->second, TileStateMachine::Event::DecodeFail, currentTime);
                 continue;
             }
             
@@ -165,7 +162,7 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             it->second.pixels = std::move(result.pixels);
             it->second.pixelWidth = result.width;
             it->second.pixelHeight = result.height;
-            it->second.state = TileState::Uploading;
+            TileStateMachine::Advance(it->second, TileStateMachine::Event::DecodeOk, currentTime);
             
             // Notify for upload
             if (uploadCallback_) {

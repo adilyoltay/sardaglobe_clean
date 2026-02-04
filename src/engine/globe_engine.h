@@ -4,7 +4,8 @@
 #include "../core/tile.h"
 #include "../core/layer_manager.h"
 #include "../scheduling/tile_scheduler.h"
-#include "../scheduling/lod_selector.h"
+#include "../scheduling/tile_pyramid.h"
+#include "../scheduling/job_system.h"
 #include "../rendering/texture_manager.h"
 #include "../rendering/shader_manager.h"
 #include "../rendering/tile_renderer.h"
@@ -96,7 +97,8 @@ private:
     std::unique_ptr<ShaderManager> shaderManager_;
     std::unique_ptr<TileRenderer> tileRenderer_;
     std::unique_ptr<DemManager> demManager_;
-    LodSelector lodSelector_;
+    TilePyramid tilePyramid_;
+    JobSystem jobSystem_;
     LayerManager layerManager_;
     
     // Tiles

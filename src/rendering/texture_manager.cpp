@@ -1,4 +1,5 @@
 #include "texture_manager.h"
+#include "../scheduling/tile_state_machine.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -98,7 +99,9 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
         // Create new texture
         tile.textureId = CreateTexture(tile.pixels.data(), tile.pixelWidth, tile.pixelHeight);
         tile.ownsTexture = true;
-        tile.state = TileState::Ready;
+        
+        // Use state machine for upload completion (handles fade reset)
+        TileStateMachine::Advance(tile, TileStateMachine::Event::UploadOk);
         
         // Clear pixel data
         tile.ClearPixels();

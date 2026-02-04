@@ -1,6 +1,11 @@
 #include "globe_engine.h"
 #include "../core/ellipsoid.h"
 #include "../math/tile_math.h"
+#include "../rendering/texture_manager.h"
+#include "../rendering/shader_manager.h"
+#include "../rendering/tile_renderer.h"
+#include "../rendering/tile_mesh_builder.h"
+#include "../scheduling/tile_state_machine.h"
 #include "../math/frustum.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -220,8 +225,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
     glm::dmat4 mvpD = proj * view;
     glm::mat4 mvp = glm::mat4(mvpD);
     
-    // LOD selection
-    LodSelector::Settings lodSettings;
+    // LOD selection via TilePyramid (GE-style centralized management)
+    auto& lodSettings = tilePyramid_.GetSettings();
     lodSettings.minZoom = config_.minZoom;
     lodSettings.maxZoom = config_.maxZoom;
     lodSettings.sseThreshold = config_.sseThreshold;
@@ -232,18 +237,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
     double tilt = camera_->GetTilt();  // degrees, 0=looking down, 90=looking at horizon
     lodSettings.tiltFactor = static_cast<float>(1.0 - std::clamp(tilt / 90.0, 0.0, 1.0));
     
-    auto isReady = [this](const TileKey& key) -> bool {
-        auto it = tiles_.find(key);
-        return it != tiles_.end() && it->second.IsReady();
-    };
-    
     // CRITICAL: Pass FOV directly from camera, not extracted from MVP
     float fovDegrees = static_cast<float>(camera_->GetFov());
     
-    LodSelection selection = lodSelector_.Select(
+    const LodSelection& selection = tilePyramid_.Select(
         cameraPos, mvp, fovDegrees,
         config_.windowWidth, config_.windowHeight,
-        isReady, lodSettings
+        tiles_
     );
     
     // Store leafSet for render filtering
@@ -270,7 +270,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             bool isLeaf = selection.leafSet.count(key) > 0;
             Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
             scheduler_->Request(key, priority);
-            tile.state = TileState::Scheduled;
+            TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
         }
         else if (tile.state == TileState::Failed) {
             // Exponential backoff for failed tiles (prevents hammering failed servers)
@@ -282,7 +282,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 bool isLeaf = selection.leafSet.count(key) > 0;
                 Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
                 scheduler_->Request(key, priority);
-                tile.state = TileState::Scheduled;
+                TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
             }
         }
     }
@@ -308,7 +308,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         Tile& tile = it->second;
         if (tile.state == TileState::Unloaded) {
             scheduler_->Request(key, Priority::Low);  // Low priority prefetch
-            tile.state = TileState::Scheduled;
+            TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
             ++prefetchCount;
         }
     }
@@ -456,276 +456,9 @@ void GlobeEngine::Render() {
 }
 
 void GlobeEngine::BuildTileMesh(Tile& tile) {
-    // Delete old mesh if rebuilding
-    if (tile.hasMesh) {
-        if (tile.vao != 0) glDeleteVertexArrays(1, &tile.vao);
-        if (tile.vbo != 0) glDeleteBuffers(1, &tile.vbo);
-        if (tile.ebo != 0) glDeleteBuffers(1, &tile.ebo);
-        tile.vao = tile.vbo = tile.ebo = 0;
-        tile.hasMesh = false;
-    }
-    
-    // Use more segments for terrain mesh when DEM is enabled
-    const int segments = demManager_ ? std::max(config_.meshSegments, 8) : config_.meshSegments;
-    const int vertexCount = (segments + 1) * (segments + 1);
-    const int indexCount = segments * segments * 6;
-    
-    std::vector<float> vertices;
-    vertices.reserve(vertexCount * 8);  // pos(3) + normal(3) + uv(2)
-    
-    std::vector<unsigned int> indices;
-    indices.reserve(indexCount);
-    
-    // Use tile's Extent (OpenGlobus integration)
-    if (tile.extent.Width() == 0.0) {
-        tile.ComputeExtent();
-    }
-    double lonLeft = tile.extent.West();
-    double lonRight = tile.extent.East();
-    double latTop = tile.extent.North();
-    double latBottom = tile.extent.South();
-    
-    // WGS84 ellipsoid (km units for camera compatibility)
-    const Ellipsoid& ellipsoid = Ellipsoid::WGS84_KM();
-    
-    // Pre-calculate Mercator Y for top and bottom (for correct UV mapping)
-    // Web Mercator tiles are linear in Mercator Y space, NOT in latitude space
-    double latTopRad = latTop * M_PI / 180.0;
-    double latBottomRad = latBottom * M_PI / 180.0;
-    double mercatorYTop = std::log(std::tan(M_PI / 4.0 + latTopRad / 2.0));
-    double mercatorYBottom = std::log(std::tan(M_PI / 4.0 + latBottomRad / 2.0));
-    
-    // Get height sampler if DEM is available
-    HeightSampler heightSampler = nullptr;
-    if (demManager_) {
-        heightSampler = demManager_->GetHeightSampler();
-    }
-    
-    tile.demUsed = false;
-    tile.demPending = false;
-    
-    // Edge coarser mask for seam fix (FAZ 6.1)
-    const uint8_t edgeMask = tile.edgeCoarserMask;
-    
-    for (int iy = 0; iy <= segments; ++iy) {
-        float v = static_cast<float>(iy) / segments;
-        
-        // CRITICAL: Interpolate in Mercator Y space, then convert to latitude
-        // This ensures mesh vertices match the Web Mercator tile texture sampling
-        double mercatorY = mercatorYTop + (mercatorYBottom - mercatorYTop) * v;
-        double latRad = 2.0 * std::atan(std::exp(mercatorY)) - M_PI / 2.0;
-        double lat = latRad * 180.0 / M_PI;
-        
-        // Check if this row is on North or South border
-        bool isNorthBorder = (iy == 0);
-        bool isSouthBorder = (iy == segments);
-        
-        for (int ix = 0; ix <= segments; ++ix) {
-            float u = static_cast<float>(ix) / segments;
-            double lon = lonLeft + (lonRight - lonLeft) * u;
-            double lonRad = lon * M_PI / 180.0;
-            
-            // Check if this column is on West or East border
-            bool isWestBorder = (ix == 0);
-            bool isEastBorder = (ix == segments);
-            
-            // Determine sample level for DEM (edge equalization)
-            int sampleLevel = tile.key.level;
-            if (heightSampler && sampleLevel > 0) {
-                // Use coarser level for border vertices with coarser neighbors
-                bool useCoarser = false;
-                if (isNorthBorder && (edgeMask & Tile::EDGE_NORTH)) useCoarser = true;
-                if (isEastBorder && (edgeMask & Tile::EDGE_EAST)) useCoarser = true;
-                if (isSouthBorder && (edgeMask & Tile::EDGE_SOUTH)) useCoarser = true;
-                if (isWestBorder && (edgeMask & Tile::EDGE_WEST)) useCoarser = true;
-                
-                if (useCoarser) {
-                    sampleLevel = std::max(0, sampleLevel - 1);
-                }
-            }
-            
-            // Get elevation from DEM
-            double heightKm = 0.0;
-            if (heightSampler) {
-                double heightMeters = 0.0;
-                if (heightSampler(lon, lat, sampleLevel, heightMeters)) {
-                    heightKm = heightMeters * 0.001 * config_.demHeightScale;
-                    tile.demUsed = true;
-                } else {
-                    tile.demPending = true;
-                }
-            }
-            
-            // Use Ellipsoid for geodetic to cartesian (OpenGlobus style)
-            // Note: Ellipsoid uses meters internally, we use km for camera compatibility
-            glm::dvec3 pos = ellipsoid.GeodeticToCartesian(lon, lat, heightKm);
-            float x = static_cast<float>(pos.x);
-            float y = static_cast<float>(pos.y);
-            float z = static_cast<float>(pos.z);
-            
-            // Normal from ellipsoid surface
-            glm::dvec3 surfaceNormal = ellipsoid.GetSurfaceNormal(pos);
-            glm::vec3 normal = glm::vec3(surfaceNormal);
-            
-            vertices.push_back(x);
-            vertices.push_back(y);
-            vertices.push_back(z);
-            vertices.push_back(normal.x);
-            vertices.push_back(normal.y);
-            vertices.push_back(normal.z);
-            vertices.push_back(u);
-            vertices.push_back(1.0f - v);  // Flip V
-        }
-    }
-    
-    // Indices for main grid
-    for (int iy = 0; iy < segments; ++iy) {
-        for (int ix = 0; ix < segments; ++ix) {
-            unsigned int tl = iy * (segments + 1) + ix;
-            unsigned int tr = tl + 1;
-            unsigned int bl = tl + (segments + 1);
-            unsigned int br = bl + 1;
-            
-            indices.push_back(tl);
-            indices.push_back(bl);
-            indices.push_back(tr);
-            indices.push_back(tr);
-            indices.push_back(bl);
-            indices.push_back(br);
-        }
-    }
-    
-    // ========================================================================
-    // SKIRT GENERATION (Google Earth style - hides LOD seams)
-    // ========================================================================
-    const bool generateSkirts = true;
-    if (generateSkirts) {
-        const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
-        
-        // Calculate skirt depth based on tile size at this zoom level
-        double tileArcKm = 40075.0 / (1 << tile.key.level);
-        double skirtDepth = std::max(tileArcKm * 0.01, 0.001);  // 1% of tile or min 1m
-        skirtDepth = std::min(skirtDepth, tileArcKm * 0.5);     // Max 50% of tile
-        
-        // Lambda to add a skirt vertex
-        auto addSkirtVertex = [&](int mainIdx) {
-            float px = vertices[mainIdx * 8 + 0];
-            float py = vertices[mainIdx * 8 + 1];
-            float pz = vertices[mainIdx * 8 + 2];
-            float u = vertices[mainIdx * 8 + 6];
-            float v = vertices[mainIdx * 8 + 7];
-            
-            // Push vertex inward (toward Earth center)
-            glm::vec3 pos(px, py, pz);
-            glm::vec3 radialDir = glm::normalize(pos);
-            glm::vec3 skirtPos = pos - radialDir * static_cast<float>(skirtDepth);
-            
-            vertices.push_back(skirtPos.x);
-            vertices.push_back(skirtPos.y);
-            vertices.push_back(skirtPos.z);
-            vertices.push_back(radialDir.x);  // Normal
-            vertices.push_back(radialDir.y);
-            vertices.push_back(radialDir.z);
-            vertices.push_back(u);
-            vertices.push_back(v);
-        };
-        
-        // Add skirt vertices for all 4 edges
-        // North edge (top, iy=0)
-        for (int ix = 0; ix <= segments; ++ix) {
-            addSkirtVertex(ix);
-        }
-        unsigned int northSkirtStart = mainVertexCount;
-        
-        // South edge (bottom, iy=segments)
-        for (int ix = 0; ix <= segments; ++ix) {
-            addSkirtVertex(segments * (segments + 1) + ix);
-        }
-        unsigned int southSkirtStart = northSkirtStart + segments + 1;
-        
-        // West edge (left, ix=0)
-        for (int iy = 0; iy <= segments; ++iy) {
-            addSkirtVertex(iy * (segments + 1));
-        }
-        unsigned int westSkirtStart = southSkirtStart + segments + 1;
-        
-        // East edge (right, ix=segments)
-        for (int iy = 0; iy <= segments; ++iy) {
-            addSkirtVertex(iy * (segments + 1) + segments);
-        }
-        unsigned int eastSkirtStart = westSkirtStart + segments + 1;
-        
-        // Generate skirt triangles
-        // North edge skirt
-        for (int i = 0; i < segments; ++i) {
-            unsigned int v0 = i;
-            unsigned int v1 = i + 1;
-            unsigned int v2 = northSkirtStart + i;
-            unsigned int v3 = northSkirtStart + i + 1;
-            indices.push_back(v0); indices.push_back(v2); indices.push_back(v3);
-            indices.push_back(v0); indices.push_back(v3); indices.push_back(v1);
-        }
-        
-        // South edge skirt (reversed winding)
-        for (int i = 0; i < segments; ++i) {
-            unsigned int v0 = segments * (segments + 1) + i;
-            unsigned int v1 = segments * (segments + 1) + i + 1;
-            unsigned int v2 = southSkirtStart + i;
-            unsigned int v3 = southSkirtStart + i + 1;
-            indices.push_back(v0); indices.push_back(v3); indices.push_back(v2);
-            indices.push_back(v0); indices.push_back(v1); indices.push_back(v3);
-        }
-        
-        // West edge skirt (reversed winding)
-        for (int j = 0; j < segments; ++j) {
-            unsigned int v0 = j * (segments + 1);
-            unsigned int v1 = (j + 1) * (segments + 1);
-            unsigned int v2 = westSkirtStart + j;
-            unsigned int v3 = westSkirtStart + j + 1;
-            indices.push_back(v0); indices.push_back(v3); indices.push_back(v2);
-            indices.push_back(v0); indices.push_back(v1); indices.push_back(v3);
-        }
-        
-        // East edge skirt
-        for (int j = 0; j < segments; ++j) {
-            unsigned int v0 = j * (segments + 1) + segments;
-            unsigned int v1 = (j + 1) * (segments + 1) + segments;
-            unsigned int v2 = eastSkirtStart + j;
-            unsigned int v3 = eastSkirtStart + j + 1;
-            indices.push_back(v0); indices.push_back(v2); indices.push_back(v3);
-            indices.push_back(v0); indices.push_back(v3); indices.push_back(v1);
-        }
-    }
-    
-    // Create VAO/VBO/EBO
-    glGenVertexArrays(1, &tile.vao);
-    glGenBuffers(1, &tile.vbo);
-    glGenBuffers(1, &tile.ebo);
-    
-    glBindVertexArray(tile.vao);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, tile.vbo);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), 
-                 vertices.data(), GL_STATIC_DRAW);
-    
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, tile.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int),
-                 indices.data(), GL_STATIC_DRAW);
-    
-    // Position
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // Normal
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    // TexCoord
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-    glEnableVertexAttribArray(2);
-    
-    glBindVertexArray(0);
-    
-    tile.indexCount = static_cast<uint32_t>(indices.size());
-    tile.hasMesh = true;
+    // Delegate to TileMeshBuilder (GE-style separation)
+    auto result = TileMeshBuilder::Build(tile, demManager_.get(), config_);
+    TileMeshBuilder::UploadToGPU(tile, result);
 }
 
 void GlobeEngine::RenderTile(const Tile& tile, const glm::mat4& mvp) {
@@ -1152,24 +885,16 @@ void GlobeEngine::QueueMeshRebuild(const TileKey& key, bool isVisible) {
     
     rebuildPending_.insert(key);
     
-    // Visible tiles get priority (front of queue)
-    if (isVisible) {
-        meshRebuildQueue_.push_front(key);
-    } else {
-        meshRebuildQueue_.push_back(key);
-    }
-}
-
-void GlobeEngine::ProcessMeshRebuildQueue() {
-    int rebuilds = 0;
+    // Submit to JobSystem with appropriate priority
+    JobSystem::Priority priority = isVisible ? JobSystem::Priority::High : JobSystem::Priority::Normal;
     
-    while (!meshRebuildQueue_.empty() && rebuilds < MAX_MESH_REBUILDS_PER_FRAME) {
-        TileKey key = meshRebuildQueue_.front();
-        meshRebuildQueue_.pop_front();
-        rebuildPending_.erase(key);
+    // Capture key by value for the lambda
+    TileKey capturedKey = key;
+    jobSystem_.Submit([this, capturedKey]() {
+        rebuildPending_.erase(capturedKey);
         
         // Find tile and rebuild if still valid
-        auto it = tiles_.find(key);
+        auto it = tiles_.find(capturedKey);
         if (it != tiles_.end() && it->second.IsReady()) {
             BuildTileMesh(it->second);
             
@@ -1177,9 +902,13 @@ void GlobeEngine::ProcessMeshRebuildQueue() {
             if (it->second.hasMesh) {
                 it->second.prevEdgeCoarserMask = it->second.edgeCoarserMask;
             }
-            ++rebuilds;
         }
-    }
+    }, priority, "mesh_rebuild");
+}
+
+void GlobeEngine::ProcessMeshRebuildQueue() {
+    // Process mesh rebuild jobs via JobSystem (count-based budget)
+    jobSystem_.ProcessCount(MAX_MESH_REBUILDS_PER_FRAME);
 }
 
 // =============================================================================
