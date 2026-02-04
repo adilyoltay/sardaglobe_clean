@@ -458,6 +458,10 @@ Her faz bittiğinde aşağıyı güncelle:
 - [x] Faz 3 (Mesh Integration) tamamlandı — Tarih: 2026-02-02 — Notlar: Validated mesh rebuild pipeline (DemWorker -> updatedDemKeys -> InvalidateTileAndNeighbors -> BuildTileMesh). Unified neighbor invalidation logic for WGS84 using Mercator indexing to match Phase 1 parity.
 - [x] Faz 4 (Terrain Mesh + Tile Stitch) tamamlandı — Tarih: 2026-02-02 — Notlar: Implemented P0.1 (EdgeFlags/Snap), P0.2 (Re-stitch on Arrival), P0.3 (Mesh Integration). Removed Skirts in favor of seamless stitching. Verified via debug logs.
 - [x] Faz 5 (DEM Finalization) tamamlandı — Tarih: 2026-02-02 — Notlar: Finalized documentation, confirmed stable performance settings, and ensured critical parse errors are always logged. DEM parity system is now complete and robust.
+- [x] Faz 1.2 (Komşu LOD Fark Sınırı) tamamlandı — Tarih: 2026-02-04 — Notlar: LodSelector'a neighbor LOD conformance eklendi (maxNeighborDelta=1). Deterministik pass-based refinement. leafSet O(1) lookup. OpenGlobus'tan esinlenildi.
+- [x] Faz 6.1 (DEM Stitching Seam Fix) tamamlandı — Tarih: 2026-02-04 — Notlar: Tile.edgeCoarserMask eklendi (N/E/S/W bit flags). BuildTileMesh'te border vertex'ler için coarser DEM level sampling. prevEdgeCoarserMask ile rebuild detection.
+- [x] Faz 4 (Layer & Query MVP) tamamlandı — Tarih: 2026-02-04 — Notlar: Layer/Feature/LayerStyle structs (layer.h), LayerManager CRUD/query (layer_manager.h/cpp), ScreenToGeo/GeoToScreen (earth_camera.cpp), GlobeEngine entegrasyonu. Unit fix: km tutarlılığı.
+- [x] OpenGlobus Core Port tamamlandı — Tarih: 2026-02-04 — Notlar: LonLat (lonlat.h), Ellipsoid (ellipsoid.h/cpp), Extent (extent.h), QuadTreeNode (quadtree_node.h/cpp). Tile yapısına Extent entegrasyonu. BuildTileMesh artık Ellipsoid.GeodeticToCartesian kullanıyor (WGS84 uyumlu mesh).
 
 ### Google Earth Rewrite Plan Faz Günlüğü
 - [x] Faz 0 (Hazırlık) tamamlandı — Tarih: 2026-01-31 — Notlar: ParitySnapshot telemetry eklendi (frameTime, tileLoad, cache stats), --test-parity flag ve RunParityTest() senaryosu eklendi.

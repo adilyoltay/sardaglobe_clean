@@ -86,6 +86,13 @@ public:
 
     // Raycasting for Interaction
     void GetRay(double screenX, double screenY, int screenW, int screenH, glm::dvec3& origin, glm::dvec3& direction) const;
+    
+    // Screen <-> Geo conversion (FAZ 4.3)
+    // Returns true if hit, outputs lon/lat in degrees
+    bool ScreenToGeo(double screenX, double screenY, int screenW, int screenH, double& outLon, double& outLat) const;
+    
+    // Project geo point to screen, returns true if visible
+    bool GeoToScreen(double lon, double lat, double altM, int screenW, int screenH, double& outScreenX, double& outScreenY) const;
 
 private:
     void UpdateMatrices() const;

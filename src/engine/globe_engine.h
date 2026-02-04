@@ -2,6 +2,7 @@
 
 #include "../core/config.h"
 #include "../core/tile.h"
+#include "../core/layer_manager.h"
 #include "../scheduling/tile_scheduler.h"
 #include "../scheduling/lod_selector.h"
 #include "../rendering/texture_manager.h"
@@ -12,6 +13,7 @@
 #include <glm/glm.hpp>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 struct GLFWwindow;
 
@@ -46,6 +48,13 @@ public:
     earth::PerspectiveCamera& GetCamera() { return *camera_; }
     earth::FlightController& GetFlightController() { return *flightController_; }
     
+    // Layer API (FAZ 4)
+    LayerManager& GetLayerManager() { return layerManager_; }
+    
+    // Screen <-> Geo conversion (FAZ 4.3)
+    bool GetGeoFromScreenPoint(double screenX, double screenY, double& outLon, double& outLat);
+    bool GetScreenPointFromGeo(double lon, double lat, double& outScreenX, double& outScreenY);
+    
 private:
     // Frame phases (Google Earth style game loop)
     void ProcessInput(double currentTime);
@@ -79,9 +88,13 @@ private:
     std::unique_ptr<ShaderManager> shaderManager_;
     std::unique_ptr<DemManager> demManager_;
     LodSelector lodSelector_;
+    LayerManager layerManager_;
     
     // Tiles
     std::unordered_map<TileKey, Tile> tiles_;
+    
+    // Current leaf set for render filtering (updated each frame in Update)
+    std::unordered_set<TileKey> currentLeafSet_;
     
     // Frame timing
     double lastFrameTime_ = 0.0;

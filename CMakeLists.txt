@@ -103,6 +103,10 @@ add_executable(native_globe
   src/rendering/texture_manager.cpp
   src/rendering/shader_manager.cpp
   src/rendering/tile_renderer.cpp
+  # Core module (OpenGlobus port)
+  src/core/ellipsoid.cpp
+  src/core/quadtree_node.cpp
+  src/core/layer_manager.cpp
   # Engine module
   src/engine/globe_engine.cpp
 )
@@ -133,10 +137,27 @@ else()
   target_link_libraries(native_globe PRIVATE GL)
 endif()
 
-# Tests disabled for now - need to be updated for new architecture
-# add_executable(tile_scheduler_test
-#   tests/tile_scheduler_test.cpp
-#   src/scheduling/tile_scheduler.cpp
-# )
-# target_include_directories(tile_scheduler_test PRIVATE src)
-# target_link_libraries(tile_scheduler_test PRIVATE glm::glm)
+# Tests (FAZ 1.2 + FAZ 6.1)
+enable_testing()
+
+# LOD Conformance Test
+add_executable(lod_conformance_test
+  tests/lod_conformance_test.cpp
+  src/scheduling/lod_selector.cpp
+)
+target_include_directories(lod_conformance_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(lod_conformance_test PRIVATE glm::glm)
+add_test(NAME LodConformanceTest COMMAND lod_conformance_test)
+
+# Edge Mask Test
+add_executable(edge_mask_test
+  tests/edge_mask_test.cpp
+)
+target_include_directories(edge_mask_test PRIVATE
+  src
+)
+target_link_libraries(edge_mask_test PRIVATE glm::glm)
+add_test(NAME EdgeMaskTest COMMAND edge_mask_test)

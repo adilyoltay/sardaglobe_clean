@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include <functional>
 
 namespace globe {
@@ -14,7 +15,8 @@ namespace globe {
 // Result of LOD selection
 struct LodSelection {
     std::unordered_set<TileKey> required;  // All tiles needed (ancestors + leaves)
-    std::vector<TileKey> leaves;           // Tiles to render
+    std::unordered_set<TileKey> leafSet;   // O(1) leaf lookup (same content as leaves)
+    std::vector<TileKey> leaves;           // Tiles to render (ordered)
     std::vector<TileKey> prefetch;         // Tiles to prefetch (neighbors, next zoom)
     int refinedCount = 0;                  // Number of subdivisions
 };
@@ -29,6 +31,11 @@ public:
         int maxZoom = 22;
         float sseThreshold = 1.4f;
         float tiltFactor = 1.0f;  // 0-1, reduces detail when tilted
+        
+        // Neighbor LOD conformance (FAZ 1.2)
+        int maxNeighborDelta = 1;      // Max LOD difference between neighbors
+        bool enforceNeighborDelta = true;  // Enable conformance pass
+        int maxConformPasses = 6;      // Prevent infinite refinement
     };
     
     LodSelector() = default;
@@ -65,6 +72,15 @@ private:
     );
     
     bool AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady);
+    
+    // Neighbor LOD conformance (FAZ 1.2)
+    void EnforceNeighborConformance(
+        LodSelection& result,
+        const TileReadyFunc& isReady,
+        const Settings& settings
+    );
+    
+    void RebuildRequiredSet(LodSelection& result);
     
     Frustum frustum_;
     HorizonCuller horizon_;

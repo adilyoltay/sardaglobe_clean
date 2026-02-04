@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# Runtime caches
+tile_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Compiled objects
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+
+# Temporary files
+*.tmp
+*.log

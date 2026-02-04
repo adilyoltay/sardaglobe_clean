@@ -1,4 +1,5 @@
 #include "globe_engine.h"
+#include "../core/ellipsoid.h"
 #include "../math/tile_math.h"
 #include "../math/frustum.h"
 #include <glad/glad.h>
@@ -182,6 +183,14 @@ void GlobeEngine::ProcessInput(double currentTime) {
     // Keyboard events are handled via callbacks
 }
 
+bool GlobeEngine::GetGeoFromScreenPoint(double screenX, double screenY, double& outLon, double& outLat) {
+    return camera_->ScreenToGeo(screenX, screenY, config_.windowWidth, config_.windowHeight, outLon, outLat);
+}
+
+bool GlobeEngine::GetScreenPointFromGeo(double lon, double lat, double& outScreenX, double& outScreenY) {
+    return camera_->GeoToScreen(lon, lat, 0.0, config_.windowWidth, config_.windowHeight, outScreenX, outScreenY);
+}
+
 void GlobeEngine::Update(double dt, double currentTime) {
     // Update flight controller (handles momentum, animations)
     flightController_->Update(dt, currentTime);
@@ -224,6 +233,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
         isReady, lodSettings
     );
     
+    // Store leafSet for render filtering
+    currentLeafSet_ = selection.leafSet;
+    
     // Request required tiles
     for (const TileKey& key : selection.required) {
         auto it = tiles_.find(key);
@@ -242,8 +254,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         tile.accessCount++;
         
         if (tile.state == TileState::Unloaded) {
-            bool isLeaf = std::find(selection.leaves.begin(), selection.leaves.end(), key) 
-                          != selection.leaves.end();
+            bool isLeaf = selection.leafSet.count(key) > 0;
             Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
             scheduler_->Request(key, priority);
             tile.state = TileState::Scheduled;
@@ -255,8 +266,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             double timeSinceLastRetry = glfwGetTime() - tile.lastRetryTime;
             
             if (timeSinceLastRetry >= backoffSeconds && tile.retryCount < 5) {
-                bool isLeaf = std::find(selection.leaves.begin(), selection.leaves.end(), key) 
-                              != selection.leaves.end();
+                bool isLeaf = selection.leafSet.count(key) > 0;
                 Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
                 scheduler_->Request(key, priority);
                 tile.state = TileState::Scheduled;
@@ -304,6 +314,39 @@ void GlobeEngine::Update(double dt, double currentTime) {
         demManager_->Update();
     }
     
+    // Compute edge coarser mask for seam fix (FAZ 6.1)
+    // An edge is "coarser" if the neighbor at same level is NOT a leaf but its parent IS
+    for (const TileKey& key : selection.leaves) {
+        auto it = tiles_.find(key);
+        if (it == tiles_.end()) continue;
+        
+        uint8_t newMask = 0;
+        if (key.level > 0) {  // Level 0 has no coarser neighbors
+            // Check 4 cardinal directions: N(0,-1), E(1,0), S(0,1), W(-1,0)
+            static const int dx[] = {0, 1, 0, -1};
+            static const int dy[] = {-1, 0, 1, 0};
+            static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST, 
+                                               Tile::EDGE_SOUTH, Tile::EDGE_WEST};
+            
+            for (int dir = 0; dir < 4; ++dir) {
+                TileKey neighborSame = key.Neighbor(dx[dir], dy[dir]);
+                if (!neighborSame.IsValid()) continue;
+                
+                // Neighbor is coarser if: neighborSame NOT in leafSet AND neighborSame.Parent() IS in leafSet
+                bool neighborSameIsLeaf = selection.leafSet.count(neighborSame) > 0;
+                if (!neighborSameIsLeaf) {
+                    TileKey neighborParent = neighborSame.Parent();
+                    bool neighborParentIsLeaf = selection.leafSet.count(neighborParent) > 0;
+                    if (neighborParentIsLeaf) {
+                        newMask |= edgeBits[dir];
+                    }
+                }
+            }
+        }
+        
+        it->second.edgeCoarserMask = newMask;
+    }
+    
     // Build meshes for ready tiles
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
@@ -315,8 +358,18 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 needsRebuild = true;
             }
             
+            // Rebuild mesh if edge coarser mask changed (seam fix FAZ 6.1)
+            if (it->second.edgeCoarserMask != it->second.prevEdgeCoarserMask) {
+                needsRebuild = true;
+            }
+            
             if (needsRebuild) {
                 BuildTileMesh(it->second);
+                // Update prevEdgeCoarserMask AFTER successful rebuild
+                // Always update if hasMesh; DEM arrival triggers rebuild via demPending path
+                if (it->second.hasMesh) {
+                    it->second.prevEdgeCoarserMask = it->second.edgeCoarserMask;
+                }
             }
         }
     }
@@ -350,14 +403,19 @@ void GlobeEngine::Render() {
     }
     
     // Collect tiles to render with fade-in animation (Google Earth style)
+    // Only render current leaves (not stale non-leaf tiles)
     double currentTime = glfwGetTime();
     std::vector<std::pair<Tile*, float>> tilesToRender;  // tile + fade alpha
-    tilesToRender.reserve(tiles_.size());
+    tilesToRender.reserve(currentLeafSet_.size());
     
-    for (auto& [key, tile] : tiles_) {
-        if (tile.IsReady() && tile.hasMesh && tile.textureId != 0) {
-            float alpha = tile.UpdateFade(currentTime);
-            tilesToRender.push_back({&tile, alpha});
+    for (const TileKey& key : currentLeafSet_) {
+        auto it = tiles_.find(key);
+        if (it != tiles_.end()) {
+            Tile& tile = it->second;
+            if (tile.IsReady() && tile.hasMesh && tile.textureId != 0) {
+                float alpha = tile.UpdateFade(currentTime);
+                tilesToRender.push_back({&tile, alpha});
+            }
         }
     }
     
@@ -424,10 +482,17 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
     std::vector<unsigned int> indices;
     indices.reserve(indexCount);
     
-    double lonLeft = Tile2Lon(tile.key.x, tile.key.level);
-    double lonRight = Tile2Lon(tile.key.x + 1, tile.key.level);
-    double latTop = Tile2Lat(tile.key.y, tile.key.level);
-    double latBottom = Tile2Lat(tile.key.y + 1, tile.key.level);
+    // Use tile's Extent (OpenGlobus integration)
+    if (tile.extent.Width() == 0.0) {
+        tile.ComputeExtent();
+    }
+    double lonLeft = tile.extent.West();
+    double lonRight = tile.extent.East();
+    double latTop = tile.extent.North();
+    double latBottom = tile.extent.South();
+    
+    // WGS84 ellipsoid (km units for camera compatibility)
+    const Ellipsoid& ellipsoid = Ellipsoid::WGS84_KM();
     
     // Get height sampler if DEM is available
     HeightSampler heightSampler = nullptr;
@@ -438,37 +503,64 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
     tile.demUsed = false;
     tile.demPending = false;
     
+    // Edge coarser mask for seam fix (FAZ 6.1)
+    const uint8_t edgeMask = tile.edgeCoarserMask;
+    
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
         double lat = latTop + (latBottom - latTop) * v;
         double latRad = lat * M_PI / 180.0;
+        
+        // Check if this row is on North or South border
+        bool isNorthBorder = (iy == 0);
+        bool isSouthBorder = (iy == segments);
         
         for (int ix = 0; ix <= segments; ++ix) {
             float u = static_cast<float>(ix) / segments;
             double lon = lonLeft + (lonRight - lonLeft) * u;
             double lonRad = lon * M_PI / 180.0;
             
-            // Calculate radius with elevation
-            double radius = EARTH_RADIUS_KM;
+            // Check if this column is on West or East border
+            bool isWestBorder = (ix == 0);
+            bool isEastBorder = (ix == segments);
+            
+            // Determine sample level for DEM (edge equalization)
+            int sampleLevel = tile.key.level;
+            if (heightSampler && sampleLevel > 0) {
+                // Use coarser level for border vertices with coarser neighbors
+                bool useCoarser = false;
+                if (isNorthBorder && (edgeMask & Tile::EDGE_NORTH)) useCoarser = true;
+                if (isEastBorder && (edgeMask & Tile::EDGE_EAST)) useCoarser = true;
+                if (isSouthBorder && (edgeMask & Tile::EDGE_SOUTH)) useCoarser = true;
+                if (isWestBorder && (edgeMask & Tile::EDGE_WEST)) useCoarser = true;
+                
+                if (useCoarser) {
+                    sampleLevel = std::max(0, sampleLevel - 1);
+                }
+            }
+            
+            // Get elevation from DEM
+            double heightKm = 0.0;
             if (heightSampler) {
                 double heightMeters = 0.0;
-                if (heightSampler(lon, lat, tile.key.level, heightMeters)) {
-                    // Apply height with exaggeration
-                    double heightKm = heightMeters * 0.001 * config_.demHeightScale;
-                    radius += heightKm;
+                if (heightSampler(lon, lat, sampleLevel, heightMeters)) {
+                    heightKm = heightMeters * 0.001 * config_.demHeightScale;
                     tile.demUsed = true;
                 } else {
                     tile.demPending = true;
                 }
             }
             
-            // Position on sphere
-            float x = static_cast<float>(std::cos(latRad) * std::cos(lonRad) * radius);
-            float y = static_cast<float>(std::cos(latRad) * std::sin(lonRad) * radius);
-            float z = static_cast<float>(std::sin(latRad) * radius);
+            // Use Ellipsoid for geodetic to cartesian (OpenGlobus style)
+            // Note: Ellipsoid uses meters internally, we use km for camera compatibility
+            glm::dvec3 pos = ellipsoid.GeodeticToCartesian(lon, lat, heightKm);
+            float x = static_cast<float>(pos.x);
+            float y = static_cast<float>(pos.y);
+            float z = static_cast<float>(pos.z);
             
-            // Normal (same as position, normalized)
-            glm::vec3 normal = glm::normalize(glm::vec3(x, y, z));
+            // Normal from ellipsoid surface
+            glm::dvec3 surfaceNormal = ellipsoid.GetSurfaceNormal(pos);
+            glm::vec3 normal = glm::vec3(surfaceNormal);
             
             vertices.push_back(x);
             vertices.push_back(y);
@@ -715,9 +807,12 @@ void GlobeEngine::InitImGui() {
 }
 
 void GlobeEngine::ShutdownImGui() {
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    // Guard: only shutdown if context exists
+    if (ImGui::GetCurrentContext()) {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+    }
 }
 
 void GlobeEngine::RenderDebugPanel() {

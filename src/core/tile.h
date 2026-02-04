@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tile_key.h"
+#include "extent.h"
 #include <glm/glm.hpp>
 #include <vector>
 #include <cstdint>
@@ -23,13 +24,21 @@ struct Tile {
     // Identity
     TileKey key;
     
+    // Geographic extent (OpenGlobus integration)
+    Extent extent;
+    
     // State
     TileState state = TileState::Unloaded;
     
     // Geometry (computed from key)
-    glm::vec3 center{0.0f};       // World-space center
+    glm::vec3 center{0.0f};       // World-space center (ECEF)
     float boundingRadius = 0.0f;   // Bounding sphere radius
     float angularRadius = 0.0f;    // Angular extent (radians)
+    
+    // Compute extent from tile key
+    void ComputeExtent() {
+        extent = Extent::FromTileWGS84(key.x, key.y, key.level);
+    }
     
     // Texture
     uint32_t textureId = 0;        // OpenGL texture ID (0 = none)
@@ -50,6 +59,15 @@ struct Tile {
     // DEM/Elevation
     bool demUsed = false;
     bool demPending = false;
+    
+    // Edge seam fix (FAZ 6.1): bits indicate which edges have coarser neighbors
+    // Bit 0 = North (dy=-1), Bit 1 = East (dx=+1), Bit 2 = South (dy=+1), Bit 3 = West (dx=-1)
+    uint8_t edgeCoarserMask = 0;
+    uint8_t prevEdgeCoarserMask = 0;  // For tracking mesh rebuild need
+    static constexpr uint8_t EDGE_NORTH = 1 << 0;  // 0x01
+    static constexpr uint8_t EDGE_EAST  = 1 << 1;  // 0x02
+    static constexpr uint8_t EDGE_SOUTH = 1 << 2;  // 0x04
+    static constexpr uint8_t EDGE_WEST  = 1 << 3;  // 0x08
     
     // Fade-in animation (Google Earth style smooth appearance)
     float fadeAlpha = 0.0f;          // Current fade value (0=invisible, 1=fully visible)

@@ -284,4 +284,74 @@ void PerspectiveCamera::GetRay(double screenX, double screenY, int screenW, int 
     direction = glm::normalize(glm::dvec3(rayEndWorld) - origin);
 }
 
+bool PerspectiveCamera::ScreenToGeo(double screenX, double screenY, int screenW, int screenH, double& outLon, double& outLat) const {
+    glm::dvec3 origin, direction;
+    GetRay(screenX, screenY, screenW, screenH, origin, direction);
+    
+    // Ray-sphere intersection with Earth
+    // IMPORTANT: Camera ECEF is in km, so use km radius (not meters)
+    const double R = 6378.137;  // Earth equatorial radius in km
+    
+    // Quadratic: |origin + t*direction|^2 = R^2
+    // a*t^2 + b*t + c = 0
+    double a = glm::dot(direction, direction);
+    double b = 2.0 * glm::dot(origin, direction);
+    double c = glm::dot(origin, origin) - R * R;
+    
+    double discriminant = b * b - 4.0 * a * c;
+    if (discriminant < 0.0) {
+        return false; // No intersection
+    }
+    
+    double sqrtD = std::sqrt(discriminant);
+    double t1 = (-b - sqrtD) / (2.0 * a);
+    double t2 = (-b + sqrtD) / (2.0 * a);
+    
+    // Pick closest positive t
+    double t = (t1 > 0.0) ? t1 : t2;
+    if (t < 0.0) {
+        return false; // Behind camera
+    }
+    
+    glm::dvec3 hitPoint = origin + t * direction;
+    
+    // ECEF to LatLon
+    double x = hitPoint.x;
+    double y = hitPoint.y;
+    double z = hitPoint.z;
+    
+    outLon = glm::degrees(std::atan2(y, x));
+    outLat = glm::degrees(std::asin(std::clamp(z / R, -1.0, 1.0)));
+    
+    return true;
+}
+
+bool PerspectiveCamera::GeoToScreen(double lon, double lat, double altM, int screenW, int screenH, double& outScreenX, double& outScreenY) const {
+    // Convert geo to ECEF
+    glm::dvec3 worldPos = LatLonAltToECEF(lat, lon, altM);
+    
+    // Project to clip space
+    glm::dmat4 vp = GetViewProjectionMatrix();
+    glm::dvec4 clipPos = vp * glm::dvec4(worldPos, 1.0);
+    
+    // Behind camera check
+    if (clipPos.w <= 0.0) {
+        return false;
+    }
+    
+    // NDC
+    glm::dvec3 ndc = glm::dvec3(clipPos) / clipPos.w;
+    
+    // Check if in view frustum
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
+        return false;
+    }
+    
+    // NDC to screen
+    outScreenX = (ndc.x + 1.0) * 0.5 * screenW;
+    outScreenY = (1.0 - ndc.y) * 0.5 * screenH; // Flip Y for GL
+    
+    return true;
+}
+
 } // namespace earth
