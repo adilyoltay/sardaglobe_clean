@@ -84,6 +84,7 @@ bool GlobeEngine::Init() {
     scheduler_ = std::make_unique<TileScheduler>(config_);
     textureManager_ = std::make_unique<TextureManager>(config_);
     shaderManager_ = std::make_unique<ShaderManager>();
+    tileRenderer_ = std::make_unique<TileRenderer>(*shaderManager_);
     
     // Init DEM manager for terrain elevation
     if (config_.demEnabled) {
@@ -359,7 +360,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         it->second.edgeCoarserMask = newMask;
     }
     
-    // Build meshes for ready tiles
+    // Queue mesh rebuilds for ready tiles (time-budgeted, visible-priority)
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
         if (it != tiles_.end() && it->second.IsReady()) {
@@ -376,15 +377,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
             }
             
             if (needsRebuild) {
-                BuildTileMesh(it->second);
-                // Update prevEdgeCoarserMask AFTER successful rebuild
-                // Always update if hasMesh; DEM arrival triggers rebuild via demPending path
-                if (it->second.hasMesh) {
-                    it->second.prevEdgeCoarserMask = it->second.edgeCoarserMask;
-                }
+                QueueMeshRebuild(key, true);  // visible = true (leaf tiles)
             }
         }
     }
+    
+    // Process queued mesh rebuilds with frame budget
+    ProcessMeshRebuildQueue();
     
     // Evict old tiles
     textureManager_->EvictIfNeeded(tiles_, config_.maxTiles);
@@ -398,21 +397,6 @@ void GlobeEngine::Render() {
     glm::dmat4 viewD = camera_->GetViewMatrix();
     glm::dmat4 projD = camera_->GetProjectionMatrix();
     glm::mat4 mvp = glm::mat4(projD * viewD);
-    
-    // Use tile shader
-    shaderManager_->UseTileShader();
-    glUniformMatrix4fv(shaderManager_->GetMvpLocation(), 1, GL_FALSE, glm::value_ptr(mvp));
-    glUniform1i(shaderManager_->GetTextureLocation(), 0);
-    glUniform1f(shaderManager_->GetFadeLocation(), 1.0f);
-    
-    // Enable polygon offset to reduce z-fighting between tiles
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(1.0f, 1.0f);
-    
-    // Wireframe mode toggle
-    if (config_.wireframeMode) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    }
     
     // Collect tiles to render with fade-in animation (Google Earth style)
     // Only render current leaves (not stale non-leaf tiles)
@@ -435,6 +419,9 @@ void GlobeEngine::Render() {
     std::sort(tilesToRender.begin(), tilesToRender.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
     
+    // Use TileRenderer for unified render path
+    tileRenderer_->BeginBatch(mvp, config_.wireframeMode);
+    
     // Enable blending for fade-in effect
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -442,17 +429,12 @@ void GlobeEngine::Render() {
     // Render collected tiles with fade
     for (const auto& [tile, alpha] : tilesToRender) {
         glUniform1f(shaderManager_->GetFadeLocation(), alpha);
-        RenderTile(*tile, mvp);
+        tileRenderer_->RenderTile(*tile);
     }
     
     glDisable(GL_BLEND);
     
-    // Reset polygon mode
-    if (config_.wireframeMode) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    }
-    
-    glDisable(GL_POLYGON_OFFSET_FILL);
+    tileRenderer_->EndBatch();
     
     // Render pivot gizmo (Google Earth style target icon)
     RenderPivot(mvp);
@@ -1157,6 +1139,46 @@ void GlobeEngine::RenderPivot(const glm::mat4& viewProj) {
         glBindVertexArray(0);
         
         glEnable(GL_DEPTH_TEST);
+    }
+}
+
+// =============================================================================
+// MESH REBUILD QUEUE (Time-Budgeted, Visible Priority)
+// =============================================================================
+
+void GlobeEngine::QueueMeshRebuild(const TileKey& key, bool isVisible) {
+    // Skip if already pending
+    if (rebuildPending_.count(key)) return;
+    
+    rebuildPending_.insert(key);
+    
+    // Visible tiles get priority (front of queue)
+    if (isVisible) {
+        meshRebuildQueue_.push_front(key);
+    } else {
+        meshRebuildQueue_.push_back(key);
+    }
+}
+
+void GlobeEngine::ProcessMeshRebuildQueue() {
+    int rebuilds = 0;
+    
+    while (!meshRebuildQueue_.empty() && rebuilds < MAX_MESH_REBUILDS_PER_FRAME) {
+        TileKey key = meshRebuildQueue_.front();
+        meshRebuildQueue_.pop_front();
+        rebuildPending_.erase(key);
+        
+        // Find tile and rebuild if still valid
+        auto it = tiles_.find(key);
+        if (it != tiles_.end() && it->second.IsReady()) {
+            BuildTileMesh(it->second);
+            
+            // Update prevEdgeCoarserMask AFTER successful rebuild
+            if (it->second.hasMesh) {
+                it->second.prevEdgeCoarserMask = it->second.edgeCoarserMask;
+            }
+            ++rebuilds;
+        }
     }
 }
 

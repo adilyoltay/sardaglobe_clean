@@ -7,6 +7,7 @@
 #include "../scheduling/lod_selector.h"
 #include "../rendering/texture_manager.h"
 #include "../rendering/shader_manager.h"
+#include "../rendering/tile_renderer.h"
 #include "../io/dem_manager.h"
 #include "../camera/earth_camera.h"
 #include "../camera/flight_controller.h"
@@ -14,6 +15,7 @@
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <deque>
 
 struct GLFWwindow;
 
@@ -92,6 +94,7 @@ private:
     std::unique_ptr<TileScheduler> scheduler_;
     std::unique_ptr<TextureManager> textureManager_;
     std::unique_ptr<ShaderManager> shaderManager_;
+    std::unique_ptr<TileRenderer> tileRenderer_;
     std::unique_ptr<DemManager> demManager_;
     LodSelector lodSelector_;
     LayerManager layerManager_;
@@ -101,6 +104,14 @@ private:
     
     // Current leaf set for render filtering (updated each frame in Update)
     std::unordered_set<TileKey> currentLeafSet_;
+    
+    // Mesh rebuild queue (time-budgeted, visible-priority)
+    static constexpr int MAX_MESH_REBUILDS_PER_FRAME = 4;
+    std::deque<TileKey> meshRebuildQueue_;
+    std::unordered_set<TileKey> rebuildPending_;  // Prevent duplicate queue entries
+    
+    void QueueMeshRebuild(const TileKey& key, bool isVisible);
+    void ProcessMeshRebuildQueue();
     
     // Frame timing
     double lastFrameTime_ = 0.0;

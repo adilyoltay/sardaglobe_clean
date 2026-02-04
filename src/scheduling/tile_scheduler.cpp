@@ -80,6 +80,22 @@ void TileScheduler::Cancel(const TileKey& key) {
 }
 
 void TileScheduler::Update(TileMap& tiles, double currentTime) {
+    // Process dropped keys first - mark tiles as Failed for retry
+    {
+        std::lock_guard<std::mutex> lock(droppedKeysMutex_);
+        while (!droppedKeys_.empty()) {
+            TileKey key = droppedKeys_.front();
+            droppedKeys_.pop();
+            
+            auto it = tiles.find(key);
+            if (it != tiles.end()) {
+                it->second.state = TileState::Failed;
+                it->second.retryCount++;
+                it->second.lastRetryTime = currentTime;
+            }
+        }
+    }
+    
     // Process fetch results
     {
         std::lock_guard<std::mutex> lock(fetchResultsMutex_);
@@ -165,11 +181,45 @@ void TileScheduler::SetUploadCallback(UploadCallback callback) {
 
 void TileScheduler::OnFetchComplete(FetchResult result) {
     std::lock_guard<std::mutex> lock(fetchResultsMutex_);
+    
+    // Drop oldest if queue is full (backpressure)
+    // CRITICAL: Track dropped key so Update() can mark tile as Failed
+    if (fetchResults_.size() >= MAX_RESULT_QUEUE) {
+        FetchResult& dropped = fetchResults_.front();
+        TileKey droppedKey = dropped.key;
+        {
+            std::lock_guard<std::mutex> tlock(trackingMutex_);
+            pendingFetches_.erase(droppedKey);
+        }
+        {
+            std::lock_guard<std::mutex> dlock(droppedKeysMutex_);
+            droppedKeys_.push(droppedKey);
+        }
+        fetchResults_.pop();
+        ++droppedFetchResults_;
+    }
     fetchResults_.push(std::move(result));
 }
 
 void TileScheduler::OnDecodeComplete(DecodeResult result) {
     std::lock_guard<std::mutex> lock(decodeResultsMutex_);
+    
+    // Drop oldest if queue is full (backpressure)
+    // CRITICAL: Track dropped key so Update() can mark tile as Failed
+    if (decodeResults_.size() >= MAX_RESULT_QUEUE) {
+        DecodeResult& dropped = decodeResults_.front();
+        TileKey droppedKey = dropped.key;
+        {
+            std::lock_guard<std::mutex> tlock(trackingMutex_);
+            pendingDecodes_.erase(droppedKey);
+        }
+        {
+            std::lock_guard<std::mutex> dlock(droppedKeysMutex_);
+            droppedKeys_.push(droppedKey);
+        }
+        decodeResults_.pop();
+        ++droppedDecodeResults_;
+    }
     decodeResults_.push(std::move(result));
 }
 
