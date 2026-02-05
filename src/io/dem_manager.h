@@ -62,6 +62,9 @@ public:
     // Check if DEM data is available for a tile
     bool HasData(const TileKey& key) const;
     
+    // Get raw DEM grid data for heightmap upload (returns false if not cached)
+    bool GetGridData(const TileKey& key, DemGridData& outData) const;
+    
     // Get height at a specific lat/lon for a tile
     bool SampleHeight(double lonDeg, double latDeg, int level, double& heightMeters) const;
     

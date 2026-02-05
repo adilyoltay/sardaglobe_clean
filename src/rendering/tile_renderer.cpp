@@ -20,6 +20,10 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe) {
     glUniform1i(shaderManager_.GetTextureLocation(), 0);
     glUniform1f(shaderManager_.GetFadeLocation(), 1.0f);
     
+    // Default: no heightmap (terrain displacement disabled)
+    glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    glUniform1i(shaderManager_.GetHeightmapLocation(), 1);  // Heightmap on texture unit 1
+    
     // Enable polygon offset to reduce z-fighting between tiles
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(1.0f, 1.0f);
@@ -62,6 +66,43 @@ void TileRenderer::RenderTileWithTexture(const Tile& tile, uint32_t textureId) {
     glBindVertexArray(tile.vao);
     glDrawElements(GL_TRIANGLES, tile.indexCount, GL_UNSIGNED_INT, nullptr);
     glBindVertexArray(0);
+    
+    // Update stats
+    stats_.tilesRendered++;
+    stats_.drawCalls++;
+    stats_.trianglesRendered += tile.indexCount / 3;
+}
+
+void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapId,
+                                            float heightMin, float heightMax) {
+    if (!batchActive_) return;
+    if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
+    
+    // Bind color texture on unit 0
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tile.textureId);
+    
+    // Bind heightmap texture on unit 1 and enable displacement
+    if (heightmapId != 0) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, heightmapId);
+        glUniform1i(shaderManager_.GetHasHeightmapLocation(), 1);
+        glUniform1f(shaderManager_.GetHeightMinLocation(), heightMin);
+        glUniform1f(shaderManager_.GetHeightMaxLocation(), heightMax);
+    } else {
+        glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    }
+    
+    // Draw tile mesh
+    glBindVertexArray(tile.vao);
+    glDrawElements(GL_TRIANGLES, tile.indexCount, GL_UNSIGNED_INT, nullptr);
+    glBindVertexArray(0);
+    
+    // Reset heightmap state for next tile
+    if (heightmapId != 0) {
+        glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+        glActiveTexture(GL_TEXTURE0);  // Reset to default texture unit
+    }
     
     // Update stats
     stats_.tilesRendered++;

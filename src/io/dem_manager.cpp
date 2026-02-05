@@ -160,6 +160,16 @@ bool DemManager::SampleHeight(double lonDeg, double latDeg, int level, double& h
     return true;
 }
 
+bool DemManager::GetGridData(const TileKey& key, DemGridData& outData) const {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    auto it = cache_.find(key);
+    if (it == cache_.end() || !it->second.valid) {
+        return false;
+    }
+    outData = it->second;
+    return true;
+}
+
 HeightSampler DemManager::GetHeightSampler() const {
     return [this](double lonDeg, double latDeg, int level, double& heightMeters) {
         return SampleHeight(lonDeg, latDeg, level, heightMeters);
@@ -281,8 +291,8 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);  // Increased for MESHN=65 larger payloads
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         

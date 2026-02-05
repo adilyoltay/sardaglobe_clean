@@ -38,7 +38,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     const glm::mat4& mvp,
     double currentTime,
     bool wireframe,
-    uint32_t loadingTexture
+    uint32_t loadingTexture,
+    HeightmapManager* heightmapManager
 ) {
     TileDrawStats stats;
     
@@ -125,13 +126,25 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     // Pass 1: Fallback ancestor tiles (opaque, parent texture)
     for (Tile* tile : fallbackTiles) {
         glUniform1f(shaderManager_.GetFadeLocation(), 1.0f);
-        tileRenderer_.RenderTile(*tile);
+        // Try heightmap rendering if available
+        HeightmapTexture hmTex;
+        if (heightmapManager && heightmapManager->GetTexture(tile->key, hmTex)) {
+            tileRenderer_.RenderTileWithHeightmap(*tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight);
+        } else {
+            tileRenderer_.RenderTile(*tile);
+        }
     }
     
     // Pass 2: Renderable leaves (with fade-in)
     for (const auto& [tile, alpha] : renderableLeaves) {
         glUniform1f(shaderManager_.GetFadeLocation(), alpha);
-        tileRenderer_.RenderTile(*tile);
+        // Try heightmap rendering if available
+        HeightmapTexture hmTex;
+        if (heightmapManager && heightmapManager->GetTexture(tile->key, hmTex)) {
+            tileRenderer_.RenderTileWithHeightmap(*tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight);
+        } else {
+            tileRenderer_.RenderTile(*tile);
+        }
     }
     
     glDisable(GL_BLEND);

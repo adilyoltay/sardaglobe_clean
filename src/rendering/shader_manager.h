@@ -13,6 +13,7 @@ enum class ShaderFlags : uint32_t {
     DebugSeams  = 1 << 1,  // Highlight tile seams
     NoLighting  = 1 << 2,  // Disable lighting (flat shading)
     DebugLOD    = 1 << 3,  // Color-code by LOD level
+    Terrain     = 1 << 4,  // GPU terrain displacement
 };
 
 inline ShaderFlags operator|(ShaderFlags a, ShaderFlags b) {
@@ -43,6 +44,13 @@ public:
     int GetFadeLocation() const { return fadeLoc_; }
     int GetLodLevelLocation() const { return lodLevelLoc_; }
     
+    // Terrain uniforms
+    int GetHeightmapLocation() const { return heightmapLoc_; }
+    int GetHeightScaleLocation() const { return heightScaleLoc_; }
+    int GetHeightMinLocation() const { return heightMinLoc_; }
+    int GetHeightMaxLocation() const { return heightMaxLoc_; }
+    int GetHasHeightmapLocation() const { return hasHeightmapLoc_; }
+    
     // Use tile shader (default or with flags)
     void UseTileShader();
     void UseTileShader(ShaderFlags flags);
@@ -68,6 +76,13 @@ private:
     int fadeLoc_ = -1;
     int lodLevelLoc_ = -1;
     
+    // Terrain uniforms
+    int heightmapLoc_ = -1;
+    int heightScaleLoc_ = -1;
+    int heightMinLoc_ = -1;
+    int heightMaxLoc_ = -1;
+    int hasHeightmapLoc_ = -1;
+    
     ShaderFlags activeFlags_ = ShaderFlags::None;
 };
 
@@ -81,16 +96,57 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 
 uniform mat4 uMVP;
+uniform sampler2D uHeightmap;
+uniform float uHeightScale;
+uniform float uHeightMin;
+uniform float uHeightMax;
+uniform int uHasHeightmap;
 
 out vec2 vTexCoord;
 out vec3 vNormal;
 out vec3 vWorldPos;
 
 void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
+    vec3 pos = aPos;
+    vec3 normal = aNormal;
+    
+    if (uHasHeightmap == 1) {
+        // Sample heightmap (normalized [0,1])
+        float heightNorm = texture(uHeightmap, aTexCoord).r;
+        float heightKm = mix(uHeightMin, uHeightMax, heightNorm);
+        
+        // Displace vertex radially outward from Earth center
+        vec3 radialDir = normalize(aPos);
+        pos = aPos + radialDir * heightKm;
+        
+        // Recalculate normal from heightmap gradient (finite difference)
+        vec2 texelSize = 1.0 / vec2(textureSize(uHeightmap, 0));
+        float hL = texture(uHeightmap, aTexCoord - vec2(texelSize.x, 0)).r;
+        float hR = texture(uHeightmap, aTexCoord + vec2(texelSize.x, 0)).r;
+        float hD = texture(uHeightmap, aTexCoord - vec2(0, texelSize.y)).r;
+        float hU = texture(uHeightmap, aTexCoord + vec2(0, texelSize.y)).r;
+        
+        // Gradient in tangent space
+        float dHdx = (hR - hL) * (uHeightMax - uHeightMin) * 0.5;
+        float dHdy = (hU - hD) * (uHeightMax - uHeightMin) * 0.5;
+        
+        // Perturb normal based on gradient
+        // Scale factor for normal perturbation (larger = more visible slopes)
+        float normalScale = 50.0;
+        vec3 perturbation = vec3(-dHdx * normalScale, -dHdy * normalScale, 1.0);
+        
+        // Transform perturbation to world space (approximate - assumes radial up)
+        vec3 tangentU = normalize(cross(vec3(0, 0, 1), radialDir));
+        if (length(tangentU) < 0.1) tangentU = normalize(cross(vec3(1, 0, 0), radialDir));
+        vec3 tangentV = cross(radialDir, tangentU);
+        
+        normal = normalize(tangentU * perturbation.x + tangentV * perturbation.y + radialDir * perturbation.z);
+    }
+    
+    gl_Position = uMVP * vec4(pos, 1.0);
     vTexCoord = aTexCoord;
-    vNormal = aNormal;
-    vWorldPos = aPos;
+    vNormal = normal;
+    vWorldPos = pos;
 }
 )";
 

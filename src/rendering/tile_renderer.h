@@ -31,6 +31,10 @@ public:
     // Render a tile with a specific texture (for placeholder)
     void RenderTileWithTexture(const Tile& tile, uint32_t textureId);
     
+    // Render a tile with heightmap for terrain displacement
+    void RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapId, 
+                                  float heightMin, float heightMax);
+    
     // End the batch and restore state
     void EndBatch();
     

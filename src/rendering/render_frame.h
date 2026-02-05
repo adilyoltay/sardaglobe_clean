@@ -3,6 +3,7 @@
 #include "../core/tile.h"
 #include "tile_renderer.h"
 #include "shader_manager.h"
+#include "heightmap_manager.h"
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,7 +34,8 @@ public:
         const glm::mat4& mvp,
         double currentTime,
         bool wireframe,
-        uint32_t loadingTexture  // Placeholder texture ID
+        uint32_t loadingTexture,  // Placeholder texture ID
+        HeightmapManager* heightmapManager = nullptr  // Optional: GPU terrain displacement
     );
 
 private:

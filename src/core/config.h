@@ -24,7 +24,7 @@ struct Config {
     int windowWidth = 1280;
     int windowHeight = 720;
     float fovDegrees = DEFAULT_FOV_DEG;
-    int meshSegments = 16;            // Mesh subdivision per tile (matches DEM grid)
+    int meshSegments = 64;            // Mesh subdivision per tile (matches DEM grid)
     
     // LOD
     float sseThreshold = DEFAULT_SSE_THRESHOLD;
@@ -49,9 +49,9 @@ struct Config {
     
     // DEM/Terrain settings (PiriReis mesh service)
     std::string demBaseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
-    int demMeshN = 17;                // Grid resolution per tile (17x17 = 289 samples)
-    size_t demCacheSize = 256;        // Max cached DEM tiles
-    double demHeightScale = 1.0;      // Height exaggeration (1.0 = realistic)
+    int demMeshN = 65;                // Grid resolution per tile (65x65 = 4225 samples)
+    size_t demCacheSize = 512;        // Max cached DEM tiles
+    double demHeightScale = 2.5;      // Height exaggeration (2.5x for visible terrain)
     bool demDebug = false;            // Enable DEM debug logging
     
     // Debug

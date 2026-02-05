@@ -105,6 +105,9 @@ bool GlobeEngine::Init() {
         demConfig.cacheSize = config_.demCacheSize;
         demConfig.debug = config_.demDebug;
         demManager_ = std::make_unique<DemManager>(demConfig);
+        
+        // Init heightmap manager for GPU terrain displacement
+        heightmapManager_ = std::make_unique<HeightmapManager>();
     }
 
     meshScheduler_ = std::make_unique<TileMeshScheduler>(config_, demManager_.get());
@@ -113,6 +116,13 @@ bool GlobeEngine::Init() {
     scheduler_->SetUploadCallback([this](Tile& tile) {
         textureManager_->QueueUpload(tile);
     });
+    
+    // Set eviction callback for heightmap cleanup
+    if (heightmapManager_) {
+        textureManager_->SetEvictionCallback([this](const TileKey& key) {
+            heightmapManager_->Release(key);
+        });
+    }
     
     // GL state
     glEnable(GL_DEPTH_TEST);
@@ -174,6 +184,7 @@ void GlobeEngine::Shutdown() {
     
     if (demManager_) demManager_->Shutdown();
     if (meshScheduler_) meshScheduler_->Shutdown();
+    if (heightmapManager_) heightmapManager_->Clear();
     scheduler_.reset();
     textureManager_.reset();
     shaderManager_.reset();
@@ -399,6 +410,20 @@ void GlobeEngine::Update(double dt, double currentTime) {
             demManager_->Request(key);
         }
         demManager_->Update();
+        
+        // Queue DEM data for GPU heightmap texture upload
+        if (heightmapManager_) {
+            for (const TileKey& key : selection.required) {
+                if (demManager_->HasData(key) && !heightmapManager_->HasTexture(key)) {
+                    DemGridData demData;
+                    if (demManager_->GetGridData(key, demData)) {
+                        heightmapManager_->QueueUpload(key, demData, static_cast<float>(config_.demHeightScale));
+                    }
+                }
+            }
+            // Process pending heightmap uploads
+            heightmapManager_->ProcessUploads(2.0);  // 2ms budget
+        }
     }
     
     // Compute edge coarser mask for seam fix (FAZ 6.1)
@@ -514,12 +539,20 @@ void GlobeEngine::Update(double dt, double currentTime) {
         if (tile.state == TileState::Unloaded) {
             double last = tile.lastAccessTime;
             if (last <= 0.0 || (cleanupNow - last) > UNLOADED_STALE_SEC) {
+                // Release heightmap texture before erasing
+                if (heightmapManager_) {
+                    heightmapManager_->Release(it->first);
+                }
                 it = tiles_.erase(it);
                 continue;
             }
         } else if (tile.state == TileState::Failed) {
             double last = tile.lastRetryTime > 0.0 ? tile.lastRetryTime : tile.lastAccessTime;
             if (last <= 0.0 || (cleanupNow - last) > FAILED_STALE_SEC) {
+                // Release heightmap texture before erasing
+                if (heightmapManager_) {
+                    heightmapManager_->Release(it->first);
+                }
                 it = tiles_.erase(it);
                 continue;
             }
@@ -563,7 +596,8 @@ void GlobeEngine::Render() {
     double currentTime = glfwGetTime();
     uint32_t loadingTexture = textureManager_->GetLoadingTexture();
     auto drawStats = renderFrame_->DrawTiles(
-        renderLeafSet_, tiles_, mvp, currentTime, config_.wireframeMode, loadingTexture
+        renderLeafSet_, tiles_, mvp, currentTime, config_.wireframeMode, loadingTexture,
+        heightmapManager_.get()  // Pass heightmap manager for GPU terrain displacement
     );
     
     // Render pivot gizmo (Google Earth style target icon)

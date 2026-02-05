@@ -464,6 +464,7 @@ Her faz bittiğinde aşağıyı güncelle:
 - [x] OpenGlobus Core Port tamamlandı — Tarih: 2026-02-04 — Notlar: LonLat (lonlat.h), Ellipsoid (ellipsoid.h/cpp), Extent (extent.h), QuadTreeNode (quadtree_node.h/cpp). Tile yapısına Extent entegrasyonu. BuildTileMesh artık Ellipsoid.GeodeticToCartesian kullanıyor (WGS84 uyumlu mesh).
 - [x] Tile Pipeline Opt P0-P3 tamamlandı — Tarih: 2026-02-05 — Notlar: Telemetri (p95/p99 + alt süreler), URL template (regex-free), cache I/O worker'a taşındı, decoder priority+fairness, backpressure (bounded queue + in-flight limit).
 - [x] Tile Pipeline Opt P4-P6 tamamlandı — Tarih: 2026-02-05 — Notlar: Upload priority+reuse (glTexSubImage2D), async mesh scheduler + shared EBO, pin epoch + eviction budget.
+- [x] 3D Terrain FAZ 1-3 tamamlandı — Tarih: 2026-02-05 — Notlar: demMeshN=65, demHeightScale=2.5, HeightmapManager (R16F GPU texture), vertex shader displacement, DEM timeout 30s, tile eviction heightmap release.
 
 ### Google Earth Rewrite Plan Faz Günlüğü
 - [x] Faz 0 (Hazırlık) tamamlandı — Tarih: 2026-01-31 — Notlar: ParitySnapshot telemetry eklendi (frameTime, tileLoad, cache stats), --test-parity flag ve RunParityTest() senaryosu eklendi.
@@ -569,13 +570,13 @@ Build: Başarılı (✓)
 - Önceki: 15/100
 - Şimdi: ~55-60/100
 
-### Güncel Durum Snapshot (2026-02-05 - Tile Pipeline Opt P4-P6 Complete)
+### Güncel Durum Snapshot (2026-02-05 - 3D Terrain FAZ 1-3 Complete)
 Toplam API: 365
 Override edilen: 185
 Non-null implementasyon: 185
 Stub (Value::Null): 180
 Kapsam: %50.6
-**Not:** Tile Pipeline Opt P4-P6 complete (upload priority+reuse, async mesh scheduler + shared EBO, pin epoch + eviction budget). Navigation Parity Phase 3 remains complete.
+**Not:** 3D Terrain rendering için FAZ 1-3 tamamlandı. HeightmapManager GPU texture pipeline aktif, vertex shader displacement hazır, DEM timeout artırıldı (30s).
 **Accepted Deviations:** SSE Threshold scale (~2.5%) & ActivationK model.
 
 ### Doküman Bazlı Gap Analizi (webglobe_api_docs) — 2026-02-01 (Audited)

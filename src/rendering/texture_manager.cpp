@@ -241,6 +241,11 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
         if (it != tiles.end()) {
             Tile& tile = it->second;
             
+            // Notify eviction callback (e.g., for heightmap cleanup)
+            if (evictionCallback_) {
+                evictionCallback_(key);
+            }
+            
             // Delete texture
             if (tile.ownsTexture && tile.textureId != 0) {
                 DeleteTexture(tile.textureId);

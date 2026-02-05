@@ -148,6 +148,13 @@ void ShaderManager::CacheUniformLocations(uint32_t program) {
     texLoc_ = glGetUniformLocation(program, "uTexture");
     fadeLoc_ = glGetUniformLocation(program, "uFade");
     lodLevelLoc_ = glGetUniformLocation(program, "uLodLevel");
+    
+    // Terrain uniforms
+    heightmapLoc_ = glGetUniformLocation(program, "uHeightmap");
+    heightScaleLoc_ = glGetUniformLocation(program, "uHeightScale");
+    heightMinLoc_ = glGetUniformLocation(program, "uHeightMin");
+    heightMaxLoc_ = glGetUniformLocation(program, "uHeightMax");
+    hasHeightmapLoc_ = glGetUniformLocation(program, "uHasHeightmap");
 }
 
 void ShaderManager::UseTileShader() {
