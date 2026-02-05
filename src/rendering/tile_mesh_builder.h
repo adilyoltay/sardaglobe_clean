@@ -21,6 +21,8 @@ public:
         bool demUsed = false;
         bool demPending = false;
         uint32_t meshRevision = 0;
+        double minHeightKm = 0.0;         // For height-aware skirt depth
+        double maxHeightKm = 0.0;
     };
     
     // Build mesh geometry for a tile
@@ -42,11 +44,13 @@ public:
 
 private:
     // Skirt generation (GE-style seam hiding)
+    // heightRange: max-min height in km (for height-aware skirt depth)
     static void GenerateSkirts(
         std::vector<float>& vertices,
         std::vector<unsigned int>* indices,
         int segments,
-        int level
+        int level,
+        double heightRange = 0.0
     );
 };
 

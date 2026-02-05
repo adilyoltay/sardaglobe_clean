@@ -105,9 +105,24 @@ inline float ComputeGeometricError(int level) {
     return static_cast<float>(EARTH_CIRCUMFERENCE_M / (std::pow(2.0, level) * TILE_SIZE_PX));
 }
 
+// Latitude-aware geometric error (meters per pixel at tile center)
+inline float ComputeGeometricError(const TileKey& key) {
+    auto [lat, lon] = TileCenterLatLon(key);
+    double latRad = lat * M_PI / 180.0;
+    double metersPerTile = EARTH_CIRCUMFERENCE_M * std::cos(latRad) / static_cast<double>(1 << key.level);
+    return static_cast<float>(metersPerTile / TILE_SIZE_PX);
+}
+
 // Screen-space error calculation
 inline float ComputeSSE(int level, double distanceMeters, int viewportHeight, float fovDegrees) {
     float geometricError = ComputeGeometricError(level);
+    float fovRad = fovDegrees * static_cast<float>(M_PI) / 180.0f;
+    float sseFactor = static_cast<float>(viewportHeight) / (2.0f * std::tan(fovRad / 2.0f));
+    return (geometricError / static_cast<float>(distanceMeters)) * sseFactor;
+}
+
+inline float ComputeSSE(const TileKey& key, double distanceMeters, int viewportHeight, float fovDegrees) {
+    float geometricError = ComputeGeometricError(key);
     float fovRad = fovDegrees * static_cast<float>(M_PI) / 180.0f;
     float sseFactor = static_cast<float>(viewportHeight) / (2.0f * std::tan(fovRad / 2.0f));
     return (geometricError / static_cast<float>(distanceMeters)) * sseFactor;

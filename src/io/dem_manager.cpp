@@ -65,14 +65,21 @@ void DemManager::Request(const TileKey& key) {
         consecutiveAuthFails_.store(0);
     }
     
-    // Check if already cached or failed
+    // Check if already cached or in fail TTL
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
         if (cache_.find(key) != cache_.end()) {
             return;  // Already have data
         }
-        if (failedSet_.count(key) > 0) {
-            return;  // Already failed, don't retry
+        // Check fail TTL - retry if expired
+        auto failIt = failedUntil_.find(key);
+        if (failIt != failedUntil_.end()) {
+            auto now = std::chrono::steady_clock::now();
+            if (now < failIt->second) {
+                return;  // Still in fail TTL, don't retry yet
+            }
+            // TTL expired, remove from fail cache and allow retry
+            failedUntil_.erase(failIt);
         }
     }
     
@@ -327,8 +334,10 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
                 std::cerr << "[DEM] Auth failed " << fails << " times, backoff 30s" << std::endl;
             }
         } else {
+            // Non-auth failure: add to TTL cache for retry after FAIL_RETRY_SEC
             std::lock_guard<std::mutex> lock(cacheMutex_);
-            failedSet_.insert(key);
+            failedUntil_[key] = std::chrono::steady_clock::now() + 
+                                std::chrono::seconds(static_cast<int>(FAIL_RETRY_SEC));
         }
         return false;
     }

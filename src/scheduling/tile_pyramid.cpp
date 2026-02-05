@@ -55,7 +55,7 @@ float TilePyramid::ComputeScore(const TileKey& key, const glm::vec3& cameraPos,
     float distanceMeters = distanceKm * 1000.0f;
     
     // Compute SSE (Screen-Space Error) - uses tile level for geometric error
-    float sse = ComputeSSE(key.level, distanceMeters, viewportHeight, fovDegrees);
+    float sse = ComputeSSE(key, distanceMeters, viewportHeight, fovDegrees);
     
     // Center bias: how much the tile is in the center of view
     // dirToTile = normalize(tileCenter - cameraPos)

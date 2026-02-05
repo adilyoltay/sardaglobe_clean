@@ -98,8 +98,11 @@ private:
     // Pending/in-flight dedupe
     std::unordered_set<TileKey> pendingSet_;
     
-    // Failed tile tracking (401 backoff)
-    std::unordered_set<TileKey> failedSet_;
+    // Failed tile tracking with TTL (retry after timeout)
+    std::unordered_map<TileKey, std::chrono::steady_clock::time_point> failedUntil_;  // TTL cache
+    static constexpr double FAIL_RETRY_SEC = 30.0;  // Retry failed tiles after 30s
+    
+    // Auth backoff (401/403)
     std::atomic<int> consecutiveAuthFails_{0};
     std::atomic<bool> authBackoff_{false};
     std::chrono::steady_clock::time_point backoffUntil_;

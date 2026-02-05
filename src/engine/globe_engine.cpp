@@ -392,9 +392,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
     textureManager_->ProcessUploads(tiles_, config_.uploadBudgetMs);
     frameTimings_.textureUploadMs = (glfwGetTime() * 1000.0) - uploadStartMs;
     
-    // Request DEM data for visible tiles
+    // Request DEM data for visible tiles (includes ancestors for fallback coverage)
     if (demManager_) {
-        for (const TileKey& key : selection.leaves) {
+        // Use required set (leaves + ancestors) so fallback parents also get DEM
+        for (const TileKey& key : selection.required) {
             demManager_->Request(key);
         }
         demManager_->Update();
@@ -402,7 +403,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     // Compute edge coarser mask for seam fix (FAZ 6.1)
     // An edge is "coarser" if the neighbor at same level is NOT a leaf but its parent IS
-    const int expectedSegments = demManager_ ? std::max(config_.meshSegments, 8) : config_.meshSegments;
+    const int expectedSegments = demManager_ ? std::max(config_.meshSegments, config_.demMeshN - 1) : config_.meshSegments;
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
         if (it == tiles_.end()) continue;
@@ -440,9 +441,37 @@ void GlobeEngine::Update(double dt, double currentTime) {
             }
         }
         
-        if (demManager_ && tile.demPending && demManager_->HasData(key)) {
-            revisionChanged = true;
-            tile.demPending = false;
+        // Check DEM availability - check edge-specific coarser neighbor parents
+        if (demManager_ && tile.demPending) {
+            bool hasOwnDem = demManager_->HasData(key);
+            bool hasAllCoarserDem = true;
+            
+            // For each flagged edge, check if the neighbor's parent DEM is available
+            // The neighbor's parent is the tile that provides coarser elevation data
+            if (key.level > 0 && tile.edgeCoarserMask != 0) {
+                static const int edgeDx[] = {0, 1, 0, -1};  // N, E, S, W
+                static const int edgeDy[] = {-1, 0, 1, 0};
+                static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
+                                                   Tile::EDGE_SOUTH, Tile::EDGE_WEST};
+                
+                for (int dir = 0; dir < 4; ++dir) {
+                    if (tile.edgeCoarserMask & edgeBits[dir]) {
+                        TileKey neighbor = key.Neighbor(edgeDx[dir], edgeDy[dir]);
+                        if (neighbor.IsValid()) {
+                            TileKey neighborParent = neighbor.Parent();
+                            if (!demManager_->HasData(neighborParent)) {
+                                hasAllCoarserDem = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (hasOwnDem && hasAllCoarserDem) {
+                revisionChanged = true;
+                tile.demPending = false;
+            }
         }
         
         if (tile.builtSegments != 0 && tile.builtSegments != expectedSegments) {
@@ -568,6 +597,8 @@ void GlobeEngine::Render() {
     debugStats_.leafNoTexture = drawStats.leafNoTexture;
     debugStats_.missingTiles = drawStats.missing;
     debugStats_.visibleTiles = drawStats.renderableLeaves + drawStats.fallbackTiles;
+    debugStats_.leafCount = tilePyramid_.GetLeafCount();
+    debugStats_.requiredCount = tilePyramid_.GetRequiredCount();
     debugStats_.currentZoom = GetCurrentZoom();
     camera_->GetLatLonAlt(debugStats_.latitude, debugStats_.longitude, debugStats_.altitude);
     debugStats_.heading = camera_->GetHeading();
@@ -836,6 +867,8 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Tiles");
             ImGui::Separator();
             ImGui::Text("Total: %d", debugStats_.tileCount);
+            ImGui::Text("Leaves: %d", debugStats_.leafCount);
+            ImGui::Text("Required: %d", debugStats_.requiredCount);
             ImGui::Text("Visible: %d", debugStats_.visibleTiles);
             ImGui::Text("Pending Fetch: %d", debugStats_.pendingFetches);
             ImGui::Text("Pending Decode: %d", debugStats_.pendingDecodes);

@@ -143,6 +143,8 @@ private:
         double textureUploadMs = 0.0;
         double meshBuildMs = 0.0;
         int tileCount = 0;
+        int leafCount = 0;
+        int requiredCount = 0;
         int pendingFetches = 0;
         int pendingDecodes = 0;
         int activeFetches = 0;

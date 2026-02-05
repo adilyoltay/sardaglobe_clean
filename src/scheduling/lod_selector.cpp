@@ -67,8 +67,8 @@ bool LodSelector::IsTileVisible(
     glm::vec3 center = TileCenterWorld(key);
     float radius = TileBoundingRadius(key);
     
-    // CONSERVATIVE BOUNDING: Add 15% margin for oblique/tilt views
-    constexpr float CONSERVATIVE_RADIUS_MARGIN = 1.15f;
+    // CONSERVATIVE BOUNDING: Add 25% margin for oblique/tilt views
+    constexpr float CONSERVATIVE_RADIUS_MARGIN = 1.25f;
     float conservativeRadius = radius * CONSERVATIVE_RADIUS_MARGIN;
     
     // Frustum culling
@@ -78,8 +78,8 @@ bool LodSelector::IsTileVisible(
         }
     }
     
-    // Horizon culling (bypass at high tilt)
-    constexpr float HORIZON_BYPASS_TILT = 30.0f;
+    // Horizon culling (bypass at high tilt - 45° threshold for better oblique coverage)
+    constexpr float HORIZON_BYPASS_TILT = 45.0f;
     if (!settings.disableHorizonCull && tiltDegrees_ < HORIZON_BYPASS_TILT) {
         if (!horizon_.IsSphereVisible(center, conservativeRadius)) {
             return false;
@@ -192,7 +192,9 @@ bool LodSelector::TraverseTile(
         result.refinedCount++;
     } else {
         for (const auto& child : children) {
-            result.required.insert(child);
+            if (IsTileVisible(child, cameraPos, settings)) {
+                result.required.insert(child);
+            }
         }
     }
     
@@ -218,7 +220,7 @@ bool LodSelector::ShouldSubdivide(
     double distanceMeters = static_cast<double>(distance) * 1000.0;
     
     // Compute SSE
-    float sse = ComputeSSE(key.level, distanceMeters, viewportHeight, fovDegrees);
+    float sse = ComputeSSE(key, distanceMeters, viewportHeight, fovDegrees);
     
     // Apply tilt factor (reduce detail when tilted)
     float adjustedThreshold = sseThreshold / std::max(0.1f, tiltFactor);

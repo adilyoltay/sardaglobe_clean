@@ -4,6 +4,7 @@
 #include <glad/glad.h>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 namespace globe {
 
@@ -20,7 +21,8 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     result.useSharedEBO = useSharedEBO;
     
     // Use more segments for terrain mesh when DEM is enabled
-    const int segments = demManager ? std::max(config.meshSegments, 8) : config.meshSegments;
+    // Match segments to DEM grid: demMeshN points = demMeshN-1 segments
+    const int segments = demManager ? std::max(config.meshSegments, config.demMeshN - 1) : config.meshSegments;
     const int vertexCount = (segments + 1) * (segments + 1);
     const int indexCount = segments * segments * 6;
     result.segments = segments;
@@ -61,6 +63,14 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     
     result.demUsed = false;
     result.demPending = false;
+    
+    // Track min/max height for height-aware skirt depth
+    double minHeightKm = std::numeric_limits<double>::max();
+    double maxHeightKm = std::numeric_limits<double>::lowest();
+    
+    // First pass: Generate positions (normals computed in second pass for DEM terrain)
+    std::vector<glm::dvec3> positions;
+    positions.reserve((segments + 1) * (segments + 1));
     
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
@@ -105,6 +115,8 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                 if (heightSampler(lon, lat, sampleLevel, heightMeters)) {
                     heightKm = heightMeters * 0.001 * config.demHeightScale;
                     result.demUsed = true;
+                    minHeightKm = std::min(minHeightKm, heightKm);
+                    maxHeightKm = std::max(maxHeightKm, heightKm);
                 } else {
                     result.demPending = true;
                 }
@@ -112,17 +124,57 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             
             // Use Ellipsoid for geodetic to cartesian (OpenGlobus style)
             glm::dvec3 pos = ellipsoid.GeodeticToCartesian(lon, lat, heightKm);
-            float x = static_cast<float>(pos.x);
-            float y = static_cast<float>(pos.y);
-            float z = static_cast<float>(pos.z);
+            positions.push_back(pos);
+        }
+    }
+    
+    // Second pass: Compute normals and build vertex buffer
+    // For DEM terrain, use finite difference to compute terrain normals
+    for (int iy = 0; iy <= segments; ++iy) {
+        float v = static_cast<float>(iy) / segments;
+        
+        for (int ix = 0; ix <= segments; ++ix) {
+            float u = static_cast<float>(ix) / segments;
+            int idx = iy * (segments + 1) + ix;
             
-            // Normal from ellipsoid surface
-            glm::dvec3 surfaceNormal = ellipsoid.GetSurfaceNormal(pos);
-            glm::vec3 normal = glm::vec3(surfaceNormal);
+            glm::dvec3 pos = positions[idx];
+            glm::vec3 normal;
             
-            result.vertices.push_back(x);
-            result.vertices.push_back(y);
-            result.vertices.push_back(z);
+            if (result.demUsed) {
+                // Compute terrain normal from neighboring positions using finite difference
+                // Use one-sided difference at edges
+                int ixPrev = std::max(0, ix - 1);
+                int ixNext = std::min(segments, ix + 1);
+                int iyPrev = std::max(0, iy - 1);
+                int iyNext = std::min(segments, iy + 1);
+                
+                glm::dvec3 posLeft = positions[iy * (segments + 1) + ixPrev];
+                glm::dvec3 posRight = positions[iy * (segments + 1) + ixNext];
+                glm::dvec3 posUp = positions[iyPrev * (segments + 1) + ix];
+                glm::dvec3 posDown = positions[iyNext * (segments + 1) + ix];
+                
+                glm::dvec3 dPdx = posRight - posLeft;
+                glm::dvec3 dPdy = posDown - posUp;
+                
+                // Normal = cross(dPdy, dPdx) for correct winding
+                glm::dvec3 terrainNormal = glm::cross(dPdy, dPdx);
+                double len = glm::length(terrainNormal);
+                if (len > 1e-10) {
+                    terrainNormal /= len;
+                } else {
+                    // Fallback to ellipsoid normal
+                    terrainNormal = ellipsoid.GetSurfaceNormal(pos);
+                }
+                normal = glm::vec3(terrainNormal);
+            } else {
+                // No DEM: use ellipsoid surface normal
+                glm::dvec3 surfaceNormal = ellipsoid.GetSurfaceNormal(pos);
+                normal = glm::vec3(surfaceNormal);
+            }
+            
+            result.vertices.push_back(static_cast<float>(pos.x));
+            result.vertices.push_back(static_cast<float>(pos.y));
+            result.vertices.push_back(static_cast<float>(pos.z));
             result.vertices.push_back(normal.x);
             result.vertices.push_back(normal.y);
             result.vertices.push_back(normal.z);
@@ -130,6 +182,10 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             result.vertices.push_back(1.0f - v);  // Flip V
         }
     }
+    
+    // Store height range for skirt depth calculation
+    result.minHeightKm = (minHeightKm != std::numeric_limits<double>::max()) ? minHeightKm : 0.0;
+    result.maxHeightKm = (maxHeightKm != std::numeric_limits<double>::lowest()) ? maxHeightKm : 0.0;
     
     if (!useSharedEBO) {
         // Indices for main grid
@@ -151,7 +207,8 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     }
     
     // Generate skirts (GE-style seam hiding)
-    GenerateSkirts(result.vertices, useSharedEBO ? nullptr : &result.indices, segments, key.level);
+    double heightRange = result.maxHeightKm - result.minHeightKm;
+    GenerateSkirts(result.vertices, useSharedEBO ? nullptr : &result.indices, segments, key.level, heightRange);
 
     if (useSharedEBO) {
         result.indexCount = MeshTemplate::GetIndexCount(segments);
@@ -166,13 +223,20 @@ void TileMeshBuilder::GenerateSkirts(
     std::vector<float>& vertices,
     std::vector<unsigned int>* indices,
     int segments,
-    int level
+    int level,
+    double heightRange
 ) {
     const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
     
     // Calculate skirt depth based on tile size at this zoom level
     double tileArcKm = 40075.0 / (1 << level);
     double skirtDepth = std::max(tileArcKm * 0.01, 0.001);  // 1% of tile or min 1m
+    
+    // Height-aware: ensure skirt covers terrain relief (2x height range)
+    if (heightRange > 0.0) {
+        skirtDepth = std::max(skirtDepth, heightRange * 2.0);
+    }
+    
     skirtDepth = std::min(skirtDepth, tileArcKm * 0.5);     // Max 50% of tile
     
     // Lambda to add a skirt vertex
