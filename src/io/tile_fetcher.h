@@ -1,6 +1,7 @@
 #pragma once
 
 #include "download_types.h"
+#include <curl/curl.h>
 #include <queue>
 #include <mutex>
 #include <condition_variable>
@@ -8,6 +9,7 @@
 #include <atomic>
 #include <vector>
 #include <unordered_set>
+#include <cstdint>
 
 namespace globe {
 
@@ -39,10 +41,14 @@ public:
     // Stats
     int GetPendingCount() const;
     int GetActiveCount() const;
+    uint64_t GetFetchCount() const;
+    uint64_t GetTotalFetchTimeUs() const;
 
 private:
     void WorkerLoop();
     bool DoFetch(const FetchRequest& request, FetchResult& result);
+    static int ProgressCallback(void* userp, curl_off_t dltotal, curl_off_t dlnow,
+                                curl_off_t ultotal, curl_off_t ulnow);
     
     std::priority_queue<FetchRequest, std::vector<FetchRequest>, FetchRequestCompare> queue_;
     std::mutex queueMutex_;
@@ -51,6 +57,10 @@ private:
     std::vector<std::thread> workers_;
     std::atomic<bool> running_{true};
     std::atomic<int> activeCount_{0};
+
+    // Timing stats (microseconds)
+    std::atomic<uint64_t> fetchCount_{0};
+    std::atomic<uint64_t> totalFetchTimeUs_{0};
     
     ResultCallback resultCallback_;
     std::mutex callbackMutex_;

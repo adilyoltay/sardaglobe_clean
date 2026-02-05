@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <thread>
 #include <atomic>
+#include <queue>
+#include <cstdint>
 
 namespace globe {
 
@@ -15,6 +17,16 @@ public:
     virtual ~ITileDecoder() = default;
     virtual void Decode(DecodeRequest request) = 0;
     virtual void Shutdown() = 0;
+};
+
+// Comparison for decode priority (higher priority first, then higher score)
+struct DecodeRequestCompare {
+    bool operator()(const DecodeRequest& a, const DecodeRequest& b) const {
+        if (a.priority != b.priority) {
+            return a.priority < b.priority;
+        }
+        return a.score < b.score;
+    }
 };
 
 // Image decoder with worker thread
@@ -34,17 +46,26 @@ public:
     
     // Stats
     int GetPendingCount() const;
+    uint64_t GetDecodeCount() const;
+    uint64_t GetTotalDecodeTimeUs() const;
 
 private:
     void WorkerLoop();
     bool DoDecode(const DecodeRequest& request, DecodeResult& result);
     
-    std::queue<DecodeRequest> queue_;
+    std::priority_queue<DecodeRequest, std::vector<DecodeRequest>, DecodeRequestCompare> urgentQueue_;
+    std::priority_queue<DecodeRequest, std::vector<DecodeRequest>, DecodeRequestCompare> normalQueue_;
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
+    int urgentProcessed_ = 0;
+    static constexpr int URGENT_BATCH_SIZE = 4;
     
     std::vector<std::thread> workers_;
     std::atomic<bool> running_{true};
+
+    // Timing stats (microseconds)
+    std::atomic<uint64_t> decodeCount_{0};
+    std::atomic<uint64_t> totalDecodeTimeUs_{0};
     
     ResultCallback resultCallback_;
     std::mutex callbackMutex_;

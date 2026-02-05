@@ -24,6 +24,9 @@ struct FetchRequest {
     Priority priority = Priority::Normal;
     double score = 0.0;  // SSE score for prioritization
     FetchCompleteCallback onComplete;  // Optional per-request callback
+    // Optional cache callbacks (executed in worker thread)
+    std::function<bool(const TileKey&, std::vector<uint8_t>&)> tryReadCache;
+    std::function<void(const TileKey&, const std::vector<uint8_t>&)> writeCache;
 };
 
 // Comparison for priority queue (higher priority first, then higher score)
@@ -45,12 +48,16 @@ struct FetchResult {
     bool success = false;
     std::string error;
     long httpStatus = 0;
+    Priority priority = Priority::Normal;
+    double score = 0.0;
 };
 
 // Decode request
 struct DecodeRequest {
     TileKey key;
     std::vector<uint8_t> data;
+    Priority priority = Priority::Normal;
+    double score = 0.0;
 };
 
 // Decode result  

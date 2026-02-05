@@ -462,6 +462,8 @@ Her faz bittiğinde aşağıyı güncelle:
 - [x] Faz 6.1 (DEM Stitching Seam Fix) tamamlandı — Tarih: 2026-02-04 — Notlar: Tile.edgeCoarserMask eklendi (N/E/S/W bit flags). BuildTileMesh'te border vertex'ler için coarser DEM level sampling. prevEdgeCoarserMask ile rebuild detection.
 - [x] Faz 4 (Layer & Query MVP) tamamlandı — Tarih: 2026-02-04 — Notlar: Layer/Feature/LayerStyle structs (layer.h), LayerManager CRUD/query (layer_manager.h/cpp), ScreenToGeo/GeoToScreen (earth_camera.cpp), GlobeEngine entegrasyonu. Unit fix: km tutarlılığı.
 - [x] OpenGlobus Core Port tamamlandı — Tarih: 2026-02-04 — Notlar: LonLat (lonlat.h), Ellipsoid (ellipsoid.h/cpp), Extent (extent.h), QuadTreeNode (quadtree_node.h/cpp). Tile yapısına Extent entegrasyonu. BuildTileMesh artık Ellipsoid.GeodeticToCartesian kullanıyor (WGS84 uyumlu mesh).
+- [x] Tile Pipeline Opt P0-P3 tamamlandı — Tarih: 2026-02-05 — Notlar: Telemetri (p95/p99 + alt süreler), URL template (regex-free), cache I/O worker'a taşındı, decoder priority+fairness, backpressure (bounded queue + in-flight limit).
+- [x] Tile Pipeline Opt P4-P6 tamamlandı — Tarih: 2026-02-05 — Notlar: Upload priority+reuse (glTexSubImage2D), async mesh scheduler + shared EBO, pin epoch + eviction budget.
 
 ### Google Earth Rewrite Plan Faz Günlüğü
 - [x] Faz 0 (Hazırlık) tamamlandı — Tarih: 2026-01-31 — Notlar: ParitySnapshot telemetry eklendi (frameTime, tileLoad, cache stats), --test-parity flag ve RunParityTest() senaryosu eklendi.
@@ -567,13 +569,13 @@ Build: Başarılı (✓)
 - Önceki: 15/100
 - Şimdi: ~55-60/100
 
-### Güncel Durum Snapshot (2026-02-01 - Phase 22 (Nav P3) Complete)
+### Güncel Durum Snapshot (2026-02-05 - Tile Pipeline Opt P4-P6 Complete)
 Toplam API: 365
 Override edilen: 185
 Non-null implementasyon: 185
 Stub (Value::Null): 180
 Kapsam: %50.6
-**Not:** Navigation Parity Phase 3 complete (Adaptive Dead Zone). Full Google Earth-style navigation physics (Easing, Momentum, Log-Zoom, Adaptive Input) implemented and verified.
+**Not:** Tile Pipeline Opt P4-P6 complete (upload priority+reuse, async mesh scheduler + shared EBO, pin epoch + eviction budget). Navigation Parity Phase 3 remains complete.
 **Accepted Deviations:** SSE Threshold scale (~2.5%) & ActivationK model.
 
 ### Doküman Bazlı Gap Analizi (webglobe_api_docs) — 2026-02-01 (Audited)

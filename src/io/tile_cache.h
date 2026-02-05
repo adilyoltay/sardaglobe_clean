@@ -20,6 +20,9 @@ public:
     
     // Write to cache
     bool Write(const TileKey& key, const std::string& urlTemplate, const std::vector<uint8_t>& data);
+
+    // Remove a cached tile
+    bool Remove(const TileKey& key, const std::string& urlTemplate);
     
     // Clear all cache
     void Clear();

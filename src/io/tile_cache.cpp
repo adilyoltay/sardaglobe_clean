@@ -60,6 +60,12 @@ bool TileCache::Write(const TileKey& key, const std::string& urlTemplate, const 
     return static_cast<bool>(file);
 }
 
+bool TileCache::Remove(const TileKey& key, const std::string& urlTemplate) {
+    if (!enabled_) return false;
+    std::error_code ec;
+    return std::filesystem::remove(GetPath(key, urlTemplate), ec);
+}
+
 void TileCache::Clear() {
     std::error_code ec;
     std::filesystem::remove_all(cacheDir_, ec);

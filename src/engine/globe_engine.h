@@ -9,8 +9,10 @@
 #include "../rendering/texture_manager.h"
 #include "../rendering/shader_manager.h"
 #include "../rendering/tile_renderer.h"
+#include "../rendering/tile_mesh_scheduler.h"
 #include "../rendering/render_frame.h"
 #include "../io/dem_manager.h"
+#include "../core/frame_time_tracker.h"
 #include "../camera/earth_camera.h"
 #include "../camera/flight_controller.h"
 #include <glm/glm.hpp>
@@ -97,6 +99,7 @@ private:
     std::unique_ptr<TextureManager> textureManager_;
     std::unique_ptr<ShaderManager> shaderManager_;
     std::unique_ptr<TileRenderer> tileRenderer_;
+    std::unique_ptr<TileMeshScheduler> meshScheduler_;
     std::unique_ptr<DemManager> demManager_;
     TilePyramid tilePyramid_;
     JobSystem jobSystem_;
@@ -118,8 +121,8 @@ private:
     static constexpr int MAX_MESH_REBUILDS_PER_FRAME = 4;
     std::unordered_set<TileKey> rebuildPending_;  // Prevent duplicate queue entries
     
-    void QueueMeshRebuild(const TileKey& key, bool isVisible);
-    void ProcessMeshRebuildQueue();
+    void QueueMeshBuild(const TileKey& key, bool isVisible);
+    void ProcessMeshResults();
     
     // Frame timing
     double lastFrameTime_ = 0.0;
@@ -129,9 +132,24 @@ private:
     // Debug stats (for ImGui panel)
     struct DebugStats {
         float fps = 0.0f;
+        double frameAvgMs = 0.0;
+        double frameP95Ms = 0.0;
+        double frameP99Ms = 0.0;
+        double updateMs = 0.0;
+        double renderMs = 0.0;
+        double lodSelectMs = 0.0;
+        double requestLoopMs = 0.0;
+        double schedulerUpdateMs = 0.0;
+        double textureUploadMs = 0.0;
+        double meshBuildMs = 0.0;
         int tileCount = 0;
         int pendingFetches = 0;
         int pendingDecodes = 0;
+        int activeFetches = 0;
+        size_t fetchQueueSize = 0;
+        size_t decodeQueueSize = 0;
+        double avgFetchMs = 0.0;
+        double avgDecodeMs = 0.0;
         int visibleTiles = 0;
         int currentZoom = 0;
         double altitude = 0.0;
@@ -151,6 +169,9 @@ private:
     DebugStats debugStats_;
     bool showDebugPanel_ = true;
     double lastFetchFailResetTime_ = 0.0;
+
+    FrameTimings frameTimings_;
+    FrameTimeTracker frameTimeTracker_;
     
     // ImGui
     void InitImGui();

@@ -33,8 +33,13 @@ struct Config {
     int maxTiles = MAX_TILES_IN_MEMORY;
     int maxConcurrentFetches = MAX_CONCURRENT_FETCHES;
     int maxConcurrentDecodes = MAX_CONCURRENT_DECODES;
+    int maxInFlightFetches = MAX_IN_FLIGHT_FETCHES;
     int maxUploadsPerFrame = MAX_TEXTURE_UPLOADS_PER_FRAME;
     double uploadBudgetMs = TEXTURE_UPLOAD_BUDGET_MS;
+    double meshUploadBudgetMs = MESH_UPLOAD_BUDGET_MS;
+    int maxEvictsPerFrame = MAX_EVICTS_PER_FRAME;
+    double evictBudgetMs = EVICT_BUDGET_MS;
+    int meshSchedulerWorkers = MESH_SCHEDULER_WORKERS;
     
     // Features
     bool demEnabled = true;           // Enable terrain elevation

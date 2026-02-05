@@ -95,6 +95,7 @@ add_executable(native_globe
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
   src/io/tile_cache.cpp
+  src/io/tile_url_template.cpp
   src/io/dem_manager.cpp
   # Scheduling module
   src/scheduling/tile_scheduler.cpp
@@ -106,13 +107,17 @@ add_executable(native_globe
   src/rendering/texture_manager.cpp
   src/rendering/shader_manager.cpp
   src/rendering/tile_renderer.cpp
+  src/rendering/mesh_template.cpp
   src/rendering/tile_mesh_builder.cpp
+  src/rendering/tile_mesh_scheduler.cpp
   src/rendering/render_frame.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
   src/core/layer_manager.cpp
   # Engine module
   src/engine/globe_engine.cpp
+  # Debug module
+  src/debug/network_panel.cpp
 )
 
 target_include_directories(native_globe PRIVATE

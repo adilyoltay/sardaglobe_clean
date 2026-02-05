@@ -4,7 +4,6 @@
 #include "../core/config.h"
 #include <queue>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace globe {
@@ -27,12 +26,10 @@ public:
     
     // Pin/Unpin API (GE-style cache policy)
     // Pinned tiles are protected from eviction
-    void Pin(const TileKey& key);
-    void Unpin(const TileKey& key);
-    void SetPinnedSet(const std::unordered_set<TileKey>& keys);
-    void ClearPinned();
-    bool IsPinned(const TileKey& key) const;
-    int GetPinnedCount() const { return static_cast<int>(pinnedKeys_.size()); }
+    void BeginPinEpoch();
+    void PinTile(Tile& tile);
+    bool IsPinned(const Tile& tile) const;
+    int GetPinnedCount() const { return pinnedCount_; }
     
     // Evict least recently used textures if over limit
     // Respects pinned tiles - they won't be evicted
@@ -53,12 +50,31 @@ private:
     uint32_t CreateTexture(const uint8_t* pixels, int width, int height);
     
     const Config& config_;
-    std::queue<TileKey> uploadQueue_;
+    struct UploadJob {
+        TileKey key;
+        uint8_t priority = 1;
+        double score = 0.0;
+        uint64_t sequence = 0;
+    };
+    struct UploadJobCompare {
+        bool operator()(const UploadJob& a, const UploadJob& b) const {
+            if (a.priority != b.priority) {
+                return a.priority < b.priority;
+            }
+            if (a.score != b.score) {
+                return a.score < b.score;
+            }
+            return a.sequence > b.sequence;
+        }
+    };
+    std::priority_queue<UploadJob, std::vector<UploadJob>, UploadJobCompare> uploadQueue_;
+    uint64_t uploadSequence_ = 0;
     int textureCount_ = 0;
     uint32_t loadingTexture_ = 0;
     
     // Pin/unpin support (GE-style cache policy)
-    std::unordered_set<TileKey> pinnedKeys_;
+    uint32_t pinEpoch_ = 1;
+    int pinnedCount_ = 0;
     int lastEvictedCount_ = 0;
 };
 

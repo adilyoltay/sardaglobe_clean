@@ -25,11 +25,16 @@ constexpr float FAR_PLANE_FACTOR = 100.0f;            // FAR = EARTH_RADIUS * fa
 constexpr float DEFAULT_SSE_THRESHOLD = 1.4f;         // Screen-space error threshold (pixels)
 
 // Resource limits
-constexpr int MAX_CONCURRENT_FETCHES = 64;
-constexpr int MAX_CONCURRENT_DECODES = 32;
+constexpr int MAX_CONCURRENT_FETCHES = 16;
+constexpr int MAX_CONCURRENT_DECODES = 8;
+constexpr int MAX_IN_FLIGHT_FETCHES = 64;
 constexpr int MAX_TILES_IN_MEMORY = 2048;
-constexpr int MAX_TEXTURE_UPLOADS_PER_FRAME = 16;
-constexpr double TEXTURE_UPLOAD_BUDGET_MS = 4.0;      // Max ms for texture uploads per frame
+constexpr int MAX_TEXTURE_UPLOADS_PER_FRAME = 8;
+constexpr double TEXTURE_UPLOAD_BUDGET_MS = 2.0;      // Max ms for texture uploads per frame
+constexpr double MESH_UPLOAD_BUDGET_MS = 2.0;         // Max ms for mesh uploads per frame
+constexpr int MAX_EVICTS_PER_FRAME = 32;
+constexpr double EVICT_BUDGET_MS = 2.0;               // Max ms for eviction per frame
+constexpr int MESH_SCHEDULER_WORKERS = 4;
 
 // Download
 constexpr double DOWNLOAD_TIMEOUT_SEC = 10.0;

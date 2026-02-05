@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <functional>
 #include <atomic>
+#include <unordered_set>
+#include <chrono>
 
 namespace globe {
 
@@ -93,14 +95,24 @@ private:
     std::atomic<bool> running_{true};
     std::atomic<int> pendingCount_{0};
     
+    // Pending/in-flight dedupe
+    std::unordered_set<TileKey> pendingSet_;
+    
+    // Failed tile tracking (401 backoff)
+    std::unordered_set<TileKey> failedSet_;
+    std::atomic<int> consecutiveAuthFails_{0};
+    std::atomic<bool> authBackoff_{false};
+    std::chrono::steady_clock::time_point backoffUntil_;
+    
     // Helper functions
     void WorkerLoop();
     bool FetchDem(const TileKey& key, DemGridData& outData);
     std::string BuildDemUrl(const DemCell& cell) const;
+    DemCell BuildDemCell(const TileKey& key) const;
     bool ParseDemGrid(const std::string& payload, DemGridData& outData) const;
     double SampleBilinear(const DemGridData& data, double u, double v) const;
     
-    // Tile bounds calculation
+    // Tile bounds calculation (WGS84)
     static double Tile2Lon(int x, int z);
     static double Tile2Lat(int y, int z);
 };

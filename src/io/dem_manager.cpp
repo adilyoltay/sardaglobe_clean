@@ -1,4 +1,5 @@
 #include "dem_manager.h"
+#include "../debug/network_panel.h"
 #include <curl/curl.h>
 #include <cmath>
 #include <sstream>
@@ -7,6 +8,19 @@
 #include <chrono>
 
 namespace globe {
+
+namespace {
+
+std::string ExtractOrigin(const std::string& url) {
+    size_t schemeEnd = url.find("://");
+    if (schemeEnd == std::string::npos) return "";
+    size_t hostStart = schemeEnd + 3;
+    size_t pathStart = url.find('/', hostStart);
+    if (pathStart == std::string::npos) return url;
+    return url.substr(0, pathStart);
+}
+
+} // namespace
 
 // CURL write callback
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -41,17 +55,34 @@ void DemManager::Shutdown() {
 }
 
 void DemManager::Request(const TileKey& key) {
-    // Check if already cached
+    // Auth backoff check - skip all DEM requests during backoff period
+    if (authBackoff_.load()) {
+        auto now = std::chrono::steady_clock::now();
+        if (now < backoffUntil_) {
+            return;  // Still in backoff period
+        }
+        authBackoff_.store(false);  // Backoff expired
+        consecutiveAuthFails_.store(0);
+    }
+    
+    // Check if already cached or failed
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
         if (cache_.find(key) != cache_.end()) {
             return;  // Already have data
         }
+        if (failedSet_.count(key) > 0) {
+            return;  // Already failed, don't retry
+        }
     }
     
-    // Add to request queue
+    // Pending/in-flight dedupe
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
+        if (pendingSet_.count(key) > 0) {
+            return;  // Already pending
+        }
+        pendingSet_.insert(key);
         requestQueue_.push(key);
         pendingCount_++;
     }
@@ -180,6 +211,11 @@ void DemManager::WorkerLoop() {
             cache_[key] = std::move(data);
         }
         
+        // Remove from pending set (dedupe cleanup)
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            pendingSet_.erase(key);
+        }
         pendingCount_--;
     }
 }
@@ -190,60 +226,116 @@ std::string DemManager::BuildDemUrl(const DemCell& cell) const {
     oss.precision(6);
     
     oss << config_.baseUrl
-        << "?llx=" << cell.llx
-        << "&lly=" << cell.lly
-        << "&urx=" << cell.urx
-        << "&ury=" << cell.ury
-        << "&rows=" << config_.meshN
-        << "&cols=" << config_.meshN;
+        << "?MESHN=" << config_.meshN
+        << "&CN=1"
+        << "&FLOAT=1"
+        << "&C1z=" << cell.level
+        << "&C1x=" << cell.tileX
+        << "&C1y=" << cell.tileY
+        << "&C1LLX=" << cell.llx
+        << "&C1LLY=" << cell.lly
+        << "&C1URX=" << cell.urx
+        << "&C1URY=" << cell.ury;
     
     return oss.str();
 }
 
-bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
-    // Calculate tile bounds
+DemCell DemManager::BuildDemCell(const TileKey& key) const {
     DemCell cell;
     cell.level = key.level;
     cell.tileX = key.x;
     cell.tileY = key.y;
+
+    // WGS84 geographic coordinates only (service doesn't support WebMercator)
     cell.llx = Tile2Lon(key.x, key.level);
     cell.urx = Tile2Lon(key.x + 1, key.level);
     cell.ury = Tile2Lat(key.y, key.level);      // Top (north)
     cell.lly = Tile2Lat(key.y + 1, key.level);  // Bottom (south)
-    
-    std::string url = BuildDemUrl(cell);
-    
-    if (config_.debug) {
-        std::cerr << "[DEM] Fetching: " << url << std::endl;
-    }
-    
-    // HTTP request
-    CURL* curl = curl_easy_init();
-    if (!curl) return false;
-    
-    std::string response;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    
-    CURLcode res = curl_easy_perform(curl);
-    long responseCode = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
-    curl_easy_cleanup(curl);
-    
-    if (res != CURLE_OK || responseCode != 200) {
+
+    return cell;
+}
+
+bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
+    auto performRequest = [&](const std::string& url, std::string& response, long& responseCode) -> bool {
+        // Network panel: record start
+        NetworkPanel::Instance().RecordStart(key, RequestType::DemMesh, url);
+        auto startTime = std::chrono::high_resolution_clock::now();
+        
         if (config_.debug) {
-            std::cerr << "[DEM] Fetch failed: " << curl_easy_strerror(res) 
-                      << " (code: " << responseCode << ")" << std::endl;
+            std::cerr << "[DEM] Fetching: " << url << std::endl;
+        }
+        
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            NetworkPanel::Instance().RecordComplete(key, RequestType::DemMesh, false, 0, 0, 0.0, false, "curl init failed");
+            return false;
+        }
+        
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        
+        curl_easy_setopt(curl, CURLOPT_USERAGENT,
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36");
+        
+        struct curl_slist* headers = nullptr;
+        std::string origin = ExtractOrigin(url);
+        if (!origin.empty()) {
+            headers = curl_slist_append(headers, ("Origin: " + origin).c_str());
+            headers = curl_slist_append(headers, ("Referer: " + origin + "/").c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        }
+        
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+        if (headers) {
+            curl_slist_free_all(headers);
+        }
+        curl_easy_cleanup(curl);
+        
+        auto endTime = std::chrono::high_resolution_clock::now();
+        double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+        
+        bool ok = (res == CURLE_OK && responseCode == 200);
+        NetworkPanel::Instance().RecordComplete(key, RequestType::DemMesh, ok, responseCode, 
+                                                 response.size(), elapsedMs, false, ok ? "" : curl_easy_strerror(res));
+        return ok;
+    };
+
+    DemCell cell = BuildDemCell(key);
+    std::string url = BuildDemUrl(cell);
+
+    std::string response;
+    long responseCode = 0;
+    bool ok = performRequest(url, response, responseCode);
+
+    if (!ok) {
+        if (config_.debug) {
+            std::cerr << "[DEM] Fetch failed (code: " << responseCode << ")" << std::endl;
+        }
+        
+        // 401/403 auth failure - trigger backoff
+        if (responseCode == 401 || responseCode == 403) {
+            int fails = consecutiveAuthFails_.fetch_add(1) + 1;
+            if (fails >= 3) {
+                authBackoff_.store(true);
+                backoffUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+                std::cerr << "[DEM] Auth failed " << fails << " times, backoff 30s" << std::endl;
+            }
+        } else {
+            std::lock_guard<std::mutex> lock(cacheMutex_);
+            failedSet_.insert(key);
         }
         return false;
     }
     
-    // Parse response
+    // Success - reset auth fail counter
+    consecutiveAuthFails_.store(0);
+    
     return ParseDemGrid(response, outData);
 }
 

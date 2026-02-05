@@ -47,6 +47,10 @@ uint32_t TextureManager::CreateTexture(const uint8_t* pixels, int width, int hei
     GLuint texture;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
+
+    GLint prevAlign = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -55,6 +59,8 @@ uint32_t TextureManager::CreateTexture(const uint8_t* pixels, int width, int hei
     
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glGenerateMipmap(GL_TEXTURE_2D);
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
     
     glBindTexture(GL_TEXTURE_2D, 0);
     
@@ -66,7 +72,12 @@ void TextureManager::QueueUpload(Tile& tile) {
     if (tile.pixels.empty() || tile.pixelWidth == 0 || tile.pixelHeight == 0) {
         return;
     }
-    uploadQueue_.push(tile.key);
+    UploadJob job;
+    job.key = tile.key;
+    job.priority = tile.requestPriority;
+    job.score = tile.importance;
+    job.sequence = uploadSequence_++;
+    uploadQueue_.push(job);
 }
 
 int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, double budgetMs) {
@@ -75,6 +86,10 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
     
     // CRITICAL FIX: Also enforce maxUploadsPerFrame from config
     const int maxUploads = config_.maxUploadsPerFrame;
+
+    GLint prevAlign = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     
     while (!uploadQueue_.empty()) {
         // Check upload count limit (prevents frame hitch during heavy decode)
@@ -88,8 +103,9 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
             break;  // Budget exhausted
         }
         
-        TileKey key = uploadQueue_.front();
+        UploadJob job = uploadQueue_.top();
         uploadQueue_.pop();
+        TileKey key = job.key;
         
         auto it = tiles.find(key);
         if (it == tiles.end()) continue;
@@ -97,15 +113,30 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
         Tile& tile = it->second;
         if (tile.pixels.empty()) continue;
         
-        // Delete old texture if owned
-        if (tile.ownsTexture && tile.textureId != 0) {
-            glDeleteTextures(1, &tile.textureId);
-            --textureCount_;
-        }
+        bool reuseTexture = tile.ownsTexture &&
+                            tile.textureId != 0 &&
+                            tile.texWidth == tile.pixelWidth &&
+                            tile.texHeight == tile.pixelHeight;
         
-        // Create new texture
-        tile.textureId = CreateTexture(tile.pixels.data(), tile.pixelWidth, tile.pixelHeight);
-        tile.ownsTexture = true;
+        if (reuseTexture) {
+            glBindTexture(GL_TEXTURE_2D, tile.textureId);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tile.pixelWidth, tile.pixelHeight,
+                            GL_RGBA, GL_UNSIGNED_BYTE, tile.pixels.data());
+            glGenerateMipmap(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        } else {
+            // Delete old texture if owned
+            if (tile.ownsTexture && tile.textureId != 0) {
+                glDeleteTextures(1, &tile.textureId);
+                --textureCount_;
+            }
+            
+            // Create new texture
+            tile.textureId = CreateTexture(tile.pixels.data(), tile.pixelWidth, tile.pixelHeight);
+            tile.ownsTexture = true;
+            tile.texWidth = tile.pixelWidth;
+            tile.texHeight = tile.pixelHeight;
+        }
         
         // Use state machine for upload completion (handles fade reset)
         TileStateMachine::Advance(tile, TileStateMachine::Event::UploadOk);
@@ -115,7 +146,9 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
         
         ++uploadCount;
     }
-    
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
+
     return uploadCount;
 }
 
@@ -126,25 +159,24 @@ void TextureManager::DeleteTexture(uint32_t textureId) {
     }
 }
 
-// Pin/Unpin API (GE-style cache policy)
-void TextureManager::Pin(const TileKey& key) {
-    pinnedKeys_.insert(key);
+// Pin API (GE-style cache policy)
+void TextureManager::BeginPinEpoch() {
+    ++pinEpoch_;
+    if (pinEpoch_ == 0) {
+        pinEpoch_ = 1;
+    }
+    pinnedCount_ = 0;
 }
 
-void TextureManager::Unpin(const TileKey& key) {
-    pinnedKeys_.erase(key);
+void TextureManager::PinTile(Tile& tile) {
+    if (tile.pinnedEpoch != pinEpoch_) {
+        tile.pinnedEpoch = pinEpoch_;
+        ++pinnedCount_;
+    }
 }
 
-void TextureManager::SetPinnedSet(const std::unordered_set<TileKey>& keys) {
-    pinnedKeys_ = keys;
-}
-
-void TextureManager::ClearPinned() {
-    pinnedKeys_.clear();
-}
-
-bool TextureManager::IsPinned(const TileKey& key) const {
-    return pinnedKeys_.count(key) > 0;
+bool TextureManager::IsPinned(const Tile& tile) const {
+    return tile.pinnedEpoch == pinEpoch_;
 }
 
 void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int maxTiles) {
@@ -155,15 +187,12 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
     }
     
     // Build list of eviction candidates and count actual pinned tiles
-    // CRITICAL: Count pinned based on tiles that actually exist and own textures
-    // (pinnedKeys_ may contain keys not yet loaded)
     std::vector<std::pair<double, TileKey>> candidates;
     int actualPinnedCount = 0;
     
     for (const auto& [key, tile] : tiles) {
         if (tile.state == TileState::Ready && tile.ownsTexture) {
-            if (pinnedKeys_.count(key) > 0) {
-                // This tile is pinned and loaded - count it
+            if (IsPinned(tile)) {
                 ++actualPinnedCount;
             } else {
                 // Unpinned tile - candidate for eviction
@@ -171,15 +200,42 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
             }
         }
     }
-    
-    // Sort by access time (oldest first)
-    std::sort(candidates.begin(), candidates.end());
+
+    if (candidates.empty()) {
+        return;
+    }
     
     // Evict oldest unpinned tiles
     // When pinned >= maxTiles, unpinnedTarget clamps to 0 → evict ALL unpinned
     int unpinnedTarget = std::max(0, maxTiles - actualPinnedCount);
     int toEvict = std::max(0, static_cast<int>(candidates.size()) - unpinnedTarget);
+    if (toEvict <= 0) {
+        return;
+    }
+
+    if (toEvict < static_cast<int>(candidates.size())) {
+        std::nth_element(
+            candidates.begin(),
+            candidates.begin() + toEvict,
+            candidates.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; }
+        );
+    }
+
+    const int maxEvicts = std::max(1, config_.maxEvictsPerFrame);
+    const double budgetMs = config_.evictBudgetMs;
+    double startMs = glfwGetTime() * 1000.0;
+
+    int evicted = 0;
     for (int i = 0; i < toEvict && i < static_cast<int>(candidates.size()); ++i) {
+        if (evicted >= maxEvicts) break;
+        if (budgetMs > 0.0) {
+            double elapsed = glfwGetTime() * 1000.0 - startMs;
+            if (elapsed >= budgetMs && evicted > 0) {
+                break;
+            }
+        }
+
         const TileKey& key = candidates[i].second;
         auto it = tiles.find(key);
         if (it != tiles.end()) {
@@ -197,14 +253,16 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
             if (tile.vbo != 0) {
                 glDeleteBuffers(1, &tile.vbo);
             }
-            if (tile.ebo != 0) {
+            if (tile.ebo != 0 && tile.ownsEBO) {
                 glDeleteBuffers(1, &tile.ebo);
             }
             
             tiles.erase(it);
-            ++lastEvictedCount_;
+            ++evicted;
         }
     }
+
+    lastEvictedCount_ = evicted;
 }
 
 } // namespace globe

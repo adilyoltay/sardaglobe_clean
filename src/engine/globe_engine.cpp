@@ -5,6 +5,7 @@
 #include "../rendering/shader_manager.h"
 #include "../rendering/tile_renderer.h"
 #include "../rendering/tile_mesh_builder.h"
+#include "../rendering/mesh_template.h"
 #include "../scheduling/tile_state_machine.h"
 #include "../math/frustum.h"
 #include <glad/glad.h>
@@ -15,11 +16,15 @@
 #include <fstream>
 #include <cstring>
 #include <filesystem>
+#include <algorithm>
 
 // ImGui
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+
+// Network debug panel
+#include "../debug/network_panel.h"
 
 namespace globe {
 
@@ -95,12 +100,14 @@ bool GlobeEngine::Init() {
     // Init DEM manager for terrain elevation
     if (config_.demEnabled) {
         DemManager::Config demConfig;
-        demConfig.baseUrl = config_.demBaseUrl;
+        demConfig.baseUrl = config_.demUrl.empty() ? config_.demBaseUrl : config_.demUrl;
         demConfig.meshN = config_.demMeshN;
         demConfig.cacheSize = config_.demCacheSize;
         demConfig.debug = config_.demDebug;
         demManager_ = std::make_unique<DemManager>(demConfig);
     }
+
+    meshScheduler_ = std::make_unique<TileMeshScheduler>(config_, demManager_.get());
     
     // Set scheduler upload callback
     scheduler_->SetUploadCallback([this](Tile& tile) {
@@ -166,9 +173,11 @@ void GlobeEngine::Shutdown() {
     ShutdownImGui();
     
     if (demManager_) demManager_->Shutdown();
+    if (meshScheduler_) meshScheduler_->Shutdown();
     scheduler_.reset();
     textureManager_.reset();
     shaderManager_.reset();
+    meshScheduler_.reset();
     demManager_.reset();
     flightController_.reset();
     camera_.reset();
@@ -180,9 +189,11 @@ void GlobeEngine::Shutdown() {
         }
         if (tile.vao != 0) glDeleteVertexArrays(1, &tile.vao);
         if (tile.vbo != 0) glDeleteBuffers(1, &tile.vbo);
-        if (tile.ebo != 0) glDeleteBuffers(1, &tile.ebo);
+        if (tile.ebo != 0 && tile.ownsEBO) glDeleteBuffers(1, &tile.ebo);
     }
     tiles_.clear();
+
+    MeshTemplate::Clear();
     
     if (window_) {
         glfwDestroyWindow(window_);
@@ -205,6 +216,8 @@ bool GlobeEngine::GetScreenPointFromGeo(double lon, double lat, double& outScree
 }
 
 void GlobeEngine::Update(double dt, double currentTime) {
+    double updateStartMs = glfwGetTime() * 1000.0;
+
     // Update flight controller (handles momentum, animations)
     flightController_->Update(dt, currentTime);
     
@@ -252,11 +265,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
     camera_->GetBasisVectors(forward, up, right);
     glm::vec3 viewDir = glm::vec3(forward);
     
+    double lodStartMs = glfwGetTime() * 1000.0;
     const LodSelection& selection = tilePyramid_.Select(
         cameraPos, viewDir, mvp, fovDegrees, tiltDegrees,
         config_.windowWidth, config_.windowHeight,
         tiles_
     );
+    frameTimings_.lodSelectMs = (glfwGetTime() * 1000.0) - lodStartMs;
     
     // Store leafSet for render filtering
     currentLeafSet_ = selection.leafSet;
@@ -280,6 +295,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         renderLeafSet_ = baseTileKeys_;
     }
     
+    double requestStartMs = glfwGetTime() * 1000.0;
     // Request required tiles using ranked list (GE-style SSE + center bias priority)
     for (const RankedTile& ranked : tilePyramid_.GetRankedRequired()) {
         const TileKey& key = ranked.key;
@@ -299,10 +315,11 @@ void GlobeEngine::Update(double dt, double currentTime) {
         tile.lastAccessTime = glfwGetTime();
         tile.accessCount++;
         tile.importance = ranked.score;  // Store score for eviction decisions
+        bool isLeaf = selection.leafSet.count(key) > 0;
+        Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
+        tile.requestPriority = static_cast<uint8_t>(priority);
         
         if (tile.state == TileState::Unloaded) {
-            bool isLeaf = selection.leafSet.count(key) > 0;
-            Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
             scheduler_->Request(key, priority, ranked.score);
             TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
         }
@@ -313,8 +330,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
             double timeSinceLastRetry = glfwGetTime() - tile.lastRetryTime;
             
             if (timeSinceLastRetry >= backoffSeconds && tile.retryCount < 5) {
-                bool isLeaf = selection.leafSet.count(key) > 0;
-                Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
                 scheduler_->Request(key, priority, ranked.score);
                 TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
             }
@@ -323,7 +338,11 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     // Prefetch tiles using ranked list (low priority, score-ordered)
     int prefetchCount = 0;
-    const int maxPrefetch = 8;
+    int availablePrefetch = config_.maxTiles - static_cast<int>(tiles_.size());
+    if (availablePrefetch < 0) {
+        availablePrefetch = 0;
+    }
+    const int maxPrefetch = std::min(8, availablePrefetch);
     for (const RankedTile& ranked : tilePyramid_.GetRankedPrefetch()) {
         if (prefetchCount >= maxPrefetch) break;
         
@@ -345,16 +364,22 @@ void GlobeEngine::Update(double dt, double currentTime) {
         
         Tile& tile = it->second;
         tile.importance = ranked.score;
+        tile.requestPriority = static_cast<uint8_t>(Priority::Low);
         
         if (tile.state == TileState::Unloaded) {
+            tile.lastAccessTime = glfwGetTime();
+            tile.accessCount++;
             scheduler_->Request(key, Priority::Low, ranked.score);  // Low priority prefetch with score
             TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
             ++prefetchCount;
         }
     }
+    frameTimings_.requestLoopMs = (glfwGetTime() * 1000.0) - requestStartMs;
     
     // Process scheduler (fetch/decode results)
+    double schedulerStartMs = glfwGetTime() * 1000.0;
     scheduler_->Update(tiles_, glfwGetTime());
+    frameTimings_.schedulerUpdateMs = (glfwGetTime() * 1000.0) - schedulerStartMs;
 
     // Reset recent fetch-fail metric (every 2 seconds)
     if (nowTime - lastFetchFailResetTime_ >= 2.0) {
@@ -363,7 +388,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
     }
     
     // Process texture uploads (time-budgeted)
+    double uploadStartMs = glfwGetTime() * 1000.0;
     textureManager_->ProcessUploads(tiles_, config_.uploadBudgetMs);
+    frameTimings_.textureUploadMs = (glfwGetTime() * 1000.0) - uploadStartMs;
     
     // Request DEM data for visible tiles
     if (demManager_) {
@@ -375,6 +402,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     // Compute edge coarser mask for seam fix (FAZ 6.1)
     // An edge is "coarser" if the neighbor at same level is NOT a leaf but its parent IS
+    const int expectedSegments = demManager_ ? std::max(config_.meshSegments, 8) : config_.meshSegments;
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
         if (it == tiles_.end()) continue;
@@ -403,54 +431,97 @@ void GlobeEngine::Update(double dt, double currentTime) {
             }
         }
         
-        it->second.edgeCoarserMask = newMask;
+        Tile& tile = it->second;
+        bool revisionChanged = false;
+        if (newMask != tile.edgeCoarserMask) {
+            tile.edgeCoarserMask = newMask;
+            if (tile.edgeCoarserMask != tile.prevEdgeCoarserMask) {
+                revisionChanged = true;
+            }
+        }
+        
+        if (demManager_ && tile.demPending && demManager_->HasData(key)) {
+            revisionChanged = true;
+            tile.demPending = false;
+        }
+        
+        if (tile.builtSegments != 0 && tile.builtSegments != expectedSegments) {
+            revisionChanged = true;
+        }
+        
+        if (revisionChanged) {
+            ++tile.meshRevision;
+        }
     }
     
-    // SYNC LEAF MESH: Build mesh immediately for all visible leaves (gap-free guarantee)
-    // This ensures leaf tiles have mesh this frame for rendering or placeholder
+    double meshStartMs = glfwGetTime() * 1000.0;
+    // Queue mesh builds for visible leaves (async)
     for (const TileKey& key : selection.leafSet) {
         auto it = tiles_.find(key);
-        if (it != tiles_.end() && !it->second.hasMesh) {
-            BuildTileMesh(it->second);  // Synchronous - no queue delay
+        if (it == tiles_.end()) continue;
+        Tile& tile = it->second;
+        if (!tile.hasMesh || tile.meshBuiltRevision != tile.meshRevision) {
+            QueueMeshBuild(key, true);
         }
     }
     
-    // Queue mesh rebuilds for DEM updates and edge mask changes (background)
-    for (const TileKey& key : selection.leaves) {
-        auto it = tiles_.find(key);
-        if (it != tiles_.end() && it->second.hasMesh) {
-            bool needsRebuild = false;
-            
-            // Rebuild mesh if DEM data became available
-            if (demManager_ && it->second.demPending && demManager_->HasData(key)) {
-                needsRebuild = true;
+    // Process completed mesh builds with frame budget
+    ProcessMeshResults();
+    frameTimings_.meshBuildMs = (glfwGetTime() * 1000.0) - meshStartMs;
+
+    // Cleanup stale unloaded/failed tiles to prevent eviction churn/loops
+    const double cleanupNow = glfwGetTime();
+    constexpr double UNLOADED_STALE_SEC = 10.0;
+    constexpr double FAILED_STALE_SEC = 60.0;
+    for (auto it = tiles_.begin(); it != tiles_.end(); ) {
+        const TileKey& key = it->first;
+        Tile& tile = it->second;
+        if (baseTileKeys_.count(key) > 0 ||
+            selection.required.count(key) > 0 ||
+            tilePyramid_.IsPrefetch(key)) {
+            ++it;
+            continue;
+        }
+        if (tile.state == TileState::Unloaded) {
+            double last = tile.lastAccessTime;
+            if (last <= 0.0 || (cleanupNow - last) > UNLOADED_STALE_SEC) {
+                it = tiles_.erase(it);
+                continue;
             }
-            
-            // Rebuild mesh if edge coarser mask changed (seam fix FAZ 6.1)
-            if (it->second.edgeCoarserMask != it->second.prevEdgeCoarserMask) {
-                needsRebuild = true;
-            }
-            
-            if (needsRebuild) {
-                QueueMeshRebuild(key, true);  // visible = true (leaf tiles)
+        } else if (tile.state == TileState::Failed) {
+            double last = tile.lastRetryTime > 0.0 ? tile.lastRetryTime : tile.lastAccessTime;
+            if (last <= 0.0 || (cleanupNow - last) > FAILED_STALE_SEC) {
+                it = tiles_.erase(it);
+                continue;
             }
         }
+        ++it;
     }
-    
-    // Process queued mesh rebuilds with frame budget
-    ProcessMeshRebuildQueue();
     
     // Pin visible tiles to protect from eviction (GE-style cache policy)
     // Required tiles (leaves + ancestors) + base tiles are pinned
-    std::unordered_set<TileKey> pinnedSet = selection.required;
-    pinnedSet.insert(baseTileKeys_.begin(), baseTileKeys_.end());
-    textureManager_->SetPinnedSet(pinnedSet);
+    textureManager_->BeginPinEpoch();
+    for (const TileKey& key : selection.required) {
+        auto it = tiles_.find(key);
+        if (it != tiles_.end()) {
+            textureManager_->PinTile(it->second);
+        }
+    }
+    for (const TileKey& key : baseTileKeys_) {
+        auto it = tiles_.find(key);
+        if (it != tiles_.end()) {
+            textureManager_->PinTile(it->second);
+        }
+    }
     
     // Evict old tiles (respects pinned tiles)
     textureManager_->EvictIfNeeded(tiles_, config_.maxTiles);
+
+    frameTimings_.totalMs = (glfwGetTime() * 1000.0) - updateStartMs;
 }
 
 void GlobeEngine::Render() {
+    double renderStartMs = glfwGetTime() * 1000.0;
     glClearColor(0.02f, 0.02f, 0.05f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
@@ -471,9 +542,25 @@ void GlobeEngine::Render() {
     
     // Update debug stats
     debugStats_.fps = fps_;
+    debugStats_.frameAvgMs = frameTimeTracker_.GetAvg();
+    debugStats_.frameP95Ms = frameTimeTracker_.GetP95();
+    debugStats_.frameP99Ms = frameTimeTracker_.GetP99();
+    debugStats_.updateMs = frameTimings_.totalMs;
+    debugStats_.renderMs = frameTimings_.renderMs;
+    debugStats_.lodSelectMs = frameTimings_.lodSelectMs;
+    debugStats_.requestLoopMs = frameTimings_.requestLoopMs;
+    debugStats_.schedulerUpdateMs = frameTimings_.schedulerUpdateMs;
+    debugStats_.textureUploadMs = frameTimings_.textureUploadMs;
+    debugStats_.meshBuildMs = frameTimings_.meshBuildMs;
     debugStats_.tileCount = static_cast<int>(tiles_.size());
-    debugStats_.pendingFetches = scheduler_->GetPendingFetches();
-    debugStats_.pendingDecodes = scheduler_->GetPendingDecodes();
+    auto schedulerStats = scheduler_->GetStats();
+    debugStats_.pendingFetches = schedulerStats.pendingFetches;
+    debugStats_.pendingDecodes = schedulerStats.pendingDecodes;
+    debugStats_.activeFetches = schedulerStats.activeFetches;
+    debugStats_.fetchQueueSize = schedulerStats.fetchResultQueue;
+    debugStats_.decodeQueueSize = schedulerStats.decodeResultQueue;
+    debugStats_.avgFetchMs = schedulerStats.avgFetchMs;
+    debugStats_.avgDecodeMs = schedulerStats.avgDecodeMs;
     debugStats_.renderableLeaves = drawStats.renderableLeaves;
     debugStats_.fallbackTiles = drawStats.fallbackTiles;
     debugStats_.placeholderTiles = drawStats.placeholderTiles;
@@ -488,12 +575,20 @@ void GlobeEngine::Render() {
     
     // Render ImGui debug panel
     RenderDebugPanel();
+
+    frameTimings_.renderMs = (glfwGetTime() * 1000.0) - renderStartMs;
+    frameTimings_.totalMs = frameTimings_.totalMs + frameTimings_.renderMs;
+    frameTimeTracker_.Record(frameTimings_.totalMs);
 }
 
 void GlobeEngine::BuildTileMesh(Tile& tile) {
     // Delegate to TileMeshBuilder (GE-style separation)
-    auto result = TileMeshBuilder::Build(tile, demManager_.get(), config_);
+    auto result = TileMeshBuilder::Build(tile.key, tile.extent, tile.edgeCoarserMask,
+                                         demManager_.get(), config_, true);
+    result.meshRevision = tile.meshRevision;
     TileMeshBuilder::UploadToGPU(tile, result);
+    tile.meshBuiltRevision = tile.meshRevision;
+    tile.prevEdgeCoarserMask = tile.edgeCoarserMask;
 }
 
 void GlobeEngine::RenderTile(const Tile& tile, const glm::mat4& mvp) {
@@ -727,6 +822,13 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Separator();
             ImGui::Text("FPS: %.1f", debugStats_.fps);
             ImGui::Text("Frame Time: %.2f ms", 1000.0f / std::max(debugStats_.fps, 1.0f));
+            ImGui::Text("Avg/P95/P99: %.2f / %.2f / %.2f ms",
+                        debugStats_.frameAvgMs, debugStats_.frameP95Ms, debugStats_.frameP99Ms);
+            ImGui::Text("Update/Render: %.2f / %.2f ms", debugStats_.updateMs, debugStats_.renderMs);
+            ImGui::Text("LOD: %.2f | Req: %.2f | Sch: %.2f",
+                        debugStats_.lodSelectMs, debugStats_.requestLoopMs, debugStats_.schedulerUpdateMs);
+            ImGui::Text("Upload: %.2f | Mesh: %.2f ms",
+                        debugStats_.textureUploadMs, debugStats_.meshBuildMs);
             
             ImGui::Spacing();
             
@@ -737,6 +839,11 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Visible: %d", debugStats_.visibleTiles);
             ImGui::Text("Pending Fetch: %d", debugStats_.pendingFetches);
             ImGui::Text("Pending Decode: %d", debugStats_.pendingDecodes);
+            ImGui::Text("Active Fetch: %d", debugStats_.activeFetches);
+            ImGui::Text("FetchQ/DecodeQ: %zu / %zu",
+                        debugStats_.fetchQueueSize, debugStats_.decodeQueueSize);
+            ImGui::Text("Avg Fetch/Decode: %.2f / %.2f ms",
+                        debugStats_.avgFetchMs, debugStats_.avgDecodeMs);
             
             // Gap-free telemetry
             ImGui::Text("Renderable: %d", debugStats_.renderableLeaves);
@@ -784,9 +891,18 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::TextWrapped("Left: Pan | Shift+Left: Orbit");
             ImGui::TextWrapped("Scroll: Zoom | Shift+Scroll: Tilt");
             ImGui::TextWrapped("Double-click: FlyTo + Zoom");
+            ImGui::TextWrapped("F4: Network Panel");
         }
         ImGui::End();
     }
+    
+    // Toggle Network Panel with F4
+    if (ImGui::IsKeyPressed(ImGuiKey_F4)) {
+        NetworkPanel::Instance().panelOpen = !NetworkPanel::Instance().panelOpen;
+    }
+    
+    // Render Network Panel
+    NetworkPanel::Instance().Render();
     
     // Render ImGui
     ImGui::Render();
@@ -929,39 +1045,67 @@ void GlobeEngine::RenderPivot(const glm::mat4& viewProj) {
 }
 
 // =============================================================================
-// MESH REBUILD QUEUE (Time-Budgeted, Visible Priority)
+// MESH BUILD PIPELINE (Async CPU build + budgeted GPU upload)
 // =============================================================================
 
-void GlobeEngine::QueueMeshRebuild(const TileKey& key, bool isVisible) {
-    // Skip if already pending
+void GlobeEngine::QueueMeshBuild(const TileKey& key, bool isVisible) {
+    if (!meshScheduler_) return;
     if (rebuildPending_.count(key)) return;
     
+    auto it = tiles_.find(key);
+    if (it == tiles_.end()) return;
+    
+    Tile& tile = it->second;
+    if (tile.meshPending) return;
+    
+    TileMeshScheduler::MeshRequest request;
+    request.key = key;
+    request.extent = tile.extent;
+    request.edgeMask = tile.edgeCoarserMask;
+    request.meshRevision = tile.meshRevision;
+    request.priority = isVisible ? Priority::Urgent : Priority::Normal;
+    request.score = tile.importance;
+    
     rebuildPending_.insert(key);
-    
-    // Submit to JobSystem with appropriate priority
-    JobSystem::Priority priority = isVisible ? JobSystem::Priority::High : JobSystem::Priority::Normal;
-    
-    // Capture key by value for the lambda
-    TileKey capturedKey = key;
-    jobSystem_.Submit([this, capturedKey]() {
-        rebuildPending_.erase(capturedKey);
-        
-        // Find tile and rebuild if still valid
-        auto it = tiles_.find(capturedKey);
-        if (it != tiles_.end() && it->second.IsReady()) {
-            BuildTileMesh(it->second);
-            
-            // Update prevEdgeCoarserMask AFTER successful rebuild
-            if (it->second.hasMesh) {
-                it->second.prevEdgeCoarserMask = it->second.edgeCoarserMask;
-            }
-        }
-    }, priority, "mesh_rebuild");
+    tile.meshPending = true;
+    meshScheduler_->Request(std::move(request));
 }
 
-void GlobeEngine::ProcessMeshRebuildQueue() {
-    // Process mesh rebuild jobs via JobSystem (count-based budget)
-    jobSystem_.ProcessCount(MAX_MESH_REBUILDS_PER_FRAME);
+void GlobeEngine::ProcessMeshResults() {
+    if (!meshScheduler_) return;
+    
+    int processed = 0;
+    double startMs = glfwGetTime() * 1000.0;
+    while (processed < MAX_MESH_REBUILDS_PER_FRAME) {
+        double elapsed = glfwGetTime() * 1000.0 - startMs;
+        if (elapsed >= config_.meshUploadBudgetMs && processed > 0) {
+            break;
+        }
+
+        TileMeshBuilder::BuildResult result;
+        if (!meshScheduler_->TryGetResult(result)) {
+            break;
+        }
+        
+        auto it = tiles_.find(result.key);
+        if (it == tiles_.end()) {
+            rebuildPending_.erase(result.key);
+            continue;
+        }
+        
+        Tile& tile = it->second;
+        tile.meshPending = false;
+        rebuildPending_.erase(result.key);
+        
+        if (result.meshRevision != tile.meshRevision) {
+            continue;  // Stale result
+        }
+        
+        TileMeshBuilder::UploadToGPU(tile, result);
+        tile.meshBuiltRevision = tile.meshRevision;
+        tile.prevEdgeCoarserMask = tile.edgeCoarserMask;
+        ++processed;
+    }
 }
 
 // =============================================================================
@@ -1002,6 +1146,7 @@ void GlobeEngine::PreloadBaseTiles() {
                 
                 // Request real texture with high priority (state machine handles transitions)
                 if (tile.state == TileState::Unloaded) {
+                    tile.requestPriority = static_cast<uint8_t>(Priority::Urgent);
                     scheduler_->Request(key, Priority::Urgent, 1.0f);
                     TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
                 }

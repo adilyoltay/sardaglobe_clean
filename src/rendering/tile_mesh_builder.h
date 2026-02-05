@@ -12,18 +12,26 @@ namespace globe {
 class TileMeshBuilder {
 public:
     struct BuildResult {
+        TileKey key;
         std::vector<float> vertices;      // pos(3) + normal(3) + uv(2)
         std::vector<unsigned int> indices;
+        int segments = 0;
+        uint32_t indexCount = 0;
+        bool useSharedEBO = false;
         bool demUsed = false;
         bool demPending = false;
+        uint32_t meshRevision = 0;
     };
     
     // Build mesh geometry for a tile
     // Returns vertex/index data; caller uploads to GPU
     static BuildResult Build(
-        const Tile& tile,
+        const TileKey& key,
+        const Extent& extent,
+        uint8_t edgeMask,
         DemManager* demManager,
-        const Config& config
+        const Config& config,
+        bool useSharedEBO
     );
     
     // Upload mesh to GPU (creates VAO/VBO/EBO)
@@ -36,7 +44,7 @@ private:
     // Skirt generation (GE-style seam hiding)
     static void GenerateSkirts(
         std::vector<float>& vertices,
-        std::vector<unsigned int>& indices,
+        std::vector<unsigned int>* indices,
         int segments,
         int level
     );

@@ -1,12 +1,12 @@
 #include "tile_scheduler.h"
 #include "tile_state_machine.h"
-#include <regex>
 #include <iostream>
 
 namespace globe {
 
 TileScheduler::TileScheduler(const Config& config) 
-    : config_(config) {
+    : config_(config)
+    , urlTemplate_(config.tileUrl) {
     
     fetcher_ = std::make_unique<TileFetcher>(config.maxConcurrentFetches);
     decoder_ = std::make_unique<TileDecoder>(config.maxConcurrentDecodes);
@@ -24,41 +24,26 @@ TileScheduler::TileScheduler(const Config& config)
 }
 
 TileScheduler::~TileScheduler() {
+    fetchResults_.Close();
+    decodeResults_.Close();
     if (fetcher_) fetcher_->Shutdown();
     if (decoder_) decoder_->Shutdown();
 }
 
 std::string TileScheduler::BuildUrl(const TileKey& key) const {
-    std::string url = config_.tileUrl;
-    url = std::regex_replace(url, std::regex("\\{z\\}"), std::to_string(key.level));
-    url = std::regex_replace(url, std::regex("\\{x\\}"), std::to_string(key.x));
-    url = std::regex_replace(url, std::regex("\\{y\\}"), std::to_string(key.y));
-    return url;
+    return urlTemplate_.Build(key.level, key.x, key.y);
 }
 
 void TileScheduler::Request(const TileKey& key, Priority priority, float score) {
-    // Check cache first
-    std::vector<uint8_t> cachedData;
-    if (cache_->Read(key, config_.tileUrl, cachedData)) {
-        // Send directly to decoder
-        {
-            std::lock_guard<std::mutex> lock(trackingMutex_);
-            if (pendingDecodes_.count(key)) return;  // Already decoding
-            pendingDecodes_.insert(key);
-        }
-        
-        DecodeRequest req;
-        req.key = key;
-        req.data = std::move(cachedData);
-        decoder_->Decode(std::move(req));
-        return;
-    }
-    
     // Check if already pending
     {
         std::lock_guard<std::mutex> lock(trackingMutex_);
         if (pendingFetches_.count(key) || pendingDecodes_.count(key)) {
             return;  // Already in progress
+        }
+        int inFlight = static_cast<int>(pendingFetches_.size()) + GetActiveFetches();
+        if (inFlight >= config_.maxInFlightFetches && priority != Priority::Urgent) {
+            return;  // Backpressure for non-urgent requests
         }
         pendingFetches_.insert(key);
     }
@@ -69,6 +54,14 @@ void TileScheduler::Request(const TileKey& key, Priority priority, float score) 
     req.url = BuildUrl(key);
     req.priority = priority;
     req.score = score;
+    if (cache_) {
+        req.tryReadCache = [this](const TileKey& k, std::vector<uint8_t>& out) {
+            return cache_->Read(k, config_.tileUrl, out);
+        };
+        req.writeCache = [this](const TileKey& k, const std::vector<uint8_t>& data) {
+            cache_->Write(k, config_.tileUrl, data);
+        };
+    }
     
     fetcher_->Fetch(std::move(req));
 }
@@ -97,10 +90,8 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
     
     // Process fetch results
     {
-        std::lock_guard<std::mutex> lock(fetchResultsMutex_);
-        while (!fetchResults_.empty()) {
-            FetchResult result = std::move(fetchResults_.front());
-            fetchResults_.pop();
+        FetchResult result;
+        while (fetchResults_.TryPop(result)) {
             
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
@@ -117,9 +108,6 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
                 continue;
             }
             
-            // Cache the data
-            cache_->Write(result.key, config_.tileUrl, result.data);
-            
             // Send to decoder
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
@@ -129,6 +117,8 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             DecodeRequest dreq;
             dreq.key = result.key;
             dreq.data = std::move(result.data);
+            dreq.priority = result.priority;
+            dreq.score = result.score;
             decoder_->Decode(std::move(dreq));
             
             // Update tile state via state machine
@@ -141,10 +131,8 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
     
     // Process decode results
     {
-        std::lock_guard<std::mutex> lock(decodeResultsMutex_);
-        while (!decodeResults_.empty()) {
-            DecodeResult result = std::move(decodeResults_.front());
-            decodeResults_.pop();
+        DecodeResult result;
+        while (decodeResults_.TryPop(result)) {
             
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
@@ -155,6 +143,9 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             if (it == tiles.end()) continue;
             
             if (!result.success) {
+                if (cache_) {
+                    cache_->Remove(result.key, config_.tileUrl);
+                }
                 TileStateMachine::Advance(it->second, TileStateMachine::Event::DecodeFail, currentTime);
                 continue;
             }
@@ -178,47 +169,17 @@ void TileScheduler::SetUploadCallback(UploadCallback callback) {
 }
 
 void TileScheduler::OnFetchComplete(FetchResult result) {
-    std::lock_guard<std::mutex> lock(fetchResultsMutex_);
-    
-    // Drop oldest if queue is full (backpressure)
-    // CRITICAL: Track dropped key so Update() can mark tile as Failed
-    if (fetchResults_.size() >= MAX_RESULT_QUEUE) {
-        FetchResult& dropped = fetchResults_.front();
-        TileKey droppedKey = dropped.key;
-        {
-            std::lock_guard<std::mutex> tlock(trackingMutex_);
-            pendingFetches_.erase(droppedKey);
-        }
-        {
-            std::lock_guard<std::mutex> dlock(droppedKeysMutex_);
-            droppedKeys_.push(droppedKey);
-        }
-        fetchResults_.pop();
-        ++droppedFetchResults_;
+    if (!fetchResults_.Push(std::move(result))) {
+        // Queue closed during shutdown
+        return;
     }
-    fetchResults_.push(std::move(result));
 }
 
 void TileScheduler::OnDecodeComplete(DecodeResult result) {
-    std::lock_guard<std::mutex> lock(decodeResultsMutex_);
-    
-    // Drop oldest if queue is full (backpressure)
-    // CRITICAL: Track dropped key so Update() can mark tile as Failed
-    if (decodeResults_.size() >= MAX_RESULT_QUEUE) {
-        DecodeResult& dropped = decodeResults_.front();
-        TileKey droppedKey = dropped.key;
-        {
-            std::lock_guard<std::mutex> tlock(trackingMutex_);
-            pendingDecodes_.erase(droppedKey);
-        }
-        {
-            std::lock_guard<std::mutex> dlock(droppedKeysMutex_);
-            droppedKeys_.push(droppedKey);
-        }
-        decodeResults_.pop();
-        ++droppedDecodeResults_;
+    if (!decodeResults_.Push(std::move(result))) {
+        // Queue closed during shutdown
+        return;
     }
-    decodeResults_.push(std::move(result));
 }
 
 int TileScheduler::GetPendingFetches() const {
@@ -233,6 +194,28 @@ int TileScheduler::GetPendingDecodes() const {
 
 int TileScheduler::GetActiveFetches() const {
     return fetcher_ ? fetcher_->GetActiveCount() : 0;
+}
+
+TileScheduler::SchedulerStats TileScheduler::GetStats() const {
+    SchedulerStats stats;
+    stats.pendingFetches = GetPendingFetches();
+    stats.pendingDecodes = GetPendingDecodes();
+    stats.activeFetches = GetActiveFetches();
+    stats.fetchResultQueue = fetchResults_.Size();
+    stats.decodeResultQueue = decodeResults_.Size();
+    stats.droppedFetchResults = droppedFetchResults_.load();
+    stats.droppedDecodeResults = droppedDecodeResults_.load();
+    if (fetcher_) {
+        auto count = fetcher_->GetFetchCount();
+        auto totalUs = fetcher_->GetTotalFetchTimeUs();
+        stats.avgFetchMs = count > 0 ? (static_cast<double>(totalUs) / 1000.0) / count : 0.0;
+    }
+    if (decoder_) {
+        auto count = decoder_->GetDecodeCount();
+        auto totalUs = decoder_->GetTotalDecodeTimeUs();
+        stats.avgDecodeMs = count > 0 ? (static_cast<double>(totalUs) / 1000.0) / count : 0.0;
+    }
+    return stats;
 }
 
 } // namespace globe

@@ -43,6 +43,8 @@ struct Tile {
     // Texture
     uint32_t textureId = 0;        // OpenGL texture ID (0 = none)
     bool ownsTexture = false;      // True if we should delete texture
+    int texWidth = 0;              // GPU texture width
+    int texHeight = 0;             // GPU texture height
     
     // Decoded data (temporary, cleared after upload)
     std::vector<uint8_t> pixels;
@@ -55,6 +57,11 @@ struct Tile {
     uint32_t ebo = 0;
     uint32_t indexCount = 0;
     bool hasMesh = false;
+    bool ownsEBO = true;
+    bool meshPending = false;
+    uint32_t meshRevision = 0;
+    uint32_t meshBuiltRevision = 0;
+    int builtSegments = 0;
     
     // DEM/Elevation
     bool demUsed = false;
@@ -97,10 +104,14 @@ struct Tile {
     
     // Priority
     float importance = 0.0f;       // For eviction decisions
+    uint8_t requestPriority = 1;   // 0=Low, 1=Normal, 2=Urgent
     
     // Retry
     int retryCount = 0;
     double lastRetryTime = 0.0;
+
+    // Pinning (per-frame epoch)
+    uint32_t pinnedEpoch = 0;
     
     // Constructor
     Tile() = default;
@@ -120,7 +131,6 @@ struct Tile {
     // Cleanup
     void ClearPixels() {
         pixels.clear();
-        pixels.shrink_to_fit();
         pixelWidth = 0;
         pixelHeight = 0;
     }

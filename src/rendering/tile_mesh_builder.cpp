@@ -1,4 +1,5 @@
 #include "tile_mesh_builder.h"
+#include "mesh_template.h"
 #include "../core/ellipsoid.h"
 #include <glad/glad.h>
 #include <cmath>
@@ -7,26 +8,34 @@
 namespace globe {
 
 TileMeshBuilder::BuildResult TileMeshBuilder::Build(
-    const Tile& tile,
+    const TileKey& key,
+    const Extent& inputExtent,
+    uint8_t edgeMask,
     DemManager* demManager,
-    const Config& config
+    const Config& config,
+    bool useSharedEBO
 ) {
     BuildResult result;
+    result.key = key;
+    result.useSharedEBO = useSharedEBO;
     
     // Use more segments for terrain mesh when DEM is enabled
     const int segments = demManager ? std::max(config.meshSegments, 8) : config.meshSegments;
     const int vertexCount = (segments + 1) * (segments + 1);
     const int indexCount = segments * segments * 6;
+    result.segments = segments;
     
     result.vertices.reserve(vertexCount * 8);  // pos(3) + normal(3) + uv(2)
-    result.indices.reserve(indexCount);
+    if (!useSharedEBO) {
+        result.indices.reserve(indexCount);
+    }
     
     // Use tile's Extent (or compute from tile key using proper Web Mercator projection)
-    Extent extent = tile.extent;
+    Extent extent = inputExtent;
     if (extent.Width() == 0.0) {
         // CRITICAL: Use Extent::FromTileWGS84 for correct Web Mercator bounds
         // Linear interpolation would distort at higher latitudes
-        extent = Extent::FromTileWGS84(tile.key.x, tile.key.y, tile.key.level);
+        extent = Extent::FromTileWGS84(key.x, key.y, key.level);
     }
     
     double lonLeft = extent.West();
@@ -53,9 +62,6 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     result.demUsed = false;
     result.demPending = false;
     
-    // Edge coarser mask for seam fix (FAZ 6.1)
-    const uint8_t edgeMask = tile.edgeCoarserMask;
-    
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
         
@@ -78,7 +84,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             bool isEastBorder = (ix == segments);
             
             // Determine sample level for DEM (edge equalization)
-            int sampleLevel = tile.key.level;
+            int sampleLevel = key.level;
             if (heightSampler && sampleLevel > 0) {
                 // Use coarser level for border vertices with coarser neighbors
                 bool useCoarser = false;
@@ -125,32 +131,40 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         }
     }
     
-    // Indices for main grid
-    for (int iy = 0; iy < segments; ++iy) {
-        for (int ix = 0; ix < segments; ++ix) {
-            unsigned int tl = iy * (segments + 1) + ix;
-            unsigned int tr = tl + 1;
-            unsigned int bl = tl + (segments + 1);
-            unsigned int br = bl + 1;
-            
-            result.indices.push_back(tl);
-            result.indices.push_back(bl);
-            result.indices.push_back(tr);
-            result.indices.push_back(tr);
-            result.indices.push_back(bl);
-            result.indices.push_back(br);
+    if (!useSharedEBO) {
+        // Indices for main grid
+        for (int iy = 0; iy < segments; ++iy) {
+            for (int ix = 0; ix < segments; ++ix) {
+                unsigned int tl = iy * (segments + 1) + ix;
+                unsigned int tr = tl + 1;
+                unsigned int bl = tl + (segments + 1);
+                unsigned int br = bl + 1;
+                
+                result.indices.push_back(tl);
+                result.indices.push_back(bl);
+                result.indices.push_back(tr);
+                result.indices.push_back(tr);
+                result.indices.push_back(bl);
+                result.indices.push_back(br);
+            }
         }
     }
     
     // Generate skirts (GE-style seam hiding)
-    GenerateSkirts(result.vertices, result.indices, segments, tile.key.level);
+    GenerateSkirts(result.vertices, useSharedEBO ? nullptr : &result.indices, segments, key.level);
+
+    if (useSharedEBO) {
+        result.indexCount = MeshTemplate::GetIndexCount(segments);
+    } else {
+        result.indexCount = static_cast<uint32_t>(result.indices.size());
+    }
     
     return result;
 }
 
 void TileMeshBuilder::GenerateSkirts(
     std::vector<float>& vertices,
-    std::vector<unsigned int>& indices,
+    std::vector<unsigned int>* indices,
     int segments,
     int level
 ) {
@@ -216,8 +230,10 @@ void TileMeshBuilder::GenerateSkirts(
         unsigned int v1 = i + 1;
         unsigned int v2 = northSkirtStart + i;
         unsigned int v3 = northSkirtStart + i + 1;
-        indices.push_back(v0); indices.push_back(v2); indices.push_back(v3);
-        indices.push_back(v0); indices.push_back(v3); indices.push_back(v1);
+        if (indices) {
+            indices->push_back(v0); indices->push_back(v2); indices->push_back(v3);
+            indices->push_back(v0); indices->push_back(v3); indices->push_back(v1);
+        }
     }
     
     // South edge skirt (reversed winding)
@@ -226,8 +242,10 @@ void TileMeshBuilder::GenerateSkirts(
         unsigned int v1 = segments * (segments + 1) + i + 1;
         unsigned int v2 = southSkirtStart + i;
         unsigned int v3 = southSkirtStart + i + 1;
-        indices.push_back(v0); indices.push_back(v3); indices.push_back(v2);
-        indices.push_back(v0); indices.push_back(v1); indices.push_back(v3);
+        if (indices) {
+            indices->push_back(v0); indices->push_back(v3); indices->push_back(v2);
+            indices->push_back(v0); indices->push_back(v1); indices->push_back(v3);
+        }
     }
     
     // West edge skirt (reversed winding)
@@ -236,8 +254,10 @@ void TileMeshBuilder::GenerateSkirts(
         unsigned int v1 = (j + 1) * (segments + 1);
         unsigned int v2 = westSkirtStart + j;
         unsigned int v3 = westSkirtStart + j + 1;
-        indices.push_back(v0); indices.push_back(v3); indices.push_back(v2);
-        indices.push_back(v0); indices.push_back(v1); indices.push_back(v3);
+        if (indices) {
+            indices->push_back(v0); indices->push_back(v3); indices->push_back(v2);
+            indices->push_back(v0); indices->push_back(v1); indices->push_back(v3);
+        }
     }
     
     // East edge skirt
@@ -246,8 +266,10 @@ void TileMeshBuilder::GenerateSkirts(
         unsigned int v1 = (j + 1) * (segments + 1) + segments;
         unsigned int v2 = eastSkirtStart + j;
         unsigned int v3 = eastSkirtStart + j + 1;
-        indices.push_back(v0); indices.push_back(v2); indices.push_back(v3);
-        indices.push_back(v0); indices.push_back(v3); indices.push_back(v1);
+        if (indices) {
+            indices->push_back(v0); indices->push_back(v2); indices->push_back(v3);
+            indices->push_back(v0); indices->push_back(v3); indices->push_back(v1);
+        }
     }
 }
 
@@ -258,7 +280,9 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     // Create VAO/VBO/EBO
     glGenVertexArrays(1, &tile.vao);
     glGenBuffers(1, &tile.vbo);
-    glGenBuffers(1, &tile.ebo);
+    if (!result.useSharedEBO) {
+        glGenBuffers(1, &tile.ebo);
+    }
     
     glBindVertexArray(tile.vao);
     
@@ -266,9 +290,16 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     glBufferData(GL_ARRAY_BUFFER, result.vertices.size() * sizeof(float), 
                  result.vertices.data(), GL_STATIC_DRAW);
     
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, tile.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, result.indices.size() * sizeof(unsigned int),
-                 result.indices.data(), GL_STATIC_DRAW);
+    if (result.useSharedEBO) {
+        tile.ebo = MeshTemplate::GetOrCreateEbo(result.segments);
+        tile.ownsEBO = false;
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, tile.ebo);
+    } else {
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, tile.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, result.indices.size() * sizeof(unsigned int),
+                     result.indices.data(), GL_STATIC_DRAW);
+        tile.ownsEBO = true;
+    }
     
     // Position
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
@@ -282,19 +313,22 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     
     glBindVertexArray(0);
     
-    tile.indexCount = static_cast<uint32_t>(result.indices.size());
+    tile.indexCount = result.indexCount;
     tile.hasMesh = true;
     tile.demUsed = result.demUsed;
     tile.demPending = result.demPending;
+    tile.builtSegments = result.segments;
+    tile.meshPending = false;
 }
 
 void TileMeshBuilder::DeleteMesh(Tile& tile) {
     if (tile.hasMesh) {
         if (tile.vao != 0) glDeleteVertexArrays(1, &tile.vao);
         if (tile.vbo != 0) glDeleteBuffers(1, &tile.vbo);
-        if (tile.ebo != 0) glDeleteBuffers(1, &tile.ebo);
+        if (tile.ebo != 0 && tile.ownsEBO) glDeleteBuffers(1, &tile.ebo);
         tile.vao = tile.vbo = tile.ebo = 0;
         tile.hasMesh = false;
+        tile.ownsEBO = true;
     }
 }
 

@@ -2,6 +2,7 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+#include <chrono>
 
 namespace globe {
 
@@ -26,7 +27,11 @@ void TileDecoder::SetResultCallback(ResultCallback callback) {
 void TileDecoder::Decode(DecodeRequest request) {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        queue_.push(std::move(request));
+        if (request.priority == Priority::Urgent) {
+            urgentQueue_.push(std::move(request));
+        } else {
+            normalQueue_.push(std::move(request));
+        }
     }
     queueCv_.notify_one();
 }
@@ -44,7 +49,16 @@ void TileDecoder::Shutdown() {
 }
 
 int TileDecoder::GetPendingCount() const {
-    return static_cast<int>(queue_.size());
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(queueMutex_));
+    return static_cast<int>(urgentQueue_.size() + normalQueue_.size());
+}
+
+uint64_t TileDecoder::GetDecodeCount() const {
+    return decodeCount_.load();
+}
+
+uint64_t TileDecoder::GetTotalDecodeTimeUs() const {
+    return totalDecodeTimeUs_.load();
 }
 
 void TileDecoder::WorkerLoop() {
@@ -54,24 +68,48 @@ void TileDecoder::WorkerLoop() {
         {
             std::unique_lock<std::mutex> lock(queueMutex_);
             queueCv_.wait(lock, [this]() {
-                return !running_ || !queue_.empty();
+                return !running_ || !urgentQueue_.empty() || !normalQueue_.empty();
             });
             
             if (!running_) break;
-            if (queue_.empty()) continue;
-            
-            request = std::move(queue_.front());
-            queue_.pop();
+            if (urgentQueue_.empty() && normalQueue_.empty()) continue;
+
+            // Fairness: process N urgent, then 1 normal if available
+            if (urgentProcessed_ >= URGENT_BATCH_SIZE && !normalQueue_.empty()) {
+                request = std::move(normalQueue_.top());
+                normalQueue_.pop();
+                urgentProcessed_ = 0;
+            } else if (!urgentQueue_.empty()) {
+                request = std::move(urgentQueue_.top());
+                urgentQueue_.pop();
+                ++urgentProcessed_;
+            } else {
+                request = std::move(normalQueue_.top());
+                normalQueue_.pop();
+                urgentProcessed_ = 0;
+            }
         }
         
+        auto start = std::chrono::high_resolution_clock::now();
+
         DecodeResult result;
         result.key = request.key;
         result.success = DoDecode(request, result);
+
+        auto end = std::chrono::high_resolution_clock::now();
+        uint64_t elapsedUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+        decodeCount_.fetch_add(1);
+        totalDecodeTimeUs_.fetch_add(elapsedUs);
         
         // Invoke callback
-        std::lock_guard<std::mutex> lock(callbackMutex_);
-        if (resultCallback_) {
-            resultCallback_(std::move(result));
+        ResultCallback callbackCopy;
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex_);
+            callbackCopy = resultCallback_;
+        }
+        if (callbackCopy) {
+            callbackCopy(std::move(result));
         }
     }
 }
