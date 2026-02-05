@@ -41,6 +41,9 @@ public:
     // Create loading placeholder texture
     uint32_t CreateLoadingTexture();
     
+    // Get loading placeholder texture (creates if needed)
+    uint32_t GetLoadingTexture();
+    
     // Stats
     int GetTextureCount() const { return textureCount_; }
     int GetPendingUploads() const { return static_cast<int>(uploadQueue_.size()); }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "SardaGlobe Core Engine"
+  short_description: "Parity-first workflow for globe engine core"
+  default_prompt: "Use $sardaglobe to plan and implement a parity-first core engine change (tile pyramid, SSE LOD, async DEM)."

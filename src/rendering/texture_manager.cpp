@@ -36,6 +36,13 @@ uint32_t TextureManager::CreateLoadingTexture() {
     return CreateTexture(pixels.data(), size, size);
 }
 
+uint32_t TextureManager::GetLoadingTexture() {
+    if (loadingTexture_ == 0) {
+        loadingTexture_ = CreateLoadingTexture();
+    }
+    return loadingTexture_;
+}
+
 uint32_t TextureManager::CreateTexture(const uint8_t* pixels, int width, int height) {
     GLuint texture;
     glGenTextures(1, &texture);

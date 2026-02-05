@@ -8,6 +8,7 @@ LodSelection LodSelector::Select(
     const glm::vec3& cameraPos,
     const glm::mat4& mvp,
     float fovDegrees,
+    float tiltDegrees,
     int viewportWidth,
     int viewportHeight,
     const TileReadyFunc& isReady,
@@ -17,12 +18,21 @@ LodSelection LodSelector::Select(
     
     // Extract frustum and update horizon culler
     frustum_.Extract(mvp);
-    horizon_.Update(cameraPos, static_cast<float>(EARTH_RADIUS_KM));
+    
+    // CONSERVATIVE HORIZON: Add 8% margin + max terrain height (20km)
+    // This prevents false-negative culling at horizon edge (tilt/orbit gaps)
+    constexpr float HORIZON_MARGIN = 1.08f;  // 8% larger radius (more conservative)
+    constexpr float MAX_TERRAIN_KM = 20.0f;  // Everest + extra margin
+    float horizonRadius = static_cast<float>(EARTH_RADIUS_KM) * HORIZON_MARGIN + MAX_TERRAIN_KM;
+    horizon_.Update(cameraPos, horizonRadius);
     
     // Use FOV directly from camera (CRITICAL FIX: don't extract from MVP)
     // MVP = proj * view, so view matrix contaminates FOV extraction
     fovDegrees_ = fovDegrees;
     if (fovDegrees_ < 1.0f) fovDegrees_ = 45.0f;  // Fallback
+    
+    // Store tilt for horizon culling bypass
+    tiltDegrees_ = tiltDegrees;
     
     // Start traversal from root tiles (level 0)
     for (int x = 0; x < 1; ++x) {
@@ -48,7 +58,38 @@ LodSelection LodSelector::Select(
     return result;
 }
 
-void LodSelector::TraverseTile(
+bool LodSelector::IsTileVisible(
+    const TileKey& key,
+    const glm::vec3& cameraPos,
+    const Settings& settings
+) const {
+    // Calculate tile geometry
+    glm::vec3 center = TileCenterWorld(key);
+    float radius = TileBoundingRadius(key);
+    
+    // CONSERVATIVE BOUNDING: Add 15% margin for oblique/tilt views
+    constexpr float CONSERVATIVE_RADIUS_MARGIN = 1.15f;
+    float conservativeRadius = radius * CONSERVATIVE_RADIUS_MARGIN;
+    
+    // Frustum culling
+    if (!settings.disableFrustumCull) {
+        if (!frustum_.IsSphereVisible(center, conservativeRadius)) {
+            return false;
+        }
+    }
+    
+    // Horizon culling (bypass at high tilt)
+    constexpr float HORIZON_BYPASS_TILT = 30.0f;
+    if (!settings.disableHorizonCull && tiltDegrees_ < HORIZON_BYPASS_TILT) {
+        if (!horizon_.IsSphereVisible(center, conservativeRadius)) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+bool LodSelector::TraverseTile(
     const TileKey& key,
     const glm::vec3& cameraPos,
     const glm::mat4& mvp,
@@ -59,30 +100,22 @@ void LodSelector::TraverseTile(
     int depth
 ) {
     // Depth limit
-    if (depth > 30) return;
+    if (depth > 30) return false;
     
     // Zoom limits
     if (key.level < settings.minZoom) {
         // Go to children directly
         auto children = key.Children();
+        bool anyVisible = false;
         for (const auto& child : children) {
-            TraverseTile(child, cameraPos, mvp, viewportHeight, isReady, settings, result, depth + 1);
+            anyVisible = TraverseTile(child, cameraPos, mvp, viewportHeight, isReady, settings, result, depth + 1) || anyVisible;
         }
-        return;
+        return anyVisible;
     }
     
-    // Calculate tile geometry
-    glm::vec3 center = TileCenterWorld(key);
-    float radius = TileBoundingRadius(key);
-    
-    // Frustum culling
-    if (!frustum_.IsSphereVisible(center, radius)) {
-        return;
-    }
-    
-    // Horizon culling
-    if (!horizon_.IsSphereVisible(center, radius)) {
-        return;
+    // Frustum/horizon culling (conservative, bypass at high tilt)
+    if (!IsTileVisible(key, cameraPos, settings)) {
+        return false;
     }
     
     // Add to required set
@@ -92,7 +125,7 @@ void LodSelector::TraverseTile(
     if (key.level >= settings.maxZoom) {
         result.leaves.push_back(key);
         result.leafSet.insert(key);
-        return;
+        return true;
     }
     
     // Check if should subdivide (SSE test)
@@ -131,30 +164,39 @@ void LodSelector::TraverseTile(
                 }
             }
         }
-        return;
+        return true;
     }
     
     // Should subdivide - check if children are ready
     bool childrenReady = AreChildrenReady(key, isReady);
     
+    // Child-cull parent fill: if not all 4 children are visible, keep parent as fallback
+    int childVisibleCount = 0;
+    auto children = key.Children();
+    for (const auto& child : children) {
+        if (IsTileVisible(child, cameraPos, settings)) {
+            childVisibleCount++;
+        }
+    }
+    // Parent fallback when children are not ready OR not fully visible
+    if (!childrenReady || childVisibleCount < 4) {
+        result.leaves.push_back(key);
+        result.leafSet.insert(key);
+    }
+    
+    // Traverse children when ready, otherwise request for loading
     if (childrenReady) {
-        // Traverse children
-        auto children = key.Children();
         for (const auto& child : children) {
             TraverseTile(child, cameraPos, mvp, viewportHeight, isReady, settings, result, depth + 1);
         }
         result.refinedCount++;
     } else {
-        // Use this tile as fallback, but still request children
-        result.leaves.push_back(key);
-        result.leafSet.insert(key);
-        
-        // Add children to required (for loading)
-        auto children = key.Children();
         for (const auto& child : children) {
             result.required.insert(child);
         }
     }
+    
+    return true;
 }
 
 bool LodSelector::ShouldSubdivide(

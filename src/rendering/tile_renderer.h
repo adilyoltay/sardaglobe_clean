@@ -25,8 +25,11 @@ public:
     // Begin a render batch
     void BeginBatch(const glm::mat4& mvp, bool wireframe = false);
     
-    // Render a single tile
+    // Render a single tile (uses tile's own texture)
     void RenderTile(const Tile& tile);
+    
+    // Render a tile with a specific texture (for placeholder)
+    void RenderTileWithTexture(const Tile& tile, uint32_t textureId);
     
     // End the batch and restore state
     void EndBatch();

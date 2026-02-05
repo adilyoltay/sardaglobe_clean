@@ -52,6 +52,10 @@ struct Config {
     // Debug
     bool showDebugInfo = true;
     bool logNetwork = false;
+    
+    // Debug culling toggles (for gap diagnosis)
+    bool disableFrustumCull = false;   // Skip frustum culling in LOD selection
+    bool disableHorizonCull = false;   // Skip horizon culling in LOD selection
 };
 
 } // namespace globe

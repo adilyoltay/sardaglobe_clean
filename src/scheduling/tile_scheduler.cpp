@@ -113,6 +113,7 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
                 if (it != tiles.end()) {
                     TileStateMachine::Advance(it->second, TileStateMachine::Event::FetchFail, currentTime);
                 }
+                ++recentFetchFails_;
                 continue;
             }
             

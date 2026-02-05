@@ -10,6 +10,7 @@ const LodSelection& TilePyramid::Select(
     const glm::vec3& viewDir,
     const glm::mat4& mvp,
     float fovDegrees,
+    float tiltDegrees,
     int viewportWidth,
     int viewportHeight,
     const TileMap& tiles
@@ -24,6 +25,7 @@ const LodSelection& TilePyramid::Select(
         cameraPos,
         mvp,
         fovDegrees,
+        tiltDegrees,
         viewportWidth,
         viewportHeight,
         isReady,

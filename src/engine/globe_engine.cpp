@@ -121,6 +121,9 @@ bool GlobeEngine::Init() {
     
     // Initialize pivot gizmo
     InitPivotGizmo();
+
+    // Preload base tiles (LOD 0-1) for gap-free startup coverage
+    PreloadBaseTiles();
     
     lastFrameTime_ = glfwGetTime();
     return true;
@@ -231,6 +234,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
     lodSettings.minZoom = config_.minZoom;
     lodSettings.maxZoom = config_.maxZoom;
     lodSettings.sseThreshold = config_.sseThreshold;
+    lodSettings.disableFrustumCull = config_.disableFrustumCull;
+    lodSettings.disableHorizonCull = config_.disableHorizonCull;
     
     // TiltFactor: reduce detail when camera is tilted toward horizon
     // tilt=0 (looking down) → tiltFactor=1.0 (full detail)
@@ -240,6 +245,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     // CRITICAL: Pass FOV directly from camera, not extracted from MVP
     float fovDegrees = static_cast<float>(camera_->GetFov());
+    float tiltDegrees = static_cast<float>(camera_->GetTilt());
     
     // Get view direction from camera for center bias scoring
     glm::dvec3 forward, up, right;
@@ -247,13 +253,32 @@ void GlobeEngine::Update(double dt, double currentTime) {
     glm::vec3 viewDir = glm::vec3(forward);
     
     const LodSelection& selection = tilePyramid_.Select(
-        cameraPos, viewDir, mvp, fovDegrees,
+        cameraPos, viewDir, mvp, fovDegrees, tiltDegrees,
         config_.windowWidth, config_.windowHeight,
         tiles_
     );
     
     // Store leafSet for render filtering
     currentLeafSet_ = selection.leafSet;
+    
+    // Temporal leaf hold: keep recent leaves to avoid gaps during fast pan/zoom
+    double nowTime = glfwGetTime();
+    for (const TileKey& key : currentLeafSet_) {
+        lastLeafSeenTime_[key] = nowTime;
+    }
+    renderLeafSet_.clear();
+    for (auto it = lastLeafSeenTime_.begin(); it != lastLeafSeenTime_.end(); ) {
+        if (nowTime - it->second <= leafHoldSeconds_) {
+            renderLeafSet_.insert(it->first);
+            ++it;
+        } else {
+            it = lastLeafSeenTime_.erase(it);
+        }
+    }
+    // If no leaves are available (startup edge case), render base tiles as a fallback
+    if (renderLeafSet_.empty() && !baseTileKeys_.empty()) {
+        renderLeafSet_ = baseTileKeys_;
+    }
     
     // Request required tiles using ranked list (GE-style SSE + center bias priority)
     for (const RankedTile& ranked : tilePyramid_.GetRankedRequired()) {
@@ -330,6 +355,12 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     // Process scheduler (fetch/decode results)
     scheduler_->Update(tiles_, glfwGetTime());
+
+    // Reset recent fetch-fail metric (every 2 seconds)
+    if (nowTime - lastFetchFailResetTime_ >= 2.0) {
+        scheduler_->ResetRecentFetchFails();
+        lastFetchFailResetTime_ = nowTime;
+    }
     
     // Process texture uploads (time-budgeted)
     textureManager_->ProcessUploads(tiles_, config_.uploadBudgetMs);
@@ -375,11 +406,20 @@ void GlobeEngine::Update(double dt, double currentTime) {
         it->second.edgeCoarserMask = newMask;
     }
     
-    // Queue mesh rebuilds for ready tiles (time-budgeted, visible-priority)
+    // SYNC LEAF MESH: Build mesh immediately for all visible leaves (gap-free guarantee)
+    // This ensures leaf tiles have mesh this frame for rendering or placeholder
+    for (const TileKey& key : selection.leafSet) {
+        auto it = tiles_.find(key);
+        if (it != tiles_.end() && !it->second.hasMesh) {
+            BuildTileMesh(it->second);  // Synchronous - no queue delay
+        }
+    }
+    
+    // Queue mesh rebuilds for DEM updates and edge mask changes (background)
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
-        if (it != tiles_.end() && it->second.IsReady()) {
-            bool needsRebuild = !it->second.hasMesh;
+        if (it != tiles_.end() && it->second.hasMesh) {
+            bool needsRebuild = false;
             
             // Rebuild mesh if DEM data became available
             if (demManager_ && it->second.demPending && demManager_->HasData(key)) {
@@ -401,8 +441,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
     ProcessMeshRebuildQueue();
     
     // Pin visible tiles to protect from eviction (GE-style cache policy)
-    // Required tiles (leaves + ancestors) are pinned
-    textureManager_->SetPinnedSet(selection.required);
+    // Required tiles (leaves + ancestors) + base tiles are pinned
+    std::unordered_set<TileKey> pinnedSet = selection.required;
+    pinnedSet.insert(baseTileKeys_.begin(), baseTileKeys_.end());
+    textureManager_->SetPinnedSet(pinnedSet);
     
     // Evict old tiles (respects pinned tiles)
     textureManager_->EvictIfNeeded(tiles_, config_.maxTiles);
@@ -419,8 +461,9 @@ void GlobeEngine::Render() {
     
     // Draw tiles via RenderFrame (GE-style separation)
     double currentTime = glfwGetTime();
+    uint32_t loadingTexture = textureManager_->GetLoadingTexture();
     auto drawStats = renderFrame_->DrawTiles(
-        currentLeafSet_, tiles_, mvp, currentTime, config_.wireframeMode
+        renderLeafSet_, tiles_, mvp, currentTime, config_.wireframeMode, loadingTexture
     );
     
     // Render pivot gizmo (Google Earth style target icon)
@@ -431,8 +474,13 @@ void GlobeEngine::Render() {
     debugStats_.tileCount = static_cast<int>(tiles_.size());
     debugStats_.pendingFetches = scheduler_->GetPendingFetches();
     debugStats_.pendingDecodes = scheduler_->GetPendingDecodes();
-    debugStats_.readyTiles = drawStats.tilesRendered;
-    debugStats_.visibleTiles = drawStats.tilesRendered;
+    debugStats_.renderableLeaves = drawStats.renderableLeaves;
+    debugStats_.fallbackTiles = drawStats.fallbackTiles;
+    debugStats_.placeholderTiles = drawStats.placeholderTiles;
+    debugStats_.leafNoMesh = drawStats.leafNoMesh;
+    debugStats_.leafNoTexture = drawStats.leafNoTexture;
+    debugStats_.missingTiles = drawStats.missing;
+    debugStats_.visibleTiles = drawStats.renderableLeaves + drawStats.fallbackTiles;
     debugStats_.currentZoom = GetCurrentZoom();
     camera_->GetLatLonAlt(debugStats_.latitude, debugStats_.longitude, debugStats_.altitude);
     debugStats_.heading = camera_->GetHeading();
@@ -687,9 +735,22 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Separator();
             ImGui::Text("Total: %d", debugStats_.tileCount);
             ImGui::Text("Visible: %d", debugStats_.visibleTiles);
-            ImGui::Text("Ready: %d", debugStats_.readyTiles);
             ImGui::Text("Pending Fetch: %d", debugStats_.pendingFetches);
             ImGui::Text("Pending Decode: %d", debugStats_.pendingDecodes);
+            
+            // Gap-free telemetry
+            ImGui::Text("Renderable: %d", debugStats_.renderableLeaves);
+            ImGui::Text("Fallback: %d", debugStats_.fallbackTiles);
+            if (debugStats_.placeholderTiles > 0) {
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Placeholder: %d", debugStats_.placeholderTiles);
+            }
+            if (debugStats_.leafNoMesh > 0 || debugStats_.leafNoTexture > 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "NoMesh: %d | NoTex: %d", 
+                    debugStats_.leafNoMesh, debugStats_.leafNoTexture);
+            }
+            if (debugStats_.missingTiles > 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "MISSING: %d", debugStats_.missingTiles);
+            }
             
             ImGui::Spacing();
             
@@ -709,6 +770,11 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Render Options");
             ImGui::Separator();
             ImGui::Checkbox("Wireframe Mode", &config_.wireframeMode);
+            
+            // Debug culling toggles
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Culling Debug");
+            ImGui::Checkbox("Disable Frustum Cull", &config_.disableFrustumCull);
+            ImGui::Checkbox("Disable Horizon Cull", &config_.disableHorizonCull);
             
             ImGui::Spacing();
             
@@ -896,6 +962,54 @@ void GlobeEngine::QueueMeshRebuild(const TileKey& key, bool isVisible) {
 void GlobeEngine::ProcessMeshRebuildQueue() {
     // Process mesh rebuild jobs via JobSystem (count-based budget)
     jobSystem_.ProcessCount(MAX_MESH_REBUILDS_PER_FRAME);
+}
+
+// =============================================================================
+// BASE TILE PRELOAD (LOD0-1 bootstrap coverage)
+// =============================================================================
+
+void GlobeEngine::PreloadBaseTiles() {
+    // LOD 0: 1 tile, LOD 1: 4 tiles = 5 tiles total
+    constexpr int MAX_PRELOAD_LEVEL = 1;
+    uint32_t loadingTexture = textureManager_->GetLoadingTexture();
+    
+    for (int level = 0; level <= MAX_PRELOAD_LEVEL; ++level) {
+        int tilesPerSide = 1 << level;
+        for (int y = 0; y < tilesPerSide; ++y) {
+            for (int x = 0; x < tilesPerSide; ++x) {
+                TileKey key(level, x, y);
+                baseTileKeys_.insert(key);
+                
+                // Create tile if not exists
+                auto it = tiles_.find(key);
+                if (it == tiles_.end()) {
+                    tiles_.emplace(key, Tile(key));
+                    it = tiles_.find(key);
+                }
+                
+                Tile& tile = it->second;
+                
+                // Ensure mesh exists for immediate fallback coverage
+                if (!tile.hasMesh) {
+                    BuildTileMesh(tile);
+                }
+                
+                // Use loading texture as temporary placeholder until real texture arrives
+                if (tile.textureId == 0 && loadingTexture != 0) {
+                    tile.textureId = loadingTexture;
+                    tile.ownsTexture = false;  // Shared placeholder texture
+                }
+                
+                // Request real texture with high priority (state machine handles transitions)
+                if (tile.state == TileState::Unloaded) {
+                    scheduler_->Request(key, Priority::Urgent, 1.0f);
+                    TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
+                }
+            }
+        }
+    }
+    
+    std::cout << "Preloaded " << baseTileKeys_.size() << " base tiles (LOD 0-1)" << std::endl;
 }
 
 // =============================================================================

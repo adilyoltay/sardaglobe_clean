@@ -32,11 +32,31 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe) {
 
 void TileRenderer::RenderTile(const Tile& tile) {
     if (!batchActive_) return;
-    if (!tile.IsReady() || !tile.hasMesh || tile.textureId == 0) return;
+    // Renderable = hasMesh && textureId != 0 (not IsReady!)
+    if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
     
     // Bind texture
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tile.textureId);
+    
+    // Draw tile mesh
+    glBindVertexArray(tile.vao);
+    glDrawElements(GL_TRIANGLES, tile.indexCount, GL_UNSIGNED_INT, nullptr);
+    glBindVertexArray(0);
+    
+    // Update stats
+    stats_.tilesRendered++;
+    stats_.drawCalls++;
+    stats_.trianglesRendered += tile.indexCount / 3;
+}
+
+void TileRenderer::RenderTileWithTexture(const Tile& tile, uint32_t textureId) {
+    if (!batchActive_) return;
+    if (!tile.hasMesh || tile.vao == 0 || textureId == 0) return;
+    
+    // Bind specified texture (for placeholder)
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textureId);
     
     // Draw tile mesh
     glBindVertexArray(tile.vao);

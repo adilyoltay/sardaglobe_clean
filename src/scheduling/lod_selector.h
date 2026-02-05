@@ -36,6 +36,10 @@ public:
         int maxNeighborDelta = 1;      // Max LOD difference between neighbors
         bool enforceNeighborDelta = true;  // Enable conformance pass
         int maxConformPasses = 6;      // Prevent infinite refinement
+        
+        // Debug culling toggles (for gap diagnosis)
+        bool disableFrustumCull = false;
+        bool disableHorizonCull = false;
     };
     
     LodSelector() = default;
@@ -46,6 +50,7 @@ public:
         const glm::vec3& cameraPos,
         const glm::mat4& mvp,
         float fovDegrees,  // CRITICAL: Pass FOV directly from camera
+        float tiltDegrees, // Camera tilt (0=looking down, 90=horizon)
         int viewportWidth,
         int viewportHeight,
         const TileReadyFunc& isReady,
@@ -53,7 +58,7 @@ public:
     );
 
 private:
-    void TraverseTile(
+    bool TraverseTile(
         const TileKey& key,
         const glm::vec3& cameraPos,
         const glm::mat4& mvp,
@@ -63,6 +68,13 @@ private:
         LodSelection& result,
         int depth
     );
+
+    // Conservative visibility test (frustum + horizon)
+    bool IsTileVisible(
+        const TileKey& key,
+        const glm::vec3& cameraPos,
+        const Settings& settings
+    ) const;
     
     bool ShouldSubdivide(
         const TileKey& key,
@@ -87,6 +99,7 @@ private:
     Frustum frustum_;
     HorizonCuller horizon_;
     float fovDegrees_ = 45.0f;
+    float tiltDegrees_ = 0.0f;  // For horizon culling bypass
 };
 
 } // namespace globe

@@ -73,6 +73,7 @@ private:
     // Tile management
     void BuildTileMesh(Tile& tile);
     void RenderTile(const Tile& tile, const glm::mat4& mvp);
+    void PreloadBaseTiles();  // LOD0-1 bootstrap coverage
     
     // Globe picking (for navigation)
     bool PickGlobe(double screenX, double screenY, glm::dvec3& outPoint);
@@ -104,9 +105,14 @@ private:
     
     // Tiles
     std::unordered_map<TileKey, Tile> tiles_;
+    std::unordered_set<TileKey> baseTileKeys_;
     
     // Current leaf set for render filtering (updated each frame in Update)
     std::unordered_set<TileKey> currentLeafSet_;
+    // Render leaf set with temporal hold (prevents gaps during fast pan/zoom)
+    std::unordered_set<TileKey> renderLeafSet_;
+    std::unordered_map<TileKey, double> lastLeafSeenTime_;
+    double leafHoldSeconds_ = 0.5;
     
     // Mesh rebuild via JobSystem (time-budgeted, visible-priority)
     static constexpr int MAX_MESH_REBUILDS_PER_FRAME = 4;
@@ -126,7 +132,6 @@ private:
         int tileCount = 0;
         int pendingFetches = 0;
         int pendingDecodes = 0;
-        int readyTiles = 0;
         int visibleTiles = 0;
         int currentZoom = 0;
         double altitude = 0.0;
@@ -135,9 +140,17 @@ private:
         double heading = 0.0;
         double tilt = 0.0;
         size_t textureMemoryMB = 0;
+        // Gap-free telemetry
+        int renderableLeaves = 0;   // Leaves rendered normally
+        int fallbackTiles = 0;      // Parent fallback tiles
+        int placeholderTiles = 0;   // Last-resort placeholder
+        int leafNoMesh = 0;         // Leaves without mesh
+        int leafNoTexture = 0;      // Leaves with mesh but no texture
+        int missingTiles = 0;       // True gaps
     };
     DebugStats debugStats_;
     bool showDebugPanel_ = true;
+    double lastFetchFailResetTime_ = 0.0;
     
     // ImGui
     void InitImGui();

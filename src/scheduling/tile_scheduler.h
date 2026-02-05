@@ -49,6 +49,10 @@ public:
     // Drop metrics (queue overflow)
     size_t GetDroppedFetchResults() const { return droppedFetchResults_; }
     size_t GetDroppedDecodeResults() const { return droppedDecodeResults_; }
+    
+    // Fetch fail tracking (for debug/telemetry)
+    size_t GetRecentFetchFails() const { return recentFetchFails_; }
+    void ResetRecentFetchFails() { recentFetchFails_ = 0; }
 
 private:
     void OnFetchComplete(FetchResult result);
@@ -81,6 +85,9 @@ private:
     // Dropped keys queue - Update() marks these tiles as Failed for retry
     std::queue<TileKey> droppedKeys_;
     std::mutex droppedKeysMutex_;
+    
+    // Recent fetch fail counter (reset periodically)
+    std::atomic<size_t> recentFetchFails_{0};
 };
 
 } // namespace globe

@@ -256,7 +256,7 @@ void TestLodSelection() {
         
         auto isReady = [](const TileKey&) { return true; };
         
-        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 1920, 1080, isReady, settings);
+        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
         
         bool hasLeaves = !selection.leaves.empty();
         bool hasRequired = !selection.required.empty();
@@ -279,7 +279,7 @@ void TestLodSelection() {
         
         auto isReady = [](const TileKey&) { return true; };
         
-        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 1920, 1080, isReady, settings);
+        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
         
         bool allInRequired = true;
         for (const auto& leaf : selection.leaves) {
@@ -705,7 +705,7 @@ void TestSystemIntegration() {
         // Simulate: only zoom 0-3 tiles are ready
         auto isReady = [](const TileKey& k) { return k.level <= 3; };
         
-        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 1920, 1080, isReady, settings);
+        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
         
         // Should have leaves at level 3 (fallback) and required at higher levels
         bool hasFallback = false;

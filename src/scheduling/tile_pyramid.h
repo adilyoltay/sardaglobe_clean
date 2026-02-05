@@ -40,6 +40,7 @@ public:
         const glm::vec3& viewDir,  // Camera forward direction for center bias
         const glm::mat4& mvp,
         float fovDegrees,
+        float tiltDegrees,         // Camera tilt for horizon culling bypass
         int viewportWidth,
         int viewportHeight,
         const TileMap& tiles
