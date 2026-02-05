@@ -5,6 +5,12 @@
 
 namespace globe {
 
+// Terrain displacement authority
+enum class DisplacementMode {
+    CPU_MESH_BAKE,        // DEM baked into mesh vertices (default, proven)
+    GPU_HEIGHTMAP_DISPLACE // Flat mesh + GPU vertex shader displacement
+};
+
 // Globe engine configuration
 struct Config {
     // Tile sources
@@ -53,6 +59,7 @@ struct Config {
     size_t demCacheSize = 512;        // Max cached DEM tiles
     double demHeightScale = 2.5;      // Height exaggeration (2.5x for visible terrain)
     bool demDebug = false;            // Enable DEM debug logging
+    DisplacementMode terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;  // Single authority
     
     // Debug
     bool showDebugInfo = true;

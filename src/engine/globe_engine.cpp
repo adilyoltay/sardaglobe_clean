@@ -104,7 +104,17 @@ bool GlobeEngine::Init() {
         demConfig.meshN = config_.demMeshN;
         demConfig.cacheSize = config_.demCacheSize;
         demConfig.debug = config_.demDebug;
+        demConfig.timeoutSec = 30;
+        demConfig.connectTimeoutSec = 10;
         demManager_ = std::make_unique<DemManager>(demConfig);
+        
+        // Startup health check
+        auto health = demManager_->CheckHealth();
+        if (health != DemHealthStatus::Healthy) {
+            std::cerr << "[DEM] WARNING: DEM endpoint not healthy (" 
+                      << DemHealthStatusToString(health) 
+                      << "). Terrain will be flat until DEM becomes available." << std::endl;
+        }
         
         // Init heightmap manager for GPU terrain displacement
         heightmapManager_ = std::make_unique<HeightmapManager>();
@@ -403,16 +413,17 @@ void GlobeEngine::Update(double dt, double currentTime) {
     textureManager_->ProcessUploads(tiles_, config_.uploadBudgetMs);
     frameTimings_.textureUploadMs = (glfwGetTime() * 1000.0) - uploadStartMs;
     
-    // Request DEM data for visible tiles (includes ancestors for fallback coverage)
+    // Request DEM data for visible tiles - priority ordered (FAZ 3)
     if (demManager_) {
-        // Use required set (leaves + ancestors) so fallback parents also get DEM
-        for (const TileKey& key : selection.required) {
-            demManager_->Request(key);
+        // Use ranked list: closer/more-visible tiles get DEM first
+        const auto& rankedRequired = tilePyramid_.GetRankedRequired();
+        for (const auto& ranked : rankedRequired) {
+            demManager_->Request(ranked.key);
         }
         demManager_->Update();
         
-        // Queue DEM data for GPU heightmap texture upload
-        if (heightmapManager_) {
+        // Queue DEM data for GPU heightmap texture upload (only in GPU displacement mode)
+        if (heightmapManager_ && config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) {
             for (const TileKey& key : selection.required) {
                 if (demManager_->HasData(key) && !heightmapManager_->HasTexture(key)) {
                     DemGridData demData;
@@ -595,9 +606,14 @@ void GlobeEngine::Render() {
     // Draw tiles via RenderFrame (GE-style separation)
     double currentTime = glfwGetTime();
     uint32_t loadingTexture = textureManager_->GetLoadingTexture();
+    // Only pass heightmap manager when GPU displacement mode is active
+    HeightmapManager* hmForRender = nullptr;
+    if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) {
+        hmForRender = heightmapManager_.get();
+    }
     auto drawStats = renderFrame_->DrawTiles(
         renderLeafSet_, tiles_, mvp, currentTime, config_.wireframeMode, loadingTexture,
-        heightmapManager_.get()  // Pass heightmap manager for GPU terrain displacement
+        hmForRender
     );
     
     // Render pivot gizmo (Google Earth style target icon)
@@ -665,34 +681,65 @@ void GlobeEngine::RenderTile(const Tile& tile, const glm::mat4& mvp) {
     glBindVertexArray(0);
 }
 
-// Globe picking for navigation (ray-sphere intersection)
+// Ray-sphere intersection helper (returns t parameter, negative if no hit)
+static double RaySphereIntersect(const glm::dvec3& origin, const glm::dvec3& dir, double radius) {
+    double a = glm::dot(dir, dir);
+    double b = 2.0 * glm::dot(origin, dir);
+    double c = glm::dot(origin, origin) - radius * radius;
+    double disc = b * b - 4.0 * a * c;
+    if (disc < 0.0) return -1.0;
+    double sqrtD = std::sqrt(disc);
+    double t = (-b - sqrtD) / (2.0 * a);
+    if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
+    return t;
+}
+
+// Globe picking for navigation - terrain-aware with DEM refinement
 bool GlobeEngine::PickGlobe(double screenX, double screenY, glm::dvec3& outPoint) {
     glm::dvec3 rayOrigin, rayDir;
     camera_->GetRay(screenX, screenY, config_.windowWidth, config_.windowHeight, rayOrigin, rayDir);
     
-    // Ray-sphere intersection with Earth
-    // Camera ECEF is in KM units, use shared constant
     const double R = earth::EARTH_RADIUS_KM;
-    glm::dvec3 oc = rayOrigin;  // Origin is camera position, sphere center is at (0,0,0)
     
-    double a = glm::dot(rayDir, rayDir);
-    double b = 2.0 * glm::dot(oc, rayDir);
-    double c = glm::dot(oc, oc) - R * R;
-    double discriminant = b * b - 4.0 * a * c;
+    // Step 1: Initial ray-sphere intersection (base radius)
+    double t = RaySphereIntersect(rayOrigin, rayDir, R);
+    if (t < 0.0) return false;
     
-    if (discriminant < 0.0) {
-        return false;  // No intersection
+    outPoint = rayOrigin + t * rayDir;
+    
+    // Step 2: Terrain refinement (if DEM available and in CPU_MESH_BAKE mode)
+    if (demManager_ && config_.demEnabled) {
+        // Convert hit point to lat/lon
+        glm::dvec3 hitNorm = glm::normalize(outPoint);
+        double lat = glm::degrees(std::asin(std::clamp(hitNorm.z, -1.0, 1.0)));
+        double lon = glm::degrees(std::atan2(hitNorm.y, hitNorm.x));
+        
+        // Get camera altitude to determine DEM sample level
+        double camLat, camLon, camAlt;
+        camera_->GetLatLonAlt(camLat, camLon, camAlt);
+        int sampleLevel = std::clamp(static_cast<int>(std::log2(40000000.0 / std::max(1.0, camAlt))), 1, 12);
+        
+        // Iterative refinement (2 passes for convergence)
+        for (int iter = 0; iter < 2; ++iter) {
+            double heightMeters = 0.0;
+            if (demManager_->SampleHeight(lon, lat, sampleLevel, heightMeters)) {
+                double heightKm = heightMeters * 0.001 * config_.demHeightScale;
+                double terrainR = R + heightKm;
+                
+                // Re-intersect with terrain-adjusted sphere
+                double tTerrain = RaySphereIntersect(rayOrigin, rayDir, terrainR);
+                if (tTerrain > 0.0) {
+                    outPoint = rayOrigin + tTerrain * rayDir;
+                    
+                    // Update lat/lon for next iteration
+                    hitNorm = glm::normalize(outPoint);
+                    lat = glm::degrees(std::asin(std::clamp(hitNorm.z, -1.0, 1.0)));
+                    lon = glm::degrees(std::atan2(hitNorm.y, hitNorm.x));
+                }
+            }
+        }
     }
     
-    double t = (-b - std::sqrt(discriminant)) / (2.0 * a);
-    if (t < 0.0) {
-        t = (-b + std::sqrt(discriminant)) / (2.0 * a);
-    }
-    if (t < 0.0) {
-        return false;  // Behind camera
-    }
-    
-    outPoint = rayOrigin + t * rayDir;  // Result is in KM units
     return true;
 }
 
@@ -944,6 +991,35 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Render Options");
             ImGui::Separator();
             ImGui::Checkbox("Wireframe Mode", &config_.wireframeMode);
+            
+            // Displacement mode toggle
+            const char* modeNames[] = { "CPU Mesh Bake", "GPU Heightmap" };
+            int currentMode = static_cast<int>(config_.terrainDisplacementMode);
+            if (ImGui::Combo("Terrain Mode", &currentMode, modeNames, 2)) {
+                config_.terrainDisplacementMode = static_cast<DisplacementMode>(currentMode);
+            }
+            
+            // DEM Telemetry
+            if (demManager_) {
+                ImGui::Spacing();
+                const auto& demStats = demManager_->GetStats();
+                auto demHealth = demManager_->GetHealthStatus();
+                ImVec4 healthColor = (demHealth == DemHealthStatus::Healthy) 
+                    ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                ImGui::TextColored(healthColor, "DEM: %s", DemHealthStatusToString(demHealth));
+                ImGui::Separator();
+                ImGui::Text("Fetch OK/Fail: %d / %d (%.0f%%)", 
+                    demStats.fetchSuccess.load(), demStats.fetchFail.load(), demStats.GetSuccessRate());
+                ImGui::Text("Avg Fetch: %.0f ms", demStats.GetAvgFetchMs());
+                if (demStats.fetchTimeout.load() > 0)
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Timeouts: %d", demStats.fetchTimeout.load());
+                if (demStats.fetchAuth.load() > 0)
+                    ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Auth Fails: %d", demStats.fetchAuth.load());
+                ImGui::Text("Parse OK/Fail: %d / %d", demStats.parseSuccess.load(), demStats.parseFail.load());
+                ImGui::Text("DEM Cache: %d", demManager_->GetCacheSize());
+            }
+            
+            ImGui::Spacing();
             
             // Debug culling toggles
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Culling Debug");

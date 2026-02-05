@@ -39,6 +39,41 @@ struct DemGridData {
 // Height sampler callback type (for mesh builder)
 using HeightSampler = std::function<bool(double lonDeg, double latDeg, int level, double& heightMeters)>;
 
+// DEM health status
+enum class DemHealthStatus {
+    Unknown,      // Not yet checked
+    Healthy,      // Endpoint reachable, data valid
+    AuthFailed,   // 401/403 - credentials/origin issue
+    Unreachable,  // Network/DNS/timeout error
+    BadResponse,  // 200 but unparseable data
+    Disabled      // DEM explicitly disabled
+};
+
+const char* DemHealthStatusToString(DemHealthStatus s);
+
+// DEM telemetry statistics
+struct DemStats {
+    std::atomic<int> fetchSuccess{0};
+    std::atomic<int> fetchFail{0};
+    std::atomic<int> fetchTimeout{0};
+    std::atomic<int> fetchAuth{0};     // 401/403 count
+    std::atomic<int> parseSuccess{0};
+    std::atomic<int> parseFail{0};
+    std::atomic<int> cacheHits{0};
+    std::atomic<int> cacheMisses{0};
+    std::atomic<double> totalFetchMs{0.0};
+    
+    int GetTotalFetches() const { return fetchSuccess.load() + fetchFail.load(); }
+    double GetAvgFetchMs() const {
+        int total = fetchSuccess.load();
+        return total > 0 ? totalFetchMs.load() / total : 0.0;
+    }
+    double GetSuccessRate() const {
+        int total = GetTotalFetches();
+        return total > 0 ? 100.0 * fetchSuccess.load() / total : 0.0;
+    }
+};
+
 // DEM Manager configuration
 struct DemManagerConfig {
     std::string baseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
@@ -46,6 +81,14 @@ struct DemManagerConfig {
     size_t cacheSize = 256;           // Max cached tiles
     double heightScale = 0.001;       // Meters to world units (km)
     bool debug = false;
+    
+    // Network settings (consolidated)
+    long timeoutSec = 30;             // CURL total timeout
+    long connectTimeoutSec = 10;      // CURL connect timeout
+    int maxRetries = 1;               // Max retries per tile on transient error
+    double failRetryDelaySec = 30.0;  // Retry failed tiles after this delay
+    int authBackoffThreshold = 3;     // Consecutive auth fails before backoff
+    double authBackoffSec = 30.0;     // Backoff duration after auth failures
 };
 
 // DEM Manager - handles elevation data fetching and caching
@@ -55,6 +98,16 @@ public:
     
     explicit DemManager(const Config& config);
     ~DemManager();
+    
+    // Startup health check - tests endpoint accessibility
+    // Returns health status and logs result
+    DemHealthStatus CheckHealth();
+    
+    // Get current health status
+    DemHealthStatus GetHealthStatus() const { return healthStatus_.load(); }
+    
+    // Get telemetry stats
+    const DemStats& GetStats() const { return stats_; }
     
     // Request DEM data for a tile
     void Request(const TileKey& key);
@@ -109,6 +162,10 @@ private:
     std::atomic<int> consecutiveAuthFails_{0};
     std::atomic<bool> authBackoff_{false};
     std::chrono::steady_clock::time_point backoffUntil_;
+    
+    // Health status and telemetry
+    std::atomic<DemHealthStatus> healthStatus_{DemHealthStatus::Unknown};
+    DemStats stats_;
     
     // Helper functions
     void WorkerLoop();

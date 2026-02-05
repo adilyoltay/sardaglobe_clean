@@ -55,9 +55,10 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     double mercatorYTop = std::log(std::tan(M_PI / 4.0 + latTopRad / 2.0));
     double mercatorYBottom = std::log(std::tan(M_PI / 4.0 + latBottomRad / 2.0));
     
-    // Get height sampler if DEM is available
+    // Get height sampler if DEM is available AND we're in CPU_MESH_BAKE mode
+    // In GPU_HEIGHTMAP_DISPLACE mode, mesh stays flat - shader does displacement
     HeightSampler heightSampler = nullptr;
-    if (demManager) {
+    if (demManager && config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
         heightSampler = demManager->GetHeightSampler();
     }
     

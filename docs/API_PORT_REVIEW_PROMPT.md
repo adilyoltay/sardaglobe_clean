@@ -465,6 +465,10 @@ Her faz bittiğinde aşağıyı güncelle:
 - [x] Tile Pipeline Opt P0-P3 tamamlandı — Tarih: 2026-02-05 — Notlar: Telemetri (p95/p99 + alt süreler), URL template (regex-free), cache I/O worker'a taşındı, decoder priority+fairness, backpressure (bounded queue + in-flight limit).
 - [x] Tile Pipeline Opt P4-P6 tamamlandı — Tarih: 2026-02-05 — Notlar: Upload priority+reuse (glTexSubImage2D), async mesh scheduler + shared EBO, pin epoch + eviction budget.
 - [x] 3D Terrain FAZ 1-3 tamamlandı — Tarih: 2026-02-05 — Notlar: demMeshN=65, demHeightScale=2.5, HeightmapManager (R16F GPU texture), vertex shader displacement, DEM timeout 30s, tile eviction heightmap release.
+- [x] 3D Terrain Parity FAZ 0 tamamlandı — Tarih: 2026-02-05 — Notlar: DemHealthStatus enum, CheckHealth() startup probe, DemStats telemetri (fetch/parse/timeout/auth counters), debug panel DEM bölümü, config konsolidasyonu (timeout/retry/backoff).
+- [x] 3D Terrain Parity FAZ 1 tamamlandı — Tarih: 2026-02-05 — Notlar: DisplacementMode enum (CPU_MESH_BAKE/GPU_HEIGHTMAP_DISPLACE), tek authority gate (mesh builder + heightmap upload + render path), --gpu-terrain CLI flag, debug panel terrain mode toggle.
+- [x] 3D Terrain Parity FAZ 2 tamamlandı — Tarih: 2026-02-05 — Notlar: Terrain-aware PickGlobe (iterative DEM sphere refinement, 2-pass convergence). FlightController orbit/pan/zoom pivot artık terrain yüksekliğini dikkate alıyor.
+- [x] 3D Terrain Parity FAZ 3 tamamlandı — Tarih: 2026-02-05 — Notlar: DEM request'leri TilePyramid::GetRankedRequired() ile SSE score sıralı. Yakındaki/görünür tile'lar DEM'i önce alıyor.
 
 ### Google Earth Rewrite Plan Faz Günlüğü
 - [x] Faz 0 (Hazırlık) tamamlandı — Tarih: 2026-01-31 — Notlar: ParitySnapshot telemetry eklendi (frameTime, tileLoad, cache stats), --test-parity flag ve RunParityTest() senaryosu eklendi.

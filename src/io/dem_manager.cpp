@@ -22,6 +22,18 @@ std::string ExtractOrigin(const std::string& url) {
 
 } // namespace
 
+const char* DemHealthStatusToString(DemHealthStatus s) {
+    switch (s) {
+        case DemHealthStatus::Unknown:     return "Unknown";
+        case DemHealthStatus::Healthy:     return "Healthy";
+        case DemHealthStatus::AuthFailed:  return "AuthFailed";
+        case DemHealthStatus::Unreachable: return "Unreachable";
+        case DemHealthStatus::BadResponse: return "BadResponse";
+        case DemHealthStatus::Disabled:    return "Disabled";
+    }
+    return "Unknown";
+}
+
 // CURL write callback
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     auto* data = static_cast<std::string*>(userp);
@@ -291,8 +303,8 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);  // Increased for MESHN=65 larger payloads
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.timeoutSec);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, config_.connectTimeoutSec);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         
@@ -318,6 +330,17 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
         double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
         
         bool ok = (res == CURLE_OK && responseCode == 200);
+        
+        // Telemetry
+        if (ok) {
+            stats_.fetchSuccess++;
+            stats_.totalFetchMs.store(stats_.totalFetchMs.load() + elapsedMs);
+        } else {
+            stats_.fetchFail++;
+            if (res == CURLE_OPERATION_TIMEDOUT) stats_.fetchTimeout++;
+            if (responseCode == 401 || responseCode == 403) stats_.fetchAuth++;
+        }
+        
         NetworkPanel::Instance().RecordComplete(key, RequestType::DemMesh, ok, responseCode, 
                                                  response.size(), elapsedMs, false, ok ? "" : curl_easy_strerror(res));
         return ok;
@@ -338,16 +361,19 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
         // 401/403 auth failure - trigger backoff
         if (responseCode == 401 || responseCode == 403) {
             int fails = consecutiveAuthFails_.fetch_add(1) + 1;
-            if (fails >= 3) {
+            if (fails >= config_.authBackoffThreshold) {
                 authBackoff_.store(true);
-                backoffUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-                std::cerr << "[DEM] Auth failed " << fails << " times, backoff 30s" << std::endl;
+                backoffUntil_ = std::chrono::steady_clock::now() + 
+                                std::chrono::seconds(static_cast<int>(config_.authBackoffSec));
+                healthStatus_.store(DemHealthStatus::AuthFailed);
+                std::cerr << "[DEM] Auth failed " << fails << " times, backoff " 
+                          << config_.authBackoffSec << "s" << std::endl;
             }
         } else {
-            // Non-auth failure: add to TTL cache for retry after FAIL_RETRY_SEC
+            // Non-auth failure: add to TTL cache for retry
             std::lock_guard<std::mutex> lock(cacheMutex_);
             failedUntil_[key] = std::chrono::steady_clock::now() + 
-                                std::chrono::seconds(static_cast<int>(FAIL_RETRY_SEC));
+                                std::chrono::seconds(static_cast<int>(config_.failRetryDelaySec));
         }
         return false;
     }
@@ -355,7 +381,47 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
     // Success - reset auth fail counter
     consecutiveAuthFails_.store(0);
     
-    return ParseDemGrid(response, outData);
+    bool parsed = ParseDemGrid(response, outData);
+    if (parsed) {
+        stats_.parseSuccess++;
+    } else {
+        stats_.parseFail++;
+    }
+    return parsed;
+}
+
+DemHealthStatus DemManager::CheckHealth() {
+    std::cerr << "[DEM] Health check: " << config_.baseUrl << std::endl;
+    
+    // Use a known tile (z=1, x=1, y=0 = eastern hemisphere, north) as probe
+    TileKey probeKey(1, 1, 0);
+    DemGridData probeData;
+    
+    bool ok = FetchDem(probeKey, probeData);
+    
+    DemHealthStatus status;
+    if (ok && probeData.valid) {
+        status = DemHealthStatus::Healthy;
+        // Cache probe result so it's not wasted
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        auto now = std::chrono::steady_clock::now();
+        probeData.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+        cache_[probeKey] = std::move(probeData);
+        std::cerr << "[DEM] Health: OK (" << cache_[probeKey].heights.size() << " samples, "
+                  << "min=" << cache_[probeKey].minHeight << "m, max=" << cache_[probeKey].maxHeight << "m)" << std::endl;
+    } else if (stats_.fetchAuth.load() > 0) {
+        status = DemHealthStatus::AuthFailed;
+        std::cerr << "[DEM] Health: AUTH FAILED (401/403) - check Origin/Referer headers" << std::endl;
+    } else if (stats_.fetchFail.load() > 0) {
+        status = DemHealthStatus::Unreachable;
+        std::cerr << "[DEM] Health: UNREACHABLE - network/DNS/timeout error" << std::endl;
+    } else {
+        status = DemHealthStatus::BadResponse;
+        std::cerr << "[DEM] Health: BAD RESPONSE - 200 but data unparseable" << std::endl;
+    }
+    
+    healthStatus_.store(status);
+    return status;
 }
 
 bool DemManager::ParseDemGrid(const std::string& payload, DemGridData& outData) const {

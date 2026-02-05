@@ -34,6 +34,8 @@ int main(int argc, char** argv) {
             runVisualTest = true;
         } else if (std::strcmp(argv[i], "--demDebug") == 0) {
             config.demDebug = true;
+        } else if (std::strcmp(argv[i], "--gpu-terrain") == 0) {
+            config.terrainDisplacementMode = globe::DisplacementMode::GPU_HEIGHTMAP_DISPLACE;
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::cout << "Usage: native_globe [options]\n"
                       << "Options:\n"
@@ -47,6 +49,7 @@ int main(int argc, char** argv) {
                       << "  --width N         Window width\n"
                       << "  --height N        Window height\n"
                       << "  --test            Run visual LOD test\n"
+                      << "  --gpu-terrain     Use GPU heightmap displacement (default: CPU mesh bake)\n"
                       << "  --help            Show this help\n";
             return 0;
         }
