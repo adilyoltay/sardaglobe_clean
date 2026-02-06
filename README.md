@@ -1,10 +1,10 @@
 # Native Globe (Phase 1–3 MVP)
 
-## Proje Hedefi (Genel)
+## Proje Hedefi
 
-Bu doküman, `AGENTS.md` hedefleriyle uyumludur: **öncelik** `globe-web-html/libs/webglobe.js` API/behavior parity; **ikincil hedef** Google Earth benzeri core globe mimarisine (tile pyramid, SSE LOD, tile state machine, async elevation vb.) yakınsamaktır. Mimari dönüşümler parity'yi bozmadan ilerler.
+Google Earth kalitesinde bir native globe engine geliştirmek. Tek parity hedefi **Google Earth**'tür — davranış, mimari ve UX kararlarında. Detay için `AGENTS.md`.
 
-Minimal OpenGL globe demo with XYZ raster tiles and orbit/zoom controls.
+Native C++/OpenGL globe engine with XYZ raster tiles, terrain-aware navigation, and async DEM.
 
 ## Features (MVP)
 - OpenGL 3.3 core (Windows/Linux/macOS)
