@@ -101,6 +101,7 @@ class HorizonCuller {
 public:
     void Update(const glm::vec3& cameraPos, float globeRadius) {
         cameraPos_ = cameraPos;
+        globeRadius_ = globeRadius;
         cameraHeight_ = glm::length(cameraPos);
         
         // Horizon distance from camera
@@ -124,25 +125,43 @@ public:
     
     // Test if sphere is potentially visible (conservative)
     bool IsSphereVisible(const glm::vec3& center, float radius) const {
-        glm::vec3 toCenter = center - cameraPos_;
-        float dist = glm::length(toCenter);
-        if (dist < 0.001f) return true;
-        
-        // Angle to center
-        glm::vec3 dir = toCenter / dist;
-        glm::vec3 toCamCenter = -glm::normalize(cameraPos_);
-        float dot = glm::dot(dir, toCamCenter);
-        
-        // Add angular extent of sphere
-        float sphereAngle = std::asin(std::min(1.0f, radius / dist));
-        float horizonAngle = std::acos(std::clamp(horizonCosAngle_, -1.0f, 1.0f));
-        float pointAngle = std::acos(std::clamp(dot, -1.0f, 1.0f));
-        
-        return pointAngle - sphereAngle < horizonAngle + 0.1f;  // Small margin
+        // If camera is inside/on globe, disable horizon culling.
+        if (cameraHeight_ <= globeRadius_ + 0.001f) {
+            return true;
+        }
+
+        glm::vec3 toTarget = center - cameraPos_;
+        float targetDist = glm::length(toTarget);
+        if (targetDist < 0.001f) return true;
+
+        glm::vec3 dir = toTarget / targetDist;
+
+        // Intersect camera ray with globe sphere (origin-centered).
+        // If first hit is significantly before target's near boundary,
+        // target is occluded by globe horizon.
+        float b = glm::dot(cameraPos_, dir);
+        float c = glm::dot(cameraPos_, cameraPos_) - globeRadius_ * globeRadius_;
+        float disc = b * b - c;
+        if (disc <= 0.0f) {
+            return true;  // No globe hit along this ray => visible.
+        }
+
+        float sqrtDisc = std::sqrt(disc);
+        float t0 = -b - sqrtDisc;  // nearest intersection
+        float t1 = -b + sqrtDisc;
+        float tHit = (t0 > 0.0f) ? t0 : t1;
+        if (tHit <= 0.0f) {
+            return true;
+        }
+
+        // Conservative allowance for target radius and numeric noise.
+        float nearTarget = std::max(0.0f, targetDist - radius);
+        return tHit + 1e-3f >= nearTarget;
     }
 
 private:
     glm::vec3 cameraPos_{0.0f};
+    float globeRadius_ = 0.0f;
     float cameraHeight_ = 0.0f;
     float horizonDist_ = 0.0f;
     float horizonCosAngle_ = 1.0f;

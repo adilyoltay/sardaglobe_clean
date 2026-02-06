@@ -418,12 +418,18 @@ void GlobeEngine::Update(double dt, double currentTime) {
         // Use ranked list: closer/more-visible tiles get DEM first
         const auto& rankedRequired = tilePyramid_.GetRankedRequired();
         for (const auto& ranked : rankedRequired) {
-            demManager_->Request(ranked.key);
+            bool isLeaf = selection.leafSet.count(ranked.key) > 0;
+            int demPriority = isLeaf ? 2 : 1;
+            demManager_->Request(ranked.key, demPriority, ranked.score);
         }
         demManager_->Update();
         
-        // Queue DEM data for GPU heightmap texture upload (only in GPU displacement mode)
-        if (heightmapManager_ && config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) {
+        // Queue DEM data for GPU heightmap texture upload only when DEM endpoint is healthy.
+        // Otherwise mixed displaced/non-displaced tiles cause visible artifacts.
+        bool gpuDisplacementAllowed =
+            (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) &&
+            (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
+        if (heightmapManager_ && gpuDisplacementAllowed) {
             for (const TileKey& key : selection.required) {
                 if (demManager_->HasData(key) && !heightmapManager_->HasTexture(key)) {
                     DemGridData demData;
@@ -606,9 +612,12 @@ void GlobeEngine::Render() {
     // Draw tiles via RenderFrame (GE-style separation)
     double currentTime = glfwGetTime();
     uint32_t loadingTexture = textureManager_->GetLoadingTexture();
-    // Only pass heightmap manager when GPU displacement mode is active
+    // Only pass heightmap manager when GPU displacement mode is active and DEM is healthy.
+    // This avoids unstable rendering when DEM endpoint is unavailable/intermittent.
     HeightmapManager* hmForRender = nullptr;
-    if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) {
+    if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE &&
+        demManager_ &&
+        demManager_->GetHealthStatus() == DemHealthStatus::Healthy) {
         hmForRender = heightmapManager_.get();
     }
     auto drawStats = renderFrame_->DrawTiles(
@@ -707,7 +716,7 @@ bool GlobeEngine::PickGlobe(double screenX, double screenY, glm::dvec3& outPoint
     
     outPoint = rayOrigin + t * rayDir;
     
-    // Step 2: Terrain refinement (if DEM available and in CPU_MESH_BAKE mode)
+    // Step 2: Terrain refinement (if DEM available)
     if (demManager_ && config_.demEnabled) {
         // Convert hit point to lat/lon
         glm::dvec3 hitNorm = glm::normalize(outPoint);
@@ -719,10 +728,19 @@ bool GlobeEngine::PickGlobe(double screenX, double screenY, glm::dvec3& outPoint
         camera_->GetLatLonAlt(camLat, camLon, camAlt);
         int sampleLevel = std::clamp(static_cast<int>(std::log2(40000000.0 / std::max(1.0, camAlt))), 1, 12);
         
+        auto sampleWithParentFallback = [&](double sLon, double sLat, int startLevel, double& outHeightMeters) {
+            for (int level = startLevel; level >= 0; --level) {
+                if (demManager_->SampleHeight(sLon, sLat, level, outHeightMeters)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         // Iterative refinement (2 passes for convergence)
         for (int iter = 0; iter < 2; ++iter) {
             double heightMeters = 0.0;
-            if (demManager_->SampleHeight(lon, lat, sampleLevel, heightMeters)) {
+            if (sampleWithParentFallback(lon, lat, sampleLevel, heightMeters)) {
                 double heightKm = heightMeters * 0.001 * config_.demHeightScale;
                 double terrainR = R + heightKm;
                 
@@ -997,6 +1015,12 @@ void GlobeEngine::RenderDebugPanel() {
             int currentMode = static_cast<int>(config_.terrainDisplacementMode);
             if (ImGui::Combo("Terrain Mode", &currentMode, modeNames, 2)) {
                 config_.terrainDisplacementMode = static_cast<DisplacementMode>(currentMode);
+            }
+            if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE &&
+                demManager_ &&
+                demManager_->GetHealthStatus() != DemHealthStatus::Healthy) {
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                    "GPU terrain gecici devre disi (DEM sagliksiz)");
             }
             
             // DEM Telemetry

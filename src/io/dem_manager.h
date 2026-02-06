@@ -12,6 +12,7 @@
 #include <atomic>
 #include <unordered_set>
 #include <chrono>
+#include <cstdint>
 
 namespace globe {
 
@@ -110,7 +111,8 @@ public:
     const DemStats& GetStats() const { return stats_; }
     
     // Request DEM data for a tile
-    void Request(const TileKey& key);
+    // priority: 0=low, 1=normal, 2=urgent. score: higher = sooner.
+    void Request(const TileKey& key, int priority = 1, double score = 0.0);
     
     // Check if DEM data is available for a tile
     bool HasData(const TileKey& key) const;
@@ -141,8 +143,29 @@ private:
     mutable std::mutex cacheMutex_;
     std::unordered_map<TileKey, DemGridData> cache_;
     
-    // Request queue
-    std::queue<TileKey> requestQueue_;
+    struct DemRequest {
+        TileKey key;
+        int priority = 1;
+        double score = 0.0;
+        uint64_t seq = 0;  // Monotonic sequence for deterministic tie-break
+    };
+
+    struct PendingRank {
+        int priority = 1;
+        double score = 0.0;
+        uint64_t seq = 0;
+    };
+
+    struct DemRequestCompare {
+        bool operator()(const DemRequest& a, const DemRequest& b) const {
+            if (a.priority != b.priority) return a.priority < b.priority;
+            if (a.score != b.score) return a.score < b.score;
+            return a.seq > b.seq;  // Earlier request first when rank ties
+        }
+    };
+
+    // Priority queue with lazy stale-entry skipping.
+    std::priority_queue<DemRequest, std::vector<DemRequest>, DemRequestCompare> requestQueue_;
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
     
@@ -151,8 +174,9 @@ private:
     std::atomic<bool> running_{true};
     std::atomic<int> pendingCount_{0};
     
-    // Pending/in-flight dedupe
-    std::unordered_set<TileKey> pendingSet_;
+    // Pending/in-flight dedupe + rank upgrades
+    std::unordered_map<TileKey, PendingRank> pendingRanks_;
+    uint64_t requestSeq_ = 0;
     
     // Failed tile tracking with TTL (retry after timeout)
     std::unordered_map<TileKey, std::chrono::steady_clock::time_point> failedUntil_;  // TTL cache

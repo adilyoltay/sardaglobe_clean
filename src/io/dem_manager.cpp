@@ -66,7 +66,7 @@ void DemManager::Shutdown() {
     workers_.clear();
 }
 
-void DemManager::Request(const TileKey& key) {
+void DemManager::Request(const TileKey& key, int priority, double score) {
     // Auth backoff check - skip all DEM requests during backoff period
     if (authBackoff_.load()) {
         auto now = std::chrono::steady_clock::now();
@@ -95,15 +95,28 @@ void DemManager::Request(const TileKey& key) {
         }
     }
     
-    // Pending/in-flight dedupe
+    priority = std::clamp(priority, 0, 2);
+
+    // Pending/in-flight dedupe with priority/score upgrade
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        if (pendingSet_.count(key) > 0) {
-            return;  // Already pending
+        auto it = pendingRanks_.find(key);
+        if (it != pendingRanks_.end()) {
+            bool better = (priority > it->second.priority) ||
+                          (priority == it->second.priority && score > it->second.score);
+            if (!better) {
+                return;  // Already pending with equal/better rank
+            }
         }
-        pendingSet_.insert(key);
-        requestQueue_.push(key);
-        pendingCount_++;
+        PendingRank rank;
+        rank.priority = priority;
+        rank.score = score;
+        rank.seq = ++requestSeq_;
+        requestQueue_.push(DemRequest{key, rank.priority, rank.score, rank.seq});
+        if (it == pendingRanks_.end()) {
+            pendingCount_++;
+        }
+        pendingRanks_[key] = rank;
     }
     queueCv_.notify_one();
 }
@@ -224,9 +237,32 @@ void DemManager::WorkerLoop() {
             
             if (!running_) break;
             if (requestQueue_.empty()) continue;
-            
-            key = requestQueue_.front();
-            requestQueue_.pop();
+
+            bool found = false;
+            while (!requestQueue_.empty()) {
+                DemRequest req = requestQueue_.top();
+                requestQueue_.pop();
+
+                auto it = pendingRanks_.find(req.key);
+                if (it == pendingRanks_.end()) {
+                    continue;  // Already processed
+                }
+
+                // Skip stale queued entries after rank upgrade.
+                if (it->second.seq != req.seq) {
+                    continue;
+                }
+
+                key = req.key;
+                pendingRanks_.erase(it);
+                pendingCount_--;
+                found = true;
+                break;
+            }
+
+            if (!found) {
+                continue;
+            }
         }
         
         // Fetch DEM data
@@ -240,12 +276,6 @@ void DemManager::WorkerLoop() {
             cache_[key] = std::move(data);
         }
         
-        // Remove from pending set (dedupe cleanup)
-        {
-            std::lock_guard<std::mutex> lock(queueMutex_);
-            pendingSet_.erase(key);
-        }
-        pendingCount_--;
     }
 }
 

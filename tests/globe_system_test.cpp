@@ -583,7 +583,8 @@ void TestGISCoordinates() {
         {"London", -0.1, 51.5, 4, 7, 5},
         {"New York", -74.0, 40.7, 4, 4, 6},
         {"Tokyo", 139.7, 35.7, 4, 14, 6},
-        {"Sydney", 151.2, -33.9, 4, 15, 9},
+        // Web Mercator tile formula floors to x=14 at z=4 for 151.2E.
+        {"Sydney", 151.2, -33.9, 4, 14, 9},
     };
     
     for (const auto& city : cities) {
@@ -697,8 +698,11 @@ void TestSystemIntegration() {
         LodSelector::Settings settings;
         settings.minZoom = 0;
         settings.maxZoom = 6;
+        settings.sseThreshold = 0.00001f;  // Force deep traversal for fallback verification
+        settings.disableFrustumCull = true;   // Isolate LOD fallback logic from view culling
+        settings.disableHorizonCull = true;
         
-        glm::vec3 cameraPos(0, 0, EARTH_RADIUS_KM + 5000);
+        glm::vec3 cameraPos(0, 0, EARTH_RADIUS_KM + 1200);
         glm::mat4 mvp(1.0f);
         mvp[1][1] = 2.0f;
         
@@ -707,18 +711,31 @@ void TestSystemIntegration() {
         
         LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
         
-        // Should have leaves at level 3 (fallback) and required at higher levels
+        // Contract: when children are not ready, selector must keep at least one
+        // ready fallback leaf and still request non-ready descendants.
         bool hasFallback = false;
         bool hasHigherRequired = false;
+        int minLeafLevel = 999;
+        int maxLeafLevel = -1;
+        int minReqLevel = 999;
+        int maxReqLevel = -1;
         for (const auto& leaf : selection.leaves) {
-            if (leaf.level == 3) hasFallback = true;
+            minLeafLevel = std::min(minLeafLevel, leaf.level);
+            maxLeafLevel = std::max(maxLeafLevel, leaf.level);
+            if (isReady(leaf)) hasFallback = true;
         }
         for (const auto& req : selection.required) {
-            if (req.level > 3) hasHigherRequired = true;
+            minReqLevel = std::min(minReqLevel, req.level);
+            maxReqLevel = std::max(maxReqLevel, req.level);
+            if (!isReady(req)) hasHigherRequired = true;
         }
+        std::string diag = "leafCount=" + std::to_string(selection.leaves.size()) +
+                           " reqCount=" + std::to_string(selection.required.size()) +
+                           " leafMinMax=" + std::to_string(minLeafLevel) + "/" + std::to_string(maxLeafLevel) +
+                           " reqMinMax=" + std::to_string(minReqLevel) + "/" + std::to_string(maxReqLevel);
         
-        runner.AddResult("LOD fallback when children not ready", hasFallback);
-        runner.AddResult("Higher LOD tiles in required set", hasHigherRequired);
+        runner.AddResult("LOD fallback when children not ready", hasFallback, hasFallback ? "" : diag);
+        runner.AddResult("Higher LOD tiles in required set", hasHigherRequired, hasHigherRequired ? "" : diag);
     }
     
     // Test 10.3: Memory estimation
