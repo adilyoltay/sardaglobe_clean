@@ -5,17 +5,15 @@ Her faz tamamlandığında `docs/API_PORT_REVIEW_PROMPT.md` içindeki **Faz Tama
 ve **Güncel Durum Snapshot** bölümleri güncellenmelidir.
 
 ## Ana Master Kural
-**Temel hedef (ikili):**
-1) **API/Behavior parity:** `globe-web-html/libs/webglobe.js` davranışları ve API yüzeyiyle **tam parity** sağlamak.  
-2) **Core mimari hedef:** Google Earth benzeri bir çekirdek globe mimarisine (tile pyramid, SSE LOD, tile state machine, async elevation, vb.) **yakınsamak**.
+**Tek parity hedefi: Google Earth**
 
-> Çatışma olursa **API/behavior parity önceliklidir**, mimari dönüşüm parity’yi bozmayacak şekilde yapılır.
+Amacımız Google Earth kalitesinde bir globe engine geliştirmektir. Tüm davranış, mimari ve UX kararlarında **tek referans Google Earth**'tür:
 
-> **NOT:** 2026-01-29 itibariyle ana referans `webglobe/main.js` yerine `globe-web-html/libs/webglobe.js` olarak değiştirilmiştir.
+1) **Davranış parity:** Navigasyon (pan, orbit, zoom, tilt), tile yükleme, terrain rendering, LOD geçişleri — hepsi Google Earth referanslıdır.
+2) **Mimari parity:** Tile pyramid, SSE LOD, tile state machine, async elevation, 3-aşamalı frame pipeline, worker-based decode/mesh — Google Earth WASM RE bulgularına dayanır.
+3) **UX parity:** Smooth animasyonlar, pop-free tile geçişleri, terrain-aware kamera — Google Earth deneyimi hedeflenir.
 
-## Navigasyon Parity Kuralı (İstisna)
-Navigasyon davranışlarında (mouse/keyboard pan-orbit-zoom-tilt) **JS yerine Google Earth parity** esas alınacaktır.  
-JS ile çelişki varsa, **navigasyon için Google Earth davranışı önceliklidir**.
+> **NOT:** `globe-web-html/libs/webglobe.js` artık parity hedefi değildir. Sadece mevcut API yüzeyinin anlaşılması için legacy kod referansı olarak kullanılabilir.
 
 ## Dokümanlar (Consolidate edilmiş — 2026-02-06)
 
@@ -29,15 +27,18 @@ JS ile çelişki varsa, **navigasyon için Google Earth davranışı önceliklid
 
 ### Genel
 - `README.md` — Proje genel açıklaması (build/run notları)
+
+## Kaynak Referansları
+
+### Birincil Referans (Parity Hedefi)
+- `google_earth/` — **ANA REFERANS** — WASM, WAT, reconstructed headers, string dumps
+- `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` — WASM RE bulguları (tile, DEM, render, threading, cache)
+- `docs/GOOGLE_EARTH_MOUSE_NAVIGATION_ANALYSIS.md` — Navigasyon RE (kamera, orbit, zoom, momentum)
+
+### Legacy Kod Referansı (Sadece API yüzeyi için)
+- `globe-web-html/libs/webglobe.js` — Eski JS kaynak (minified, 2.2MB) — parity hedefi DEĞİL
+- `webglobe_deobfuscated_v2/**` — Deobfuscate edilmiş JS kaynak
 - `webglobe_api_docs/` — WebKüre API modüler dokümantasyon
-
-## Kaynak Referansları (Güncel)
-- `globe-web-html/libs/webglobe.js` — **ANA JS KAYNAK** (minified, 2.2MB), davranış parity referansı.
-- `webglobe_deobfuscated_v2/**` — **Güncel** deobfuscate edilmiş JS kaynak (webglobe.js'den).
-- `webglobe_deobfuscated_v2/webglobe_beautified.js` — Beautified tam kaynak (67,818 satır).
-
-## Google Earth Tersine Mühendislik Referansları (Mimari Hedef)
-- `google_earth/` — Kaynak dizin (WASM, WAT, reconstructed headers)
 
 ## Mimari Uyum İçin Öncelikli Yapılar:
 - TileKey (QuadKey, Parent/Child/Neighbor navigation)

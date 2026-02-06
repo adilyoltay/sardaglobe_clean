@@ -1299,9 +1299,8 @@ geo/earth/builtenv/lib/geometry/geometry_utils.cc     ← Geometry utils
 ### Ana Kural
 
 Bu plan `AGENTS.md` kurallarına bağlıdır:
-1. **API/Behavior parity önceliklidir** (`globe-web-html/libs/webglobe.js` referansı).
-2. **Navigasyon davranışında Google Earth parity önceliklidir** (tilt/orbit/pan/zoom).
-3. Mimari iyileştirmeler parity'yi bozmayacak şekilde ilerler.
+1. **Tek parity hedefi Google Earth'tür** — tüm davranış, mimari ve UX kararlarında.
+2. Mimari iyileştirmeler parity'yi bozmayacak şekilde ilerler.
 
 ---
 

@@ -7,13 +7,13 @@ description: SardaGlobe quality gates ve check listesi
 Her değişiklik öncesi ve sonrası kontrol edilecek kalite kapıları.
 
 ## 1. Parity Check
-- [ ] Davranış `globe-web-html/libs/webglobe.js` ile eşleşiyor
-- [ ] Navigation exception kapsamındaysa Google Earth davranışı esas
+- [ ] Davranış Google Earth referansıyla eşleşiyor (tek parity hedefi)
+- [ ] GE WASM RE dokümanları kontrol edildi (`docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md`)
 
 ## 2. LOD ve SSE Sanity
 - [ ] LOD selection distance ile monotonic
 - [ ] Küçük kamera değişikliklerinde stabil
-- [ ] SSE thresholds, tilt factor, activation constants JS ile uyumlu
+- [ ] SSE thresholds, tilt factor, activation constants Google Earth RE ile uyumlu
 
 ## 3. Tile State Machine
 - [ ] State transitions valid

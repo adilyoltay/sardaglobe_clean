@@ -15,23 +15,22 @@ Build a **Google Earth-class globe engine** that is:
 
 ## Core Principles
 
-1. **Parity first** — Match `globe-web-html/libs/webglobe.js` API/behavior before optimizing.
-2. **Navigation exception** — Mouse/keyboard follows Google Earth feel, not JS.
-3. **Minimal changes** — Small, tested patches over rewrites.
-4. **Always shippable** — Every commit should be production-ready.
+1. **Google Earth parity** — All behavior, architecture, and UX targets Google Earth as the sole reference.
+2. **Minimal changes** — Small, tested patches over rewrites.
+3. **Always shippable** — Every commit should be production-ready.
 
 ## Quick Reference
 
-| Area | Source | C++ Location |
-|------|--------|--------------|
-| API behavior | `globe-web-html/libs/webglobe.js` | `src/api/` |
-| Navigation | Google Earth (reversed) | `src/camera/` |
-| Tile/LOD | `webglobe_deobfuscated_v2/` | `src/core/`, `src/engine/` |
-| Rendering | Parity + perf | `src/rendering/` |
+| Area | Reference | C++ Location |
+|------|-----------|--------------|
+| Navigation | Google Earth WASM RE | `src/camera/` |
+| Tile/LOD | Google Earth WASM RE | `src/core/`, `src/engine/` |
+| Rendering | Google Earth WASM RE | `src/rendering/` |
+| API surface | Legacy `webglobe.js` (not parity target) | `src/api/` |
 
 ## Workflow
 
-1. **Understand** — Check JS behavior or Google Earth for navigation.
+1. **Understand** — Check Google Earth behavior via WASM RE docs.
 2. **Implement** — Minimal C++ change in the right subsystem.
 3. **Test** — Run existing tests, add if needed.
 4. **Document** — Update `docs/API_PORT_REVIEW_PROMPT.md` on phase completion.
