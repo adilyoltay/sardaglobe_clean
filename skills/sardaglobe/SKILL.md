@@ -38,6 +38,8 @@ Build a **Google Earth-class globe engine** that is:
 
 ## Key Docs
 
-- `AGENTS.md` — Project index and rules
-- `docs/API_PORT_REVIEW_PROMPT.md` — Phase tracking
-- `docs/GOOGLE_EARTH_INTEGRATION_REPORT.md` — Reverse-engineered insights
+- `AGENTS.md` — Project index, rules, and document navigation
+- `docs/API_PORT_REVIEW_PROMPT.md` — API parity checklist and phase tracking
+- `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` — **Main technical reference** (3 parts: GE WASM RE + 3D Terrain Plan + Tile Pipeline Optimization)
+- `docs/GOOGLE_EARTH_MOUSE_NAVIGATION_ANALYSIS.md` — GE navigation RE (camera, orbit, zoom, momentum)
+- `docs/MASTER_DEVELOPMENT_PLAN.md` — 7-phase development roadmap with refactoring status

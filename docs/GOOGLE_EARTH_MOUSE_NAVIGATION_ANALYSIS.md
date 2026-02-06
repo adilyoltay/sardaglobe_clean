@@ -1,10 +1,11 @@
 # Google Earth Mouse Navigation Entegrasyonu - Detaylı Analiz
 
 ### Proje Bilgisi
-- **Tarih:** 2026-02-01 (Güncelleme: 2026-02-03)
+- **Tarih:** 2026-02-01 (Güncelleme: 2026-02-06, Binary Ground-Truth)
 - **Kaynak Analiz:** Google Earth WASM/WAT reverse engineering (v10.96.0.1)
 - **Hedef:** native_globe uygulamasına Google Earth tarzı mouse navigasyon
-- **RE Kaynaklar:** `earthplugin_web.wasm` (19MB), `earthplugin_web.js` (257KB)
+- **RE Kaynaklar:** `earthplugin_web.wasm` (19.16MB, 42,751 internal function + 384 import + 49 export), `earthplugin_web.js` (258KB)
+- **Ana Referans:** `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` (Mirth engine tam analiz)
 
 ---
 
@@ -102,16 +103,186 @@ CameraManager::SetCameraToInternal()
 CameraManager::OnPanoChanged()
 ```
 
+### 2026-02-06 Binary Ground-Truth Özeti
+
+Bu başlık, navigasyonla doğrudan ilgili iddiaların binary seviyesinde doğrulanmış halini özetler:
+
+| Konu | Binary/WASM Kanıtı | Navigasyon Etkisi |
+|------|---------------------|-------------------|
+| Entry path | `export "kg" -> func 32863`, JS wrapper: `_main = wasmExports["kg"]` | Kamera güncellemesi frame ana döngüsüne bağlı |
+| Main loop | `ma:_emscripten_set_main_loop`, `la:_emscripten_set_main_loop_arg` importları | Input + kamera + render sürekli döngüde eşzamanlı |
+| Frame telemetri | `DoFrameCallCount`, `InterFrameTime`, `LastDoFrameTime`, `InstanceImpl::DoFrameThreadTime`, `InstanceImpl::BuildNextSceneTime` | Navigasyon jitter/jank metrikleri ölçülebilir |
+| On-demand frame | `RequestNewFrame(reason = %d, file = %s, line = %d)` | Mouse hareketi/animasyon sırasında frame tetikleme |
+| Threading | JS worker `cmd="load"`, `cmd="run"`, `ENVIRONMENT_IS_PTHREAD`; string: `Tile decoder thread creation failed` | Input thread + loader thread ayrımı davranışı etkiler |
+| Memory modeli | `memory[0] pages: initial=8192 max=32768 shared` | Pthread + paylaşımlı veri yapıları ile düşük gecikmeli etkileşim |
+
+---
+
+## Mirth Engine Camera Mimarisi (2026-02-06 WASM RE)
+
+> Aşağıdaki bulgular `GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` çalışmasından elde edilmiştir.
+
+### Kaynak Dosya Yapısı (Mirth Engine)
+
+```
+geo/render/mirth/
+├── camera/
+│   ├── camerasourcefactoryimpl.cc    ← Camera source factory
+│   ├── camerautilsimpl.cc            ← Camera utility fonksiyonları
+│   └── cameramanipulators/
+│       └── photocameramanipulatorimpl.cc ← Photo/StreetView kamera
+├── mirthview/
+│   ├── instanceimpl.cc               ← DoFrame (kamera update tetikler)
+│   └── viewimpl.cc                   ← View yönetimi
+└── photo/
+    ├── photoframehandler.cc          ← StreetView frame handler
+    └── fader.cc                      ← Geçiş animasyonları
+
+geo/earth/app/cpp/core/camera/
+├── cameramanager.cc               ← Ana kamera yöneticisi
+├── earthrendercamera.cc           ← Render kamera hesabı
+└── cameraviewobserver.cc          ← Kamera değişiklik gözlemcisi
+```
+
+### Frame Loop İçinde Kamera Güncelleme Akışı
+
+Kamera, frame döngüsünün en başında (DoFrame_thread içinde) güncellenir:
+
+```
+InstanceImpl::DoFrame()
+└── DoFrame_thread (ayrı thread)
+    ├── Camera::Update()
+    │   ├── CameraManager update
+    │   ├── MapCameraManipulatorHandler input işle
+    │   └── SetTraversalCamera() ← Quadtree traversal kamerasi ayarla
+    │
+    ├── RunLoaders [delayed] ...
+    └── FinishMerge() ...
+```
+
+**Önemli:** Kamera değişikliği hemen traversal kameraya aktarılır (`SetTraversalCamera`). Bu, tile LOD seçiminin her zaman güncel kamerayla yapıldığını garanti eder.
+
+**Ek binary kanıt (telemetry string'leri):**
+```cpp
+// "DoFrameCallCount"
+// "InterFrameTime"
+// "LastDoFrameTime"
+// "InstanceImpl::DoFrameThreadTime"
+// "InstanceImpl::BuildNextSceneTime"
+// "BuildNextScene(build_frame = %d)"
+```
+
+### Traversal Uzayları ve Navigasyon Etkisi (Yeni)
+
+WASM symbol/string bulguları iki farklı traversal uzayının birlikte kullanıldığını gösteriyor:
+
+```cpp
+// Mercator tile tarafı:
+// "webMercatorQuadtree"
+// N5mirth3map16MercTileDatabaseE
+// N5mirth4tree8PathNodeINS_7geodesy12MercTreePathENS_3map10VectorNodeEEE
+
+// Globe/rock/earth tarafı:
+// N5mirth4tree12PathDataTreeINS_7geodesy11TriTreePathEEE
+// N5mirth4tree8PathTreeINS_7geodesy11TriTreePathENS0_12PathDataNodeIS3_EEEE
+// N5mirth4tree15TraversalOutputE
+// N5mirth4tree7LodInfoE
+```
+
+**Navigasyon yorumu:** Mouse pick/orbit hedefi küresel tarafta (`TriTreePath`) hesaplanırken, harita tabanlı layer'lar Mercator uzayında (`MercTreePath`) kalabiliyor. Bu yüzden GE hissi için pivot seçimi terrain/globe koordinatında tutulmalı, layer pick sonuçları doğrudan pivot'a dönüştürülmemeli.
+
+### RequestNewFrame Mekanizması
+
+Google Earth "dirty flag" değil, **on-demand render** kullanır:
+
+```cpp
+// "RequestNewFrame(reason = %d, file = %s, line = %d)"
+// Sadece değişiklik olduğunda yeni frame talep edilir:
+// - Kamera hareketi
+// - Tile yüklenmesi tamamlandı
+// - Animasyon devam ediyor
+// - UI değişikliği
+```
+
+Bu, idle durumda GPU yükünü sıfırlar.
+
+### Terrain-Aware Navigasyon (Raycast & Elevation)
+
+GE'de navigasyon terrain-aware çalışır. Orbit pivot, zoom target ve pan anchor terrain yüksekliğini kullanır:
+
+```cpp
+// Raycast API (WASM string'lerinden):
+// "Raycast(world_ray = %p, elevation_type = %d, point_lla = %p)"
+//
+// Senkron elevation sorgusu:
+// "GetTerrainElevation(latitude = %f, longitude = %f, elevation_type = %d)"
+//
+// Asenkron yüksek doğruluklu sorgu:
+// "GetAccurateTerrainElevation(latitude = %f, longitude = %f,
+//    desired_accuracy_meters = %f, elevation_type = %d, callback = ...)"
+//
+// Sorgu iptali:
+// "CancelAccurateTerrainElevationQuery(id = %u)"
+```
+
+**Yeni doğrulanan DEM zinciri (protobuf/future):**
+```cpp
+// N5earth10elevations26RefinedElevationsRequesterE
+// RefinedElevationsRequester::FetchRefinedElevations(...)
+// google.internal.earth.v1.terrain.BatchGetElevationsByPointRequest
+// google.internal.earth.v1.terrain.BatchGetElevationsByPointResponse
+// google.internal.earth.v1.LatitudeLongitude
+```
+
+Bu zincir, navigasyon sırasında kullanılan terrain yüksekliğinin tek-point değil batch/refined akıştan geldiğini gösterir; dolayısıyla orbit pivot kararlılığı için `GetTerrainElevation` fallback'i yanında async refined sonucu geldiğinde pivotu yumuşak düzeltmek gerekir.
+
+**Ground Elevation Metrikleri:**
+```
+GROUND_ELEVATION_METRICS_ENABLED   ← feature flag
+lookatTerrainAlt                   ← LookAt noktasındaki terrain yüksekliği
+lookatTerrainLat                   ← LookAt terrain latitude
+lookatTerrainLon                   ← LookAt terrain longitude
+[terrainEnabled]                   ← terrain aktif mi
+```
+
+> Bu metrikler kamera davranışını terrain'e bağlar: orbit pivot'u, min altitude'u ve tilt limitini terrain yüksekliğine göre ayarlar.
+
+### Camera Source Tipleri (FlyTo Animasyonları)
+
+WASM'dan çıkarılan tüm kamera source'ları (animasyon türleri):
+
+| Source | Açıklama | Kullanım |
+|---|---|---|
+| `FiniteCameraSource` | Süreli animasyon (A→B) | FlyTo |
+| `BlendCameraSource` | İki kamera kaynağı blend | Geçişler |
+| `LinearFlyCameraSource` | Doğrusal uçuş | Yakın FlyTo |
+| `ParabolicFlyCameraSource` | Parabolik yay uçuşu | Uzak FlyTo |
+| `BalloonFlyCameraSource` | Balon stili yükselme + uçuş | Feature FlyTo |
+| `PoiOrbitCameraSource` | POI etrafında orbit | 3D bina orbit |
+| `PlanetOrbitCameraSource` | Gezegen orbit | Globe orbit |
+
+### Camera Interpolasyon Sistemi (Genişletilmiş)
+
+```
+mirth::SplineInterpolator<GeoCameraParameters>    ← Geo-parametrik spline
+mirth::SplineInterpolator<GeoLookAtParameters>    ← LookAt-parametrik spline
+mirth::kmlimpl::CameraLinearInterpolator           ← Doğrusal interpolasyon
+mirth::kmlimpl::CameraSplineInterpolator           ← Spline interpolasyon
+mirth::kmlimpl::CameraBounceInterpolator           ← Bounce efekti (zoom-out-in)
+```
+
+**Bounce interpolator** özellikle uzak FlyTo'larda "yüksel → uç → in" efekti verir.
+
 ---
 
 ### Faz Özeti
 
-| Faz | Özellik | Dosya | Satır |
-|-----|---------|-------|-------|
-| **1** | Pan (Grab Earth) | [flight_controller.cpp](cci:7://file:///Users/adilyoltay/Desktop/sardaglobe/src/flight_controller.cpp:0:0-0:0) | 268-340 |
-| **2** | Orbit Mode | [flight_controller.cpp](cci:7://file:///Users/adilyoltay/Desktop/sardaglobe/src/flight_controller.cpp:0:0-0:0) | 343-382 |
-| **3** | Zoom to Cursor | [flight_controller.cpp](cci:7://file:///Users/adilyoltay/Desktop/sardaglobe/src/flight_controller.cpp:0:0-0:0) | 390-459, 712-766 |
-| **4** | Shift+Scroll Tilt | [flight_controller.cpp](cci:7://file:///Users/adilyoltay/Desktop/sardaglobe/src/flight_controller.cpp:0:0-0:0) | 394-401 |
+| Faz | Özellik | Dosya |
+|-----|---------|-------|
+| **1** | Pan (Grab Earth) | `src/camera/flight_controller.cpp` |
+| **2** | Orbit Mode | `src/camera/flight_controller.cpp` |
+| **3** | Zoom to Cursor | `src/camera/flight_controller.cpp` |
+| **4** | Shift+Scroll Tilt | `src/camera/flight_controller.cpp` |
 
 ---
 
@@ -277,8 +448,8 @@ Google Earth'te navigasyon (Orbit/Tilt) başladığında, pivot noktasında beli
 
 | Dosya | Eklenen/Değiştirilen |
 |-------|-----------------------|
-| [flight_controller.h](cci:7://file:///Users/adilyoltay/Desktop/sardaglobe/src/flight_controller.h:0:0-0:0) | 4 yeni member variable |
-| [flight_controller.cpp](cci:7://file:///Users/adilyoltay/Desktop/sardaglobe/src/flight_controller.cpp:0:0-0:0) | ~150 satır güncelleme |
+| `src/camera/flight_controller.h` | 4 yeni member variable |
+| `src/camera/flight_controller.cpp` | ~150 satır güncelleme |
 
 **Header Değişiklikleri:**
 ```cpp
@@ -306,30 +477,44 @@ bool m_hasZoomPoint = false;          // Faz 3
 
 ### Google Earth Parity Durumu
 
-| Özellik | Önce | Şimdi |
-|---------|------|-------|
-| Pan (Grab Earth) | ⚠️ Arcball | ✅ Great Circle |
-| Orbit Mode | ❌ | ✅ Shift+Drag |
-| Zoom to Cursor | ⚠️ Partial | ✅ Point-stable |
-| Shift+Scroll Tilt | ❌ | ✅ |
-| Momentum/Inertia | ⚠️ Basic | ✅ Friction-based |
-| Pivot Target Icon | ❌ | ✅ Constant Pixel Size |
+| Özellik | Önce | Şimdi | GE Referans |
+|---------|------|-------|-------------|
+| Pan (Grab Earth) | ⚠️ Arcball | ✅ Great Circle | `RotationThrowAnimation` |
+| Orbit Mode | ❌ | ✅ Shift+Drag | `OrbitAction` |
+| Zoom to Cursor | ⚠️ Partial | ✅ Point-stable | `FovZoomAction` |
+| Shift+Scroll Tilt | ❌ | ✅ | `RotateTiltAnimation` |
+| Momentum/Inertia | ⚠️ Basic | ✅ Friction-based | `DampedVelocityAction` |
+| Pivot Target Icon | ❌ | ✅ Constant Pixel Size | `OrbitLocation` |
+| Terrain-Aware Pick | ⚠️ Sphere | ⚠️ Parent fallback | `Raycast()` + `GetTerrainElevation()` |
+| On-Demand Render | ❌ | ❌ | `RequestNewFrame()` |
+| FlyTo Bounce | ⚠️ Linear | ⚠️ Linear | `ParabolicFlyCameraSource` |
 
-**Entegrasyon tamamlandı.** 🎉
+**Temel navigasyon entegrasyonu tamamlandı.** 🎉  
+**Sonraki adımlar:** Terrain-aware picking iyileştirme, on-demand render, FlyTo parabolik animasyon.
 
 ---
 
 ## Ek: Google Earth WASM Detaylı Teknik Bulgular
 
-### Kaynak Dosya Yolları (WASM'dan Çıkarılan)
+### Kaynak Dosya Yolları (WASM'dan Çıkarılan — Tam Liste)
 
 ```
+# Earth core camera
 geo/earth/app/cpp/core/camera/cameramanager.cc
 geo/earth/app/cpp/core/camera/earthrendercamera.cc
 geo/earth/app/cpp/core/camera/cameraviewobserver.cc
+
+# Mirth engine camera
 geo/render/mirth/camera/camerasourcefactoryimpl.cc
 geo/render/mirth/camera/camerautilsimpl.cc
 geo/render/mirth/camera/cameramanipulators/photocameramanipulatorimpl.cc
+
+# Frame loop (kamera tetikleyen)
+geo/render/mirth/mirthview/instanceimpl.cc       ← DoFrame, BuildNextScene
+geo/render/mirth/mirthview/viewimpl.cc            ← View yönetimi
+
+# Elevation (terrain-aware nav için)
+geo/earth/app/cpp/core/refinedelevationsrequester/refinedelevationsrequester.cc
 ```
 
 ### Tam Camera Sınıf Hiyerarşisi
@@ -448,10 +633,15 @@ StreetViewViewModel::PanAnimation::PanViewInOneFrame
 StreetViewImpl::LoadPanoJob
 ```
 
-### Analiz Dosyaları
+### Analiz Dosyaları ve Referanslar
 
-Detaylı analiz çıktıları:
-- **WAT Disassembly:** `/Users/adilyoltay/Desktop/google_earth/analysis/wat/earthplugin_web.wat` (176MB)
-- **Decompiled:** `/Users/adilyoltay/Desktop/google_earth/analysis/decompiled/earthplugin_web.dcmp` (57MB, 43,815 fonksiyon)
-- **Semboller:** `/Users/adilyoltay/Desktop/google_earth/analysis/symbols/`
-- **Analiz Raporu:** `/Users/adilyoltay/Desktop/google_earth/analysis/ANALYSIS_REPORT.md`
+**Proje içi:**
+- `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` — **Ana GE referans** (tile/DEM/render/mirth engine, 2026-02-06)
+- `google_earth/reconstructed_headers/camera_view.h` — Camera, PerspectiveCamera, View, PrefetchView
+- `google_earth/reconstructed_headers/rendering_system.h` — Renderer, Shader, RenderState
+- `google_earth/DEEP_REVERSE_ENGINEERING.md` — WASM binary analizi
+
+**Ham analiz çıktıları:**
+- `google_earth/wasm_files/earthplugin_web.wasm` — Binary (19.16MB)
+- `google_earth/wasm_files/earthplugin_web.wat` — WAT disassembly (175MB)
+- `google_earth/wasm_files/all_strings.txt` — Extracted strings (165K)
