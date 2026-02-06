@@ -1802,22 +1802,10 @@ P0 (Telemetri) → P1 (Fetch/Cache) → P2 (Priority) ─┐
 
 ---
 
-## Faz Tamamlama Protokolü
-
-Her faz (Terrain veya Pipeline) tamamlandığında:
-1. `docs/API_PORT_REVIEW_PROMPT.md` → Faz Tamamlama Günlüğü güncellenir
-2. `docs/API_PORT_REVIEW_PROMPT.md` → Güncel Durum Snapshot güncellenir
-3. İlgili test senaryoları çalıştırılır
-
-Bu gereklilik `AGENTS.md` ile uyumludur.
-
----
-
 ## Referanslar
 
 - `AGENTS.md` — Ana kural seti ve doküman indeksi
 - `docs/GOOGLE_EARTH_MOUSE_NAVIGATION_ANALYSIS.md` — GE navigasyon RE
-- `docs/API_PORT_REVIEW_PROMPT.md` — API parity checklist
 - `docs/MASTER_DEVELOPMENT_PLAN.md` — 7-faz yol haritası
 - `google_earth/reconstructed_headers/` — Terrain, tile, rendering system headers
 - `google_earth/wasm_files/all_strings.txt` — Extracted WASM strings (165K)

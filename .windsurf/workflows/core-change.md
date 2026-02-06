@@ -7,8 +7,7 @@ description: Workflow for core engine changes (LOD, tile pyramid, DEM, schedulin
 ## Steps
 
 1. **Identify** parity target from `AGENTS.md` (sole target: Google Earth)
-2. **Read** `docs/API_PORT_REVIEW_PROMPT.md` for current phase
-3. **Locate** GE behavior in `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md`
+2. **Locate** GE behavior in `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md`
 4. **Map** to C++ file:
    - LOD/pyramid → `src/scheduling/tile_pyramid.*`
    - Scheduling → `src/scheduling/tile_scheduler.*`

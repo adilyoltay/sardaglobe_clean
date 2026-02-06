@@ -1,8 +1,6 @@
 # AGENTS.md — Native Globe Reference Index
 
 Bu dosya, projedeki ana dokümanları ve kaynak referanslarını tek noktadan listeler.
-Her faz tamamlandığında `docs/API_PORT_REVIEW_PROMPT.md` içindeki **Faz Tamamlama Günlüğü**
-ve **Güncel Durum Snapshot** bölümleri güncellenmelidir.
 
 ## Ana Master Kural
 **Tek parity hedefi: Google Earth**
@@ -19,7 +17,6 @@ Amacımız Google Earth kalitesinde bir globe engine geliştirmektir. Tüm davra
 
 ### Planlama & Takip
 - `docs/MASTER_DEVELOPMENT_PLAN.md` — **ANA GELİŞTİRME PLANI** (7 faz, 3 hafta, refactoring durumu dahil)
-- `docs/API_PORT_REVIEW_PROMPT.md` — API parity checklist + faz takibi + durum snapshot'ı
 
 ### Google Earth Tersine Mühendislik + Geliştirme Planları
 - `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` — **ANA TEKNİK REFERANS** (3 bölüm birleşik: GE WASM RE + 3D Terrain Planı + Tile Pipeline Optimizasyon Planı, 2026-02-06)
@@ -50,12 +47,6 @@ Amacımız Google Earth kalitesinde bir globe engine geliştirmektir. Tüm davra
 - **Unpop/Crossfade:** Progressive tile loading with uUnpopBlend + RASTER_CROSSFADE
 - **uCornerLods:** Bilinear LOD interpolation for smooth tile transitions
 - **Mirth Engine:** geo/render/mirth/ — iç render engine kaynak yol haritası
-
-## Faz Güncelleme Kuralı
-Her faz tamamlandığında aşağıdaki güncellemeler yapılır:
-1) `docs/API_PORT_REVIEW_PROMPT.md` → **Faz Tamamlama Günlüğü** işaretlenir.
-2) `docs/API_PORT_REVIEW_PROMPT.md` → **Güncel Durum Snapshot** metrikleri güncellenir.
-3) Gerekirse **Mevcut İmplementasyonlar** listesi revize edilir.
 
 ## Mimari Değişiklik Kuralı
 - `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` mimari hedef referansıdır.

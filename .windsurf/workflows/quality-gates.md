@@ -38,6 +38,4 @@ Her değişiklik öncesi ve sonrası kontrol edilecek kalite kapıları.
 ```
 
 ## 7. Documentation
-- [ ] Phase tamamlandıysa `docs/API_PORT_REVIEW_PROMPT.md` güncellendi
-  - Phase log işaretlendi
-  - Snapshot metrikleri güncellendi
+- [ ] Değişiklik ilgili teknik dokümanda kaydedildi

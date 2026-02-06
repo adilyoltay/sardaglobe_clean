@@ -1,11 +1,11 @@
 # Quality Gates
 
 1. Parity check
-   - Confirm behavior matches `globe-web-html/libs/webglobe.js` unless covered by the navigation exception.
+   - Confirm behavior matches Google Earth (sole parity target).
 
 2. LOD and SSE sanity
    - LOD selection should be monotonic with distance and stable under small camera changes.
-   - Check SSE thresholds, tilt factor, and activation constants against JS.
+   - Check SSE thresholds, tilt factor, and activation constants against GE WASM RE findings.
 
 3. Tile state machine
    - Validate state transitions and ensure no stuck states or redundant loads.
@@ -19,6 +19,3 @@
 6. Tests
    - Use `tests/lod_conformance_test.cpp` for numeric parity checks.
    - Use `tests/visual_lod_test.cpp` for visual regressions.
-
-7. Documentation
-   - If a phase is completed, update `docs/API_PORT_REVIEW_PROMPT.md` (phase log + snapshot).

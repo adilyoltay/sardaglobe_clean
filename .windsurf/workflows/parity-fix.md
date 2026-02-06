@@ -10,7 +10,7 @@ description: Quick workflow for fixing Google Earth parity bugs in Native Globe
 2. **Locate** - Find the C++ divergence point
 3. **Patch** - Minimal change targeting GE parity
 4. **Test** - Add regression test if possible
-5. **Record** - Note in `docs/API_PORT_REVIEW_PROMPT.md` if it closes a gap
+5. **Record** - Note in relevant technical doc if it closes a gap
 
 ## Reference
 

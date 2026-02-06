@@ -15,8 +15,7 @@ Bu workflow, globe engine core değişikliklerinde (tile pyramid, SSE LOD, async
 ## Workflow Adımları
 
 1. **Önce AGENTS.md'yi oku** — Proje index ve kuralları için.
-2. **docs/API_PORT_REVIEW_PROMPT.md kontrol et** — Phase tracking ve güncel durum.
-3. **Kaynak analizi yap:**
+2. **Kaynak analizi yap:**
    - Tile/DEM/Render: `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md`
    - Navigasyon: `docs/GOOGLE_EARTH_MOUSE_NAVIGATION_ANALYSIS.md`
    - Raw WASM data: `google_earth/`
@@ -26,7 +25,6 @@ Bu workflow, globe engine core değişikliklerinde (tile pyramid, SSE LOD, async
    - Rendering → `src/rendering/`
    - API → `src/api/`
 5. **Test et** — `tests/lod_conformance_test.cpp`, `tests/visual_lod_test.cpp`
-6. **Faz tamamlandıysa** — `docs/API_PORT_REVIEW_PROMPT.md` güncelle.
 
 ## Quality Gates
 
