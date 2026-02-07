@@ -496,7 +496,7 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
         if (tile.pixels.empty()) continue;
 
         // Explicit upload-start lifecycle event before GPU work.
-        TileStateMachine::Advance(tile, TileStateMachine::Event::UploadStart);
+        TileStateMachine::Advance(tile, TileStateMachine::Event::UploadStart, glfwGetTime());
         
         bool uploadedToAtlas = UploadToAtlas(tile);
 
@@ -529,7 +529,20 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
                 tile.texHeight = tile.pixelHeight;
             }
 
-            tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+            // Half-texel inset to reduce visible raster seams on per-tile textures.
+            // Atlas path already applies an equivalent inset in TextureAtlasAllocator::ToUvTransform().
+            if (tile.texWidth > 1 && tile.texHeight > 1) {
+                float insetX = 0.5f / static_cast<float>(tile.texWidth);
+                float insetY = 0.5f / static_cast<float>(tile.texHeight);
+                tile.texScaleOffset = glm::vec4(
+                    1.0f - 2.0f * insetX,
+                    1.0f - 2.0f * insetY,
+                    insetX,
+                    insetY
+                );
+            } else {
+                tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+            }
             tile.atlasAllocated = false;
             tile.atlasPage = -1;
             tile.atlasSlot = -1;
@@ -538,7 +551,7 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
         }
         
         // Use state machine for upload completion (handles fade reset)
-        TileStateMachine::Advance(tile, TileStateMachine::Event::UploadOk);
+        TileStateMachine::Advance(tile, TileStateMachine::Event::UploadOk, glfwGetTime());
         
         // Clear pixel data
         tile.ClearPixels();
@@ -640,7 +653,7 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
                     auto it = tiles.find(key);
                     if (it != tiles.end()) {
                         Tile& tile = it->second;
-                        TileStateMachine::Advance(tile, TileStateMachine::Event::Evict);
+                        TileStateMachine::Advance(tile, TileStateMachine::Event::Evict, glfwGetTime());
 
                         // Notify eviction callback (e.g., for heightmap cleanup)
                         if (evictionCallback_) {

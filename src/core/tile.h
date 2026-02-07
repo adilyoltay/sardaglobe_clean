@@ -30,6 +30,9 @@ struct Tile {
     
     // State
     TileState state = TileState::Unloaded;
+    // Timestamp (glfwGetTime seconds) when the state last changed.
+    // Used for stale-loading detection/recovery (Scheduled/Fetching/Decoding/Uploading).
+    double stateEnterTime = 0.0;
     
     // Geometry (computed from key)
     glm::vec3 center{0.0f};       // World-space center (ECEF)
@@ -78,8 +81,20 @@ struct Tile {
     uint8_t demSourceLevelMin = 0;
     uint8_t demSourceLevelMax = 0;
     uint16_t demMissingSamples = 0;
+    // DEM level requested by the engine for mesh baking (may be lower than tile level for coherence).
+    uint8_t demTargetLevel = 0;
+    // DEM level effectively used by the mesh builder (authoritative level chosen from cache/ancestors).
     uint8_t demEffectiveLevel = 0;
     float edgeGapMaxM = 0.0f;
+    // Per-edge seam gap (meters), populated by engine seam scan.
+    // Order: North, East, South, West.
+    glm::vec4 edgeGapM{0.0f};
+    uint8_t seamGapMask = 0;  // Bits for edges whose seam gap exceeds warning threshold (telemetry -> skirt feedback).
+
+    // Mesh-edge height samples (km, already heightScale-adjusted) for seam/cliff measurement.
+    // Layout: [North (W->E), East (N->S), South (W->E), West (N->S)], each of length (borderSegments+1).
+    uint16_t borderSegments = 0;
+    std::vector<float> borderHeightsKm;
     
     // Edge seam fix (FAZ 6.1): bits indicate which edges have coarser neighbors
     // Bit 0 = North (dy=-1), Bit 1 = East (dx=+1), Bit 2 = South (dy=+1), Bit 3 = West (dx=-1)

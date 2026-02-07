@@ -24,11 +24,11 @@ LodSelection LodSelector::Select(
     // Extract frustum and update horizon culler
     frustum_.Extract(mvp);
     
-    // CONSERVATIVE HORIZON: Add 8% margin + max terrain height (20km)
-    // This prevents false-negative culling at horizon edge (tilt/orbit gaps)
-    constexpr float HORIZON_MARGIN = 1.08f;  // 8% larger radius (more conservative)
-    constexpr float MAX_TERRAIN_KM = 20.0f;  // Everest + extra margin
-    float horizonRadius = static_cast<float>(EARTH_RADIUS_KM) * HORIZON_MARGIN + MAX_TERRAIN_KM;
+    // Conservative horizon: shrink the occluder slightly so large tiles near the horizon
+    // are not false-negative culled (which manifests as low-LOD black "holes" and
+    // zoom-in stalls where no new children ever get requested).
+    constexpr float HORIZON_OCCLUDER_SHRINK = 0.9985f;  // ~0.15% radius shrink (~10km)
+    float horizonRadius = static_cast<float>(EARTH_RADIUS_KM) * HORIZON_OCCLUDER_SHRINK;
     horizon_.Update(cameraPos, horizonRadius);
     
     // Use FOV directly from camera (CRITICAL FIX: don't extract from MVP)
@@ -94,9 +94,17 @@ bool LodSelector::IsTileVisible(
     glm::vec3 center = TileCenterWorld(key);
     float radius = TileBoundingRadius(key);
     
-    // CONSERVATIVE BOUNDING: Add 25% margin for oblique/tilt views
-    constexpr float CONSERVATIVE_RADIUS_MARGIN = 1.25f;
-    float conservativeRadius = radius * CONSERVATIVE_RADIUS_MARGIN;
+    // Conservative bounding:
+    // We intentionally inflate bounds at low LODs because any false-negative cull
+    // creates a visible "black hole" (coverage gap) that has no render-time fallback.
+    // Cost is low at coarse levels, correctness is critical.
+    float margin = 1.25f;
+    if (key.level <= 2) {
+        margin = 2.0f;
+    } else if (key.level <= 4) {
+        margin = 1.6f;
+    }
+    float conservativeRadius = radius * margin;
     
     // Frustum culling
     if (!settings.disableFrustumCull) {
@@ -108,7 +116,10 @@ bool LodSelector::IsTileVisible(
     // Horizon culling (bypass at high tilt - 45° threshold for better oblique coverage)
     constexpr float HORIZON_BYPASS_TILT = 45.0f;
     if (!settings.disableHorizonCull && tiltDegrees_ < HORIZON_BYPASS_TILT) {
-        if (!horizon_.IsSphereVisible(center, conservativeRadius)) {
+        // Slightly inflate bounds for horizon test: horizon false-negatives are the
+        // primary source of low-LOD missing-tile rectangles in practice.
+        float horizonRadius = conservativeRadius * 1.15f;
+        if (!horizon_.IsSphereVisible(center, horizonRadius)) {
             return false;
         }
     }

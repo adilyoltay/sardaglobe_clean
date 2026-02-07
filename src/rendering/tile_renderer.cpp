@@ -45,7 +45,10 @@ DrawCallBreakdown DrawTileGeometry(const Tile& tile) {
         if (cullEnabled) {
             glDisable(GL_CULL_FACE);
         }
+        GLboolean polyOffsetEnabled = glIsEnabled(GL_POLYGON_OFFSET_FILL);
         glEnable(GL_POLYGON_OFFSET_FILL);
+        // Use a slightly stronger offset for skirts, then restore the batch's default
+        // offset so subsequent main-tile draws don't inherit skirt bias (causes dark grids).
         glPolygonOffset(1.5f, 2.0f);
         const std::size_t offsetBytes = static_cast<std::size_t>(mainCount) * sizeof(unsigned int);
         glDrawElements(GL_TRIANGLES,
@@ -54,6 +57,10 @@ DrawCallBreakdown DrawTileGeometry(const Tile& tile) {
                        reinterpret_cast<const void*>(offsetBytes));
         ++out.drawCalls;
         out.triangles += static_cast<int>(skirtCount / 3);
+        glPolygonOffset(1.0f, 1.0f);
+        if (!polyOffsetEnabled) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
         if (cullEnabled) {
             glEnable(GL_CULL_FACE);
         }
@@ -343,10 +350,6 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
     // Default: no heightmap (terrain displacement disabled)
     glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
     glUniform1i(shaderManager_.GetHeightmapLocation(), 1);  // Heightmap on texture unit 1
-    
-    // Enable polygon offset to reduce z-fighting between tiles
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(1.0f, 1.0f);
     
     // Wireframe mode
     if (wireframeMode_) {

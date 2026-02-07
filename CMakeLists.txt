@@ -431,6 +431,28 @@ target_include_directories(dem_effective_level_policy_test PRIVATE
 target_link_libraries(dem_effective_level_policy_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME DemEffectiveLevelPolicyTest COMMAND dem_effective_level_policy_test)
 
+# DEM batch URL ordering test (ensures C1..CN mapping matches service response order)
+add_executable(dem_batch_url_order_test
+  tests/dem_batch_url_order_test.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(dem_batch_url_order_test PRIVATE
+  src
+)
+target_link_libraries(dem_batch_url_order_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME DemBatchUrlOrderTest COMMAND dem_batch_url_order_test)
+
+# DEM grid row-order test (south->north service ordering)
+add_executable(dem_grid_row_order_test
+  tests/dem_grid_row_order_test.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(dem_grid_row_order_test PRIVATE
+  src
+)
+target_link_libraries(dem_grid_row_order_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME DemGridRowOrderTest COMMAND dem_grid_row_order_test)
+
 # Seam metric truth test
 add_executable(seam_metric_truth_test
   tests/seam_metric_truth_test.cpp

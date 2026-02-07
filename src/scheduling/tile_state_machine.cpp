@@ -100,6 +100,9 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
     
     if (newState != currentState) {
         tile.state = newState;
+        if (currentTime > 0.0) {
+            tile.stateEnterTime = currentTime;
+        }
         return true;
     }
     return false;

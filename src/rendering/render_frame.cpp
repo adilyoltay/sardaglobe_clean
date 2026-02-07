@@ -48,7 +48,13 @@ glm::vec4 ComputeUnpopUvTransform(const TileKey& leaf, const TileKey& ancestor) 
                         static_cast<std::int64_t>(ancestor.x) * factor;
     std::int64_t relY = static_cast<std::int64_t>(leaf.y) -
                         static_cast<std::int64_t>(ancestor.y) * factor;
-    return glm::vec4(scale, scale, static_cast<float>(relX) * scale, static_cast<float>(relY) * scale);
+    // IMPORTANT: Our tile UV convention is OpenGL-style with V=0 at the south (bottom)
+    // and V=1 at the north (top). TileKey.y, however, increases southward.
+    // Convert relY (north-origin) into a south-origin offset so parent→child mapping is correct.
+    std::int64_t relYFromSouth = (factor - 1) - relY;
+    return glm::vec4(scale, scale,
+                     static_cast<float>(relX) * scale,
+                     static_cast<float>(relYFromSouth) * scale);
 }
 
 glm::vec4 ComposeUvTransform(const glm::vec4& outerTransform, const glm::vec4& innerTransform) {
@@ -295,6 +301,13 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         return true;
     };
     
+    // Depth bias policy (GE-style):
+    // - Parent/placeholder fallback tiles should be slightly behind to avoid z-fighting.
+    // - Main leaves render without polygon offset to avoid depth discontinuities that
+    //   can manifest as dark grids / "black gap" lines at tile boundaries.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(1.0f, 1.0f);
+
     // Pass 0: Placeholder tiles (last-resort, underneath everything)
     if (loadingTexture != 0) {
         for (Tile* tile : placeholderTiles) {
@@ -328,6 +341,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     }
     
     // Pass 2: Renderable leaves (legacy fade or shader-level crossfade)
+    glDisable(GL_POLYGON_OFFSET_FILL);
     InstancedBatchMap leafInstancedBatches;
     for (const RenderableLeaf& leaf : renderableLeaves) {
         HeightmapTexture hmTex;

@@ -47,20 +47,20 @@ std::string TileScheduler::BuildUrl(const TileKey& key) const {
     return urlTemplate_.Build(key.level, key.x, key.y);
 }
 
-void TileScheduler::Request(const TileKey& key, Priority priority, float score) {
+bool TileScheduler::Request(const TileKey& key, Priority priority, float score) {
     // Check if already pending
     {
         std::lock_guard<std::mutex> lock(trackingMutex_);
         if (pendingFetches_.count(key) || pendingDecodes_.count(key)) {
-            return;  // Already in progress
+            return false;  // Already in progress
         }
         int inFlight = static_cast<int>(pendingFetches_.size()) + GetActiveFetches();
         if (inFlight >= config_.maxInFlightFetches && priority != Priority::Urgent) {
-            return;  // Backpressure for non-urgent requests
+            return false;  // Backpressure for non-urgent requests
         }
         pendingFetches_.insert(key);
     }
-    
+
     // Queue fetch
     FetchRequest req;
     req.key = key;
@@ -93,7 +93,13 @@ void TileScheduler::Request(const TileKey& key, Priority priority, float score) 
         }
     };
     
+    if (!fetcher_) {
+        std::lock_guard<std::mutex> lock(trackingMutex_);
+        pendingFetches_.erase(key);
+        return false;
+    }
     fetcher_->Fetch(std::move(req));
+    return true;
 }
 
 void TileScheduler::Cancel(const TileKey& key) {

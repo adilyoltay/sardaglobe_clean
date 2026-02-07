@@ -81,8 +81,13 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
     // Check if already cached or in fail TTL
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
-        if (cache_.find(key) != cache_.end()) {
-            return;  // Already have data
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            if (it->second.valid) {
+                return;  // Already have valid data
+            }
+            // Invalid cached entry must not permanently block retries.
+            cache_.erase(it);
         }
         // Check fail TTL - retry if expired
         auto failIt = failedUntil_.find(key);
@@ -233,7 +238,9 @@ bool DemManager::SampleHeightDetailed(double lonDeg, double latDeg, int level, D
             double latBottom = Tile2Lat(sampleY + 1, sampleLevel);
 
             double u = (lonDeg - lonLeft) / (lonRight - lonLeft);
-            double v = (latClamped - latTop) / (latBottom - latTop);
+            // Service row order is south->north (bottom->top). So v=0 must map to latBottom.
+            // (If we use the usual north->south mapping, N/S tile seams become kilometer-scale cliffs.)
+            double v = (latClamped - latBottom) / (latTop - latBottom);
             u = std::clamp(u, 0.0, 1.0);
             v = std::clamp(v, 0.0, 1.0);
 
@@ -402,9 +409,10 @@ std::string DemManager::BuildBatchUrl(const std::vector<DemCell>& cells) const {
         << "&MESHN=" << config_.meshN
         << "&CN=" << cells.size();
     
-    // Cells indexed from CN down to 1 (webglobe iterates in reverse: for(o=length;o--;))
+    // IMPORTANT: Service returns results in numeric cell order (C1..CN).
+    // So we must emit C1 for cells[0], C2 for cells[1], etc.
     for (size_t i = 0; i < cells.size(); ++i) {
-        int idx = static_cast<int>(cells.size() - i);  // CN, CN-1, ..., 1
+        int idx = static_cast<int>(i + 1);  // 1, 2, ..., CN
         const DemCell& c = cells[i];
         oss << "&C" << idx << "LLX=" << c.llx
             << "&C" << idx << "LLY=" << c.lly
@@ -649,15 +657,18 @@ bool DemManager::ParseBatchResponse(const std::string& payload, int cellCount,
         
         for (int r = 0; r < meshN; ++r) {
             const std::vector<double>& row = rows[static_cast<size_t>(c * meshN + r)];
-            for (size_t col = 0; col < std::min(row.size(), valuesPerRow); ++col) {
+            if (row.size() < valuesPerRow) {
+                if (config_.debug) {
+                    std::cerr << "[DEM] Parse error: short row (cell=" << c << ", row=" << r
+                              << ", cols=" << row.size() << " < " << valuesPerRow << ")" << std::endl;
+                }
+                return false;
+            }
+            for (size_t col = 0; col < valuesPerRow; ++col) {
                 double val = row[col];
                 data.heights.push_back(val);
                 data.minHeight = std::min(data.minHeight, val);
                 data.maxHeight = std::max(data.maxHeight, val);
-            }
-            // Pad with zeros if row is short
-            for (size_t col = row.size(); col < valuesPerRow; ++col) {
-                data.heights.push_back(0.0);
             }
         }
         

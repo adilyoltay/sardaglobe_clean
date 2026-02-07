@@ -106,8 +106,12 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(authoritativeLevel, 0, 255));
     
     result.demUsed = false;
-    // Keep pending=true while exact child DEM is missing, even if parent fallback provides heights.
-    result.demPending = demSamplingEnabled && !hasExactDemTile;
+    // Keep pending=true while exact child DEM is missing, even if parent fallback provides heights
+    // or there is currently no cached DEM at all. Otherwise tiles built "flat" early will never
+    // rebuild when DEM arrives, causing persistent cliffs/walls at tile boundaries.
+    result.demPending = (demManager != nullptr) &&
+                        (config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) &&
+                        !hasExactDemTile;
     
     // First pass: compute lon/lat + DEM sample heights.
     std::vector<double> sampleLonDeg;
@@ -248,6 +252,51 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     
     // Second pass: Compute normals and build vertex buffer
     // For DEM terrain, use finite difference to compute terrain normals
+    const double lonStepDeg = (segments > 0) ? ((lonRight - lonLeft) / static_cast<double>(segments)) : 0.0;
+    const double mercatorYStep = (segments > 0) ? ((mercatorYBottom - mercatorYTop) / static_cast<double>(segments)) : 0.0;
+
+    auto wrapLonDeg = [](double lonDeg) -> double {
+        // Keep longitude in a stable range for TileX math.
+        while (lonDeg < -180.0) lonDeg += 360.0;
+        while (lonDeg > 180.0) lonDeg -= 360.0;
+        return lonDeg;
+    };
+
+    // Recompute the per-vertex DEM request level using the same edge-equalization rule used for heights.
+    // This is needed for border-normal sampling so both sides of an edge see consistent derivatives.
+    auto computeVertexSampleLevel = [&](int ix, int iy) -> int {
+        int sampleLevel = authoritativeLevel;
+        if (sampleLevel == key.level && sampleLevel > 0) {
+            bool isNorthBorder = (iy == 0);
+            bool isSouthBorder = (iy == segments);
+            bool isWestBorder = (ix == 0);
+            bool isEastBorder = (ix == segments);
+            bool useCoarserEdgeLevel = false;
+            if (isNorthBorder && (edgeMask & Tile::EDGE_NORTH)) useCoarserEdgeLevel = true;
+            if (isEastBorder && (edgeMask & Tile::EDGE_EAST)) useCoarserEdgeLevel = true;
+            if (isSouthBorder && (edgeMask & Tile::EDGE_SOUTH)) useCoarserEdgeLevel = true;
+            if (isWestBorder && (edgeMask & Tile::EDGE_WEST)) useCoarserEdgeLevel = true;
+            if (useCoarserEdgeLevel) {
+                sampleLevel = std::max(0, sampleLevel - 1);
+            }
+        }
+        sampleLevel = std::clamp(sampleLevel, 0, key.level);
+        return sampleLevel;
+    };
+
+    auto sampleOutsidePosition = [&](double lonDeg, double latDeg, int sampleLevel, glm::dvec3& outPos) -> bool {
+        if (!demSamplingEnabled || demManager == nullptr) {
+            return false;
+        }
+        DemSampleResult sample;
+        if (!demManager->SampleHeightDetailed(lonDeg, latDeg, sampleLevel, sample) || !sample.ok) {
+            return false;
+        }
+        float hKm = static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
+        outPos = ellipsoid.GeodeticToCartesian(lonDeg, latDeg, hKm);
+        return true;
+    };
+
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
         
@@ -266,11 +315,56 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                 int ixNext = std::min(segments, ix + 1);
                 int iyPrev = std::max(0, iy - 1);
                 int iyNext = std::min(segments, iy + 1);
-                
+
                 glm::dvec3 posLeft = positions[iy * (segments + 1) + ixPrev];
                 glm::dvec3 posRight = positions[iy * (segments + 1) + ixNext];
                 glm::dvec3 posUp = positions[iyPrev * (segments + 1) + ix];
                 glm::dvec3 posDown = positions[iyNext * (segments + 1) + ix];
+
+                // Border normals: sample one step outside the tile so adjacent tiles
+                // compute compatible edge normals (reduces visible "tile grid" lines).
+                const bool onWest = (ix == 0);
+                const bool onEast = (ix == segments);
+                const bool onNorth = (iy == 0);
+                const bool onSouth = (iy == segments);
+                if ((onWest || onEast || onNorth || onSouth) &&
+                    demSamplingEnabled &&
+                    demManager != nullptr &&
+                    segments > 1) {
+                    const int sampleLevel = computeVertexSampleLevel(ix, iy);
+                    const double lonHere = sampleLonDeg[static_cast<std::size_t>(idx)];
+                    const double latHere = sampleLatDeg[static_cast<std::size_t>(idx)];
+
+                    if (onWest && std::isfinite(lonStepDeg) && std::fabs(lonStepDeg) > 0.0) {
+                        glm::dvec3 outPos;
+                        double lonOut = wrapLonDeg(lonHere - lonStepDeg);
+                        if (sampleOutsidePosition(lonOut, latHere, sampleLevel, outPos)) {
+                            posLeft = outPos;
+                        }
+                    } else if (onEast && std::isfinite(lonStepDeg) && std::fabs(lonStepDeg) > 0.0) {
+                        glm::dvec3 outPos;
+                        double lonOut = wrapLonDeg(lonHere + lonStepDeg);
+                        if (sampleOutsidePosition(lonOut, latHere, sampleLevel, outPos)) {
+                            posRight = outPos;
+                        }
+                    }
+
+                    if (onNorth && std::isfinite(mercatorYStep) && std::fabs(mercatorYStep) > 0.0) {
+                        glm::dvec3 outPos;
+                        double latRadOut = 2.0 * std::atan(std::exp(mercatorYTop - mercatorYStep)) - M_PI / 2.0;
+                        double latOut = latRadOut * 180.0 / M_PI;
+                        if (sampleOutsidePosition(lonHere, latOut, sampleLevel, outPos)) {
+                            posUp = outPos;
+                        }
+                    } else if (onSouth && std::isfinite(mercatorYStep) && std::fabs(mercatorYStep) > 0.0) {
+                        glm::dvec3 outPos;
+                        double latRadOut = 2.0 * std::atan(std::exp(mercatorYBottom + mercatorYStep)) - M_PI / 2.0;
+                        double latOut = latRadOut * 180.0 / M_PI;
+                        if (sampleOutsidePosition(lonHere, latOut, sampleLevel, outPos)) {
+                            posDown = outPos;
+                        }
+                    }
+                }
                 
                 glm::dvec3 dPdx = posRight - posLeft;
                 glm::dvec3 dPdy = posDown - posUp;
@@ -399,6 +493,9 @@ void TileMeshBuilder::GenerateSkirts(
         float px = vertices[mainIdx * kVertexStrideFloats + 0];
         float py = vertices[mainIdx * kVertexStrideFloats + 1];
         float pz = vertices[mainIdx * kVertexStrideFloats + 2];
+        float nx = vertices[mainIdx * kVertexStrideFloats + 3];
+        float ny = vertices[mainIdx * kVertexStrideFloats + 4];
+        float nz = vertices[mainIdx * kVertexStrideFloats + 5];
         float u = vertices[mainIdx * kVertexStrideFloats + 6];
         float v = vertices[mainIdx * kVertexStrideFloats + 7];
         float h = vertices[mainIdx * kVertexStrideFloats + 8];
@@ -411,9 +508,11 @@ void TileMeshBuilder::GenerateSkirts(
         vertices.push_back(skirtPos.x);
         vertices.push_back(skirtPos.y);
         vertices.push_back(skirtPos.z);
-        vertices.push_back(radialDir.x);  // Normal
-        vertices.push_back(radialDir.y);
-        vertices.push_back(radialDir.z);
+        // Copy main vertex normal to avoid visible lighting seams when skirts become exposed.
+        // (Skirt geometry is a crack-hider; GE keeps it visually unobtrusive.)
+        vertices.push_back(nx);
+        vertices.push_back(ny);
+        vertices.push_back(nz);
         vertices.push_back(u);
         vertices.push_back(v);
         vertices.push_back(h);
@@ -563,6 +662,47 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     tile.stitchMask = result.stitchMask;
     tile.skirtMask = result.skirtMask;
     tile.edgeGapMaxM = 0.0f;
+    tile.edgeGapM = glm::vec4(0.0f);
+    tile.seamGapMask = 0;
+    tile.borderSegments = 0;
+    tile.borderHeightsKm.clear();
+    if (result.segments > 0) {
+        const int segments = result.segments;
+        const int samples = segments + 1;
+        const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
+        if (result.vertices.size() >= static_cast<std::size_t>(mainVertexCount) * kVertexStrideFloats) {
+            tile.borderSegments = static_cast<uint16_t>(segments);
+            tile.borderHeightsKm.resize(static_cast<std::size_t>(4 * samples));
+            auto readHeightKm = [&](int mainIdx) -> float {
+                return result.vertices[static_cast<std::size_t>(mainIdx) * kVertexStrideFloats + 8];
+            };
+
+            const int northOffset = 0;
+            const int eastOffset = samples;
+            const int southOffset = 2 * samples;
+            const int westOffset = 3 * samples;
+
+            // North edge (iy=0): W->E
+            for (int ix = 0; ix <= segments; ++ix) {
+                tile.borderHeightsKm[static_cast<std::size_t>(northOffset + ix)] = readHeightKm(ix);
+            }
+            // East edge (ix=segments): N->S
+            for (int iy = 0; iy <= segments; ++iy) {
+                int mainIdx = iy * (segments + 1) + segments;
+                tile.borderHeightsKm[static_cast<std::size_t>(eastOffset + iy)] = readHeightKm(mainIdx);
+            }
+            // South edge (iy=segments): W->E
+            for (int ix = 0; ix <= segments; ++ix) {
+                int mainIdx = segments * (segments + 1) + ix;
+                tile.borderHeightsKm[static_cast<std::size_t>(southOffset + ix)] = readHeightKm(mainIdx);
+            }
+            // West edge (ix=0): N->S
+            for (int iy = 0; iy <= segments; ++iy) {
+                int mainIdx = iy * (segments + 1);
+                tile.borderHeightsKm[static_cast<std::size_t>(westOffset + iy)] = readHeightKm(mainIdx);
+            }
+        }
+    }
     tile.builtSegments = result.segments;
     tile.meshPending = false;
 }
@@ -578,6 +718,8 @@ void TileMeshBuilder::DeleteMesh(Tile& tile) {
         tile.skirtIndexCount = 0;
         tile.hasMesh = false;
         tile.ownsEBO = true;
+        tile.borderSegments = 0;
+        tile.borderHeightsKm.clear();
     }
 }
 

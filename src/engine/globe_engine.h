@@ -235,6 +235,8 @@ private:
         uint64_t leafUnderflowFrames = 0;
         int seamEdgeCount = 0;
         double avgEdgeHeightDeltaM = 0.0;
+        int demFlatLeaves = 0;         // Visible leaves with no DEM baked (flat ellipsoid mesh)
+        int demPendingLeaves = 0;      // Visible leaves still awaiting exact DEM rebuild
         int tilesUsingAncestorDem = 0;
         double seamGapP95M = 0.0;
         double seamGapMaxM = 0.0;

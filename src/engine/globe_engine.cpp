@@ -380,6 +380,45 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     double requestStartMs = glfwGetTime() * 1000.0;
     const uint32_t loadingTextureId = textureManager_ ? textureManager_->GetLoadingTexture() : 0;
+    const TileScheduler::SchedulerStats schedulerStatsBefore = scheduler_
+        ? scheduler_->GetStats()
+        : TileScheduler::SchedulerStats{};
+    const bool schedulerIdleBefore =
+        (schedulerStatsBefore.pendingFetches == 0) &&
+        (schedulerStatsBefore.pendingDecodes == 0) &&
+        (schedulerStatsBefore.activeFetches == 0) &&
+        (schedulerStatsBefore.fetchResultQueue == 0) &&
+        (schedulerStatsBefore.decodeResultQueue == 0);
+
+    // Child-quorum starvation prevention:
+    // When a visible leaf wants to subdivide but its children aren't ready yet, the selector
+    // keeps the parent as a leaf and adds all 4 children to the required set. Those children
+    // must be fetched with Urgent priority; otherwise they can be starved by backpressure and
+    // the engine appears to "stop loading new tiles" on zoom.
+    std::unordered_set<TileKey> quorumUrgentChildren;
+    if (config_.lodChildQuorum) {
+        quorumUrgentChildren.reserve(selection.leafSet.size() * 4);
+        for (const TileKey& leaf : selection.leafSet) {
+            if (leaf.level >= tilePyramid_.GetSettings().maxZoom) {
+                continue;
+            }
+            auto children = leaf.Children();
+            bool allChildrenRequired = true;
+            for (const TileKey& child : children) {
+                if (selection.required.count(child) == 0) {
+                    allChildrenRequired = false;
+                    break;
+                }
+            }
+            if (!allChildrenRequired) {
+                continue;
+            }
+            for (const TileKey& child : children) {
+                quorumUrgentChildren.insert(child);
+            }
+        }
+    }
+
     // Request required tiles using ranked list (GE-style SSE + center bias priority)
     for (const RankedTile& ranked : tilePyramid_.GetRankedRequired()) {
         const TileKey& key = ranked.key;
@@ -391,41 +430,63 @@ void GlobeEngine::Update(double dt, double currentTime) {
             tile.center = TileCenterWorld(key);
             tile.boundingRadius = TileBoundingRadius(key);
             tile.angularRadius = TileAngularRadius(key);
+            tile.demTargetLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
+            tile.demEffectiveLevel = tile.demTargetLevel;
             tiles_.emplace(key, std::move(tile));
             it = tiles_.find(key);
         }
         
         Tile& tile = it->second;
-        tile.lastAccessTime = glfwGetTime();
+        tile.lastAccessTime = currentTime;
         tile.accessCount++;
         tile.importance = ranked.score;  // Store score for eviction decisions
         bool isLeaf = selection.leafSet.count(key) > 0;
         Priority priority = isLeaf ? Priority::Urgent : Priority::Normal;
+        if (!isLeaf && config_.lodChildQuorum && quorumUrgentChildren.count(key) > 0) {
+            priority = Priority::Urgent;
+        }
         tile.requestPriority = static_cast<uint8_t>(priority);
         
         if (tile.state == TileState::Unloaded) {
-            scheduler_->Request(key, priority, ranked.score);
-            TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
-            TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
+            if (scheduler_->Request(key, priority, ranked.score)) {
+                TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule, currentTime);
+                TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart, currentTime);
+            }
         }
         else if (tile.IsLoading()) {
             // Stale intermediate state recovery: if a tile is stuck in
             // Scheduled/Fetching/Decoding/Uploading for >5s with no worker
             // activity, reset it to Unloaded so it can be re-fetched.
-            constexpr double kStaleTimeoutSec = 5.0;
-            double age = glfwGetTime() - tile.lastAccessTime;
-            if (age > kStaleTimeoutSec) {
-                TileStateMachine::Advance(tile, TileStateMachine::Event::Evict);
-                scheduler_->Request(key, priority, ranked.score);
-                TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
-                TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
+            constexpr double kStaleScheduledSec = 3.0;
+            constexpr double kStaleFetchingSec = 20.0;
+            constexpr double kStaleDecodingSec = 12.0;
+            constexpr double kStaleUploadingSec = 12.0;
+            if (tile.stateEnterTime <= 0.0) {
+                tile.stateEnterTime = currentTime;
+            }
+            double age = std::max(0.0, currentTime - tile.stateEnterTime);
+            double timeoutSec = kStaleFetchingSec;
+            if (tile.state == TileState::Scheduled) timeoutSec = kStaleScheduledSec;
+            else if (tile.state == TileState::Decoding) timeoutSec = kStaleDecodingSec;
+            else if (tile.state == TileState::Uploading) timeoutSec = kStaleUploadingSec;
+            // If the scheduler is totally idle but we still have tiles in loading states,
+            // assume an orphaned in-flight marker and recover faster.
+            if (schedulerIdleBefore) {
+                timeoutSec = std::min(timeoutSec, 6.0);
+            }
+            if (age > timeoutSec) {
+                TileStateMachine::Advance(tile, TileStateMachine::Event::Evict, currentTime);
+                if (scheduler_->Request(key, priority, ranked.score)) {
+                    TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule, currentTime);
+                    TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart, currentTime);
+                }
             }
         }
         else if (tile.state == TileState::Failed) {
             // Exponential backoff for failed tiles (prevents hammering failed servers)
             // Backoff: 1s, 2s, 4s, 8s, 16s, max 32s
             double backoffSeconds = std::min(32.0, std::pow(2.0, tile.retryCount));
-            double timeSinceLastRetry = glfwGetTime() - tile.lastRetryTime;
+            double timeSinceLastRetry = currentTime - tile.lastRetryTime;
 
             const bool hasPlaceholderTexture =
                 (tile.textureId != 0 && tile.textureId == loadingTextureId);
@@ -434,9 +495,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
             const int retryLimit = hasPlaceholderTexture ? 1000000 : 5;
 
             if (timeSinceLastRetry >= backoffSeconds && tile.retryCount < retryLimit) {
-                scheduler_->Request(key, priority, ranked.score);
-                TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
-                TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
+                if (scheduler_->Request(key, priority, ranked.score)) {
+                    TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule, currentTime);
+                    TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart, currentTime);
+                }
             }
         }
 
@@ -469,6 +531,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
             tile.center = TileCenterWorld(key);
             tile.boundingRadius = TileBoundingRadius(key);
             tile.angularRadius = TileAngularRadius(key);
+            tile.demTargetLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
+            tile.demEffectiveLevel = tile.demTargetLevel;
             tiles_.emplace(key, std::move(tile));
             it = tiles_.find(key);
         }
@@ -478,19 +542,20 @@ void GlobeEngine::Update(double dt, double currentTime) {
         tile.requestPriority = static_cast<uint8_t>(Priority::Low);
         
         if (tile.state == TileState::Unloaded) {
-            tile.lastAccessTime = glfwGetTime();
+            tile.lastAccessTime = currentTime;
             tile.accessCount++;
-            scheduler_->Request(key, Priority::Low, ranked.score);  // Low priority prefetch with score
-            TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
-            TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
-            ++prefetchCount;
+            if (scheduler_->Request(key, Priority::Low, ranked.score)) {  // Low priority prefetch with score
+                TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule, currentTime);
+                TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart, currentTime);
+                ++prefetchCount;
+            }
         }
     }
     frameTimings_.requestLoopMs = (glfwGetTime() * 1000.0) - requestStartMs;
     
     // Process scheduler (fetch/decode results)
     double schedulerStartMs = glfwGetTime() * 1000.0;
-    scheduler_->Update(tiles_, glfwGetTime());
+    scheduler_->Update(tiles_, currentTime);
     frameTimings_.schedulerUpdateMs = (glfwGetTime() * 1000.0) - schedulerStartMs;
 
     // Reset recent fetch-fail metric (every 2 seconds)
@@ -523,6 +588,11 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 demPinnedKeys.push_back(key);
             }
         };
+
+        // Always pin coarse base DEM tiles to guarantee global ancestor fallback.
+        for (const TileKey& base : baseTileKeys_) {
+            pushPinned(base);
+        }
 
         for (const TileKey& leaf : selection.leafSet) {
             pushPinned(leaf);
@@ -578,7 +648,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
         if (demManager_->GetBestAvailableLevel(tileKey, bestLevel)) {
             return std::clamp(bestLevel, 0, tileKey.level);
         }
-        return tileKey.level;
+        // No cached DEM for this tile or any ancestor yet. Target the global root
+        // so meshes can immediately fall back once base DEM arrives.
+        return 0;
     };
 
     auto leafRegionHasCoverage = [&](const TileKey& regionKey) -> bool {
@@ -624,7 +696,12 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     bool neighborParentIsLeaf = selection.leafSet.count(neighborParent) > 0;
                     if (neighborParentIsLeaf) {
                         newEdgeCoarserMask |= edgeBits[dir];
-                        newSkirtMask |= edgeBits[dir];
+                        // If stitch-mask topology is enabled, rely on crack-free index stitching
+                        // instead of skirts on delta-LOD boundaries. Skirts on these edges tend to
+                        // produce visible dark grids / walls at oblique views.
+                        if (!config_.edgeStitching) {
+                            newSkirtMask |= edgeBits[dir];
+                        }
                         continue;
                     }
 
@@ -640,39 +717,87 @@ void GlobeEngine::Update(double dt, double currentTime) {
         Tile& tile = it->second;
         int effectiveDemLevel = key.level;
         if (demManager_) {
+            const bool selfDemUnstable = tile.demPending || !tile.demUsed;
             effectiveDemLevel = resolveBestAvailableDemLevel(key);
             static const int dx[] = {0, 1, 0, -1};
             static const int dy[] = {-1, 0, 1, 0};
             static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
                                                Tile::EDGE_SOUTH, Tile::EDGE_WEST};
             for (int dir = 0; dir < 4; ++dir) {
-                TileKey n = key.Neighbor(dx[dir], dy[dir]);
-                if (!n.IsValid() || selection.leafSet.count(n) == 0) {
-                    continue;
-                }
-                int neighborLevel = resolveBestAvailableDemLevel(n);
                 bool coarserLodEdge = (newEdgeCoarserMask & edgeBits[dir]) != 0;
                 bool openCoverageEdge = (newSkirtMask & edgeBits[dir]) != 0;
 
-                // Preserve local detail and only coordinate aggressively on risky edges.
-                if (coarserLodEdge || openCoverageEdge) {
-                    effectiveDemLevel = std::min(effectiveDemLevel, neighborLevel);
-                } else if (effectiveDemLevel > neighborLevel + 1) {
-                    // Same-LOD neighbors: allow at most one-level mismatch to reduce cliffs
-                    // without collapsing whole regions to a deep ancestor level.
-                    effectiveDemLevel = neighborLevel + 1;
+                TileKey neighborSame = key.Neighbor(dx[dir], dy[dir]);
+                if (!neighborSame.IsValid()) {
+                    continue;
+                }
+
+                // Neighbor leaf coverage can be:
+                // - same-LOD leaf (neighborSame)
+                // - coarser leaf (neighborSame.Parent()) when we are refined against it
+                // - refined leaves (two children) when neighbor region is finer than us.
+                //
+                // DEM coherence must consider the *rendered* neighbor leaf, otherwise delta-LOD
+                // borders can mismatch by kilometers (observed as "each tile lifts independently").
+                std::vector<TileKey> neighborLeaves;
+                neighborLeaves.reserve(2);
+                if (selection.leafSet.count(neighborSame) > 0) {
+                    neighborLeaves.push_back(neighborSame);
+                } else if (neighborSame.level > 0 && selection.leafSet.count(neighborSame.Parent()) > 0) {
+                    neighborLeaves.push_back(neighborSame.Parent());
+                } else {
+                    auto children = neighborSame.Children();
+                    int a = -1, b = -1;
+                    // Children order: 0=NW,1=NE,2=SW,3=SE.
+                    if (edgeBits[dir] == Tile::EDGE_NORTH) { a = 2; b = 3; }
+                    else if (edgeBits[dir] == Tile::EDGE_EAST) { a = 0; b = 2; }
+                    else if (edgeBits[dir] == Tile::EDGE_SOUTH) { a = 0; b = 1; }
+                    else if (edgeBits[dir] == Tile::EDGE_WEST) { a = 1; b = 3; }
+                    if (a >= 0) {
+                        if (selection.leafSet.count(children[static_cast<std::size_t>(a)]) > 0) {
+                            neighborLeaves.push_back(children[static_cast<std::size_t>(a)]);
+                        }
+                        if (selection.leafSet.count(children[static_cast<std::size_t>(b)]) > 0) {
+                            neighborLeaves.push_back(children[static_cast<std::size_t>(b)]);
+                        }
+                    }
+                }
+
+                if (neighborLeaves.empty()) {
+                    continue;
+                }
+
+                for (const TileKey& neighborLeaf : neighborLeaves) {
+                    int neighborLevel = resolveBestAvailableDemLevel(neighborLeaf);
+
+                    bool neighborDemUnstable = true;
+                    auto nit = tiles_.find(neighborLeaf);
+                    if (nit != tiles_.end()) {
+                        const Tile& neighborTile = nit->second;
+                        neighborDemUnstable = neighborTile.demPending || !neighborTile.demUsed;
+                    }
+
+                    // DEM coherence policy (GE-style):
+                    // While either side is still waiting on exact DEM, lock both tiles to the
+                    // common ancestor level to avoid large cliffs/walls on shared borders.
+                    // Once stable, allow limited mismatch to preserve detail.
+                    if (coarserLodEdge || openCoverageEdge || selfDemUnstable || neighborDemUnstable) {
+                        effectiveDemLevel = std::min(effectiveDemLevel, neighborLevel);
+                    } else if (effectiveDemLevel > neighborLevel + 1) {
+                        // Same-LOD neighbors: allow at most one-level mismatch to reduce cliffs
+                        // without collapsing whole regions to a deep ancestor level.
+                        effectiveDemLevel = neighborLevel + 1;
+                    }
                 }
             }
             effectiveDemLevel = std::clamp(effectiveDemLevel, 0, key.level);
         }
 
-        // P1: Seam→skirt feedback — if previous frame measured a significant
-        // seam gap on this tile, force skirt on all edges (the per-edge scan
-        // already populated edgeGapMaxM in the previous Render pass).
-        constexpr float kSeamSkirtThresholdM = 4.0f;
-        if (config_.selectiveSkirts && tile.edgeGapMaxM > kSeamSkirtThresholdM) {
-            newSkirtMask = Tile::EDGE_NORTH | Tile::EDGE_EAST |
-                           Tile::EDGE_SOUTH | Tile::EDGE_WEST;
+        // P1: Seam→skirt feedback — if the previous frame measured a significant
+        // seam gap on specific edges, enable skirts only on those edges.
+        // This prevents the "skirt everywhere" regression that produces visible dark grids.
+        if (config_.selectiveSkirts && tile.seamGapMask != 0) {
+            newSkirtMask |= tile.seamGapMask;
         }
 
         uint8_t stitchedMask = config_.edgeStitching ? newEdgeCoarserMask : 0;
@@ -697,14 +822,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
             revisionChanged = true;
         }
         uint8_t newEffectiveLevel = static_cast<uint8_t>(std::clamp(effectiveDemLevel, 0, 255));
-        if (tile.demEffectiveLevel != newEffectiveLevel) {
-            tile.demEffectiveLevel = newEffectiveLevel;
+        if (tile.demTargetLevel != newEffectiveLevel) {
+            tile.demTargetLevel = newEffectiveLevel;
             revisionChanged = true;
         }
         
         // Check DEM availability - check edge-specific coarser neighbor parents
         if (demManager_ && tile.demPending) {
-            bool hasOwnDem = demManager_->HasData(key);
+            const bool hasOwnDem = demManager_->HasData(key);
+            const bool hasAnyDem = demManager_->HasDataOrAncestor(key);
             bool hasAllCoarserDem = true;
             
             // For each flagged edge, check if the neighbor's parent DEM is available
@@ -729,7 +855,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 }
             }
             
-            if (hasOwnDem && hasAllCoarserDem) {
+            // If this tile was baked "flat" (no DEM at build time), rebuild as soon as
+            // *any* ancestor DEM becomes available. Otherwise flat+terrain mixing creates
+            // kilometer-scale cliffs and visible skirt walls at tile boundaries.
+            if (!tile.demUsed) {
+                if (hasAnyDem && !tile.meshPending) {
+                    revisionChanged = true;
+                    ++demTriggeredMeshRebuilds_;
+                }
+            } else if (hasOwnDem && hasAllCoarserDem) {
                 revisionChanged = true;
                 tile.demPending = false;
                 ++demTriggeredMeshRebuilds_;
@@ -954,6 +1088,8 @@ void GlobeEngine::Render() {
     int seamEdgeCount = 0;          // Legacy threshold-count metric.
     double seamEdgeDeltaSumM = 0.0; // Legacy average seam delta.
     int seamEdgeSamples = 0;        // Legacy sample count.
+    int demFlatLeaves = 0;
+    int demPendingLeaves = 0;
     int tilesUsingAncestorDem = 0;
     double seamGapP95M = 0.0;
     double seamGapMaxM = 0.0;
@@ -968,6 +1104,12 @@ void GlobeEngine::Render() {
             }
             const Tile& tile = it->second;
             ++visibleDemTiles;
+            if (!tile.demUsed) {
+                ++demFlatLeaves;
+            }
+            if (tile.demPending) {
+                ++demPendingLeaves;
+            }
             if (tile.demEffectiveLevel < key.level || tile.demSourceLevelMax < key.level) {
                 ++tilesUsingAncestorDem;
             }
@@ -979,114 +1121,219 @@ void GlobeEngine::Render() {
         std::vector<double> seamDeltas;
         seamDeltas.reserve(sceneSnapshot_.leafSet.size() * 8);
 
-        static const int dx[] = {1, 0};   // East, South (no duplicate edge pairs)
-        static const int dy[] = {0, 1};
-        constexpr int kEdgeSamples = 5;
         constexpr double kSeamWarnM = 4.0;
         constexpr double kCliffM = 15.0;
 
-        // Reset per-tile seam metric before scan
+        auto edgeIndexFromBit = [](uint8_t bit) -> int {
+            if (bit == Tile::EDGE_NORTH) return 0;
+            if (bit == Tile::EDGE_EAST) return 1;
+            if (bit == Tile::EDGE_SOUTH) return 2;
+            if (bit == Tile::EDGE_WEST) return 3;
+            return -1;
+        };
+
+        auto oppositeEdgeBit = [](uint8_t bit) -> uint8_t {
+            if (bit == Tile::EDGE_NORTH) return Tile::EDGE_SOUTH;
+            if (bit == Tile::EDGE_EAST) return Tile::EDGE_WEST;
+            if (bit == Tile::EDGE_SOUTH) return Tile::EDGE_NORTH;
+            if (bit == Tile::EDGE_WEST) return Tile::EDGE_EAST;
+            return 0;
+        };
+
+        auto hasBorderHeights = [](const Tile& tile) -> bool {
+            int seg = static_cast<int>(tile.borderSegments);
+            if (seg <= 0) return false;
+            std::size_t expected = static_cast<std::size_t>(4 * (seg + 1));
+            return tile.borderHeightsKm.size() == expected;
+        };
+
+        auto sampleEdgeKm = [&](const Tile& tile, int edgeIndex, double t) -> double {
+            int seg = static_cast<int>(tile.borderSegments);
+            if (seg <= 0) return 0.0;
+            int samples = seg + 1;
+            std::size_t base = static_cast<std::size_t>(edgeIndex) * static_cast<std::size_t>(samples);
+            double u = std::clamp(t, 0.0, 1.0) * static_cast<double>(seg);
+            int i0 = static_cast<int>(std::floor(u));
+            int i1 = std::min(seg, i0 + 1);
+            double f = u - static_cast<double>(i0);
+            double h0 = static_cast<double>(tile.borderHeightsKm[base + static_cast<std::size_t>(i0)]);
+            double h1 = static_cast<double>(tile.borderHeightsKm[base + static_cast<std::size_t>(i1)]);
+            return h0 + (h1 - h0) * f;
+        };
+
+        auto computeEdgeMaxDeltaM = [&](const TileKey& keyA,
+                                        const Tile& tileA,
+                                        uint8_t edgeBitA,
+                                        const TileKey& keyB,
+                                        const Tile& tileB,
+                                        double& outMaxDeltaM) -> bool {
+            if (!hasBorderHeights(tileA) || !hasBorderHeights(tileB)) {
+                return false;
+            }
+
+            uint8_t edgeBitB = oppositeEdgeBit(edgeBitA);
+            if (edgeBitB == 0) return false;
+
+            // Always sample along the finer edge (higher level).
+            const TileKey* fineKey = &keyA;
+            const Tile* fineTile = &tileA;
+            uint8_t fineEdgeBit = edgeBitA;
+            const TileKey* coarseKey = &keyB;
+            const Tile* coarseTile = &tileB;
+            uint8_t coarseEdgeBit = edgeBitB;
+            if (keyA.level < keyB.level) {
+                fineKey = &keyB;
+                fineTile = &tileB;
+                fineEdgeBit = edgeBitB;
+                coarseKey = &keyA;
+                coarseTile = &tileA;
+                coarseEdgeBit = edgeBitA;
+            }
+
+            int delta = fineKey->level - coarseKey->level;
+            if (delta < 0 || delta > 1) return false;
+
+            int fineSeg = static_cast<int>(fineTile->borderSegments);
+            int coarseSeg = static_cast<int>(coarseTile->borderSegments);
+            if (fineSeg <= 0 || coarseSeg <= 0) return false;
+
+            int fineEdgeIndex = edgeIndexFromBit(fineEdgeBit);
+            int coarseEdgeIndex = edgeIndexFromBit(coarseEdgeBit);
+            if (fineEdgeIndex < 0 || coarseEdgeIndex < 0) return false;
+
+            double scale = 1.0;
+            double offset = 0.0;
+            if (delta == 1) {
+                scale = 0.5;
+                // For N/S edges, the split is along X; for E/W edges, split is along Y.
+                const bool verticalBoundary = (coarseEdgeBit == Tile::EDGE_EAST) || (coarseEdgeBit == Tile::EDGE_WEST);
+                int rel = verticalBoundary
+                    ? (fineKey->y - (coarseKey->y * 2))
+                    : (fineKey->x - (coarseKey->x * 2));
+                if (rel != 0 && rel != 1) {
+                    return false;
+                }
+                offset = 0.5 * static_cast<double>(rel);
+            }
+
+            outMaxDeltaM = 0.0;
+            for (int i = 0; i <= fineSeg; ++i) {
+                double tFine = (fineSeg == 0) ? 0.0 : static_cast<double>(i) / static_cast<double>(fineSeg);
+                double tCoarse = std::clamp(tFine * scale + offset, 0.0, 1.0);
+                double hFineKm = sampleEdgeKm(*fineTile, fineEdgeIndex, tFine);
+                double hCoarseKm = sampleEdgeKm(*coarseTile, coarseEdgeIndex, tCoarse);
+                double deltaM = std::abs(hFineKm - hCoarseKm) * 1000.0;
+                outMaxDeltaM = std::max(outMaxDeltaM, deltaM);
+            }
+            return true;
+        };
+
+        // Reset per-tile seam metrics before scan.
         for (const TileKey& key : sceneSnapshot_.leafSet) {
             auto resetIt = tiles_.find(key);
             if (resetIt != tiles_.end()) {
                 resetIt->second.edgeGapMaxM = 0.0f;
+                resetIt->second.edgeGapM = glm::vec4(0.0f);
+                resetIt->second.seamGapMask = 0;
             }
         }
 
+        // Compare leaf edges against adjacent leaf coverage (same-LOD or delta-LOD=1).
+        static const int dx[] = {0, 1, 0, -1};  // N, E, S, W
+        static const int dy[] = {-1, 0, 1, 0};
+        static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
+                                           Tile::EDGE_SOUTH, Tile::EDGE_WEST};
+
         for (const TileKey& key : sceneSnapshot_.leafSet) {
             auto tileIt = tiles_.find(key);
-            if (tileIt == tiles_.end()) {
-                continue;
-            }
+            if (tileIt == tiles_.end()) continue;
             Tile& tileA = tileIt->second;
 
-            for (int dir = 0; dir < 2; ++dir) {
-                TileKey neighborKey = key.Neighbor(dx[dir], dy[dir]);
-                if (!neighborKey.IsValid()) {
-                    continue;
+            for (int dir = 0; dir < 4; ++dir) {
+                TileKey neighborSame = key.Neighbor(dx[dir], dy[dir]);
+                if (!neighborSame.IsValid()) continue;
+
+                std::vector<TileKey> neighborLeaves;
+                neighborLeaves.reserve(2);
+
+                if (sceneSnapshot_.leafSet.count(neighborSame) > 0) {
+                    neighborLeaves.push_back(neighborSame);
+                } else if (neighborSame.level > 0 && sceneSnapshot_.leafSet.count(neighborSame.Parent()) > 0) {
+                    // Neighbor region is covered by a coarser leaf (delta-LOD edge).
+                    neighborLeaves.push_back(neighborSame.Parent());
+                } else {
+                    // Neighbor region may be refined (delta-LOD from the coarse side).
+                    auto children = neighborSame.Children();
+                    int a = -1, b = -1;
+                    // Children order: 0=NW,1=NE,2=SW,3=SE.
+                    if (edgeBits[dir] == Tile::EDGE_NORTH) { a = 2; b = 3; }
+                    else if (edgeBits[dir] == Tile::EDGE_EAST) { a = 0; b = 2; }
+                    else if (edgeBits[dir] == Tile::EDGE_SOUTH) { a = 0; b = 1; }
+                    else if (edgeBits[dir] == Tile::EDGE_WEST) { a = 1; b = 3; }
+                    if (a >= 0) {
+                        if (sceneSnapshot_.leafSet.count(children[static_cast<std::size_t>(a)]) > 0) {
+                            neighborLeaves.push_back(children[static_cast<std::size_t>(a)]);
+                        }
+                        if (sceneSnapshot_.leafSet.count(children[static_cast<std::size_t>(b)]) > 0) {
+                            neighborLeaves.push_back(children[static_cast<std::size_t>(b)]);
+                        }
+                    }
                 }
 
-                // Seam metrics must include same-LOD and delta-LOD neighbors.
-                // If the neighbor at the same level is not a leaf, it may be covered by a
-                // coarser leaf (parent). That edge is where cliffs/cracks most often appear.
-                TileKey neighborLeaf = neighborKey;
-                if (sceneSnapshot_.leafSet.count(neighborLeaf) == 0) {
-                    if (neighborLeaf.level == 0) {
+                if (neighborLeaves.empty()) continue;
+
+                for (const TileKey& neighborLeaf : neighborLeaves) {
+                    if (neighborLeaf == key) continue;
+                    // Process each shared boundary once (stable ordering avoids double-counting).
+                    if (!(key < neighborLeaf)) continue;
+
+                    auto neighborIt = tiles_.find(neighborLeaf);
+                    if (neighborIt == tiles_.end()) continue;
+                    Tile& tileB = neighborIt->second;
+
+                    double edgeMaxDeltaM = 0.0;
+                    if (!computeEdgeMaxDeltaM(key, tileA, edgeBits[dir], neighborLeaf, tileB, edgeMaxDeltaM)) {
                         continue;
                     }
-                    TileKey parent = neighborLeaf.Parent();
-                    if (sceneSnapshot_.leafSet.count(parent) == 0) {
-                        continue;
+
+                    seamDeltas.push_back(edgeMaxDeltaM);
+                    seamEdgeDeltaSumM += edgeMaxDeltaM;
+                    ++seamEdgeSamples;
+
+                    if (edgeMaxDeltaM > kSeamWarnM) {
+                        ++seamEdgeCount;
+                        tileA.seamGapMask |= edgeBits[dir];
+                        tileB.seamGapMask |= oppositeEdgeBit(edgeBits[dir]);
                     }
-                    neighborLeaf = parent;
-                }
-
-                // Avoid comparing a tile to itself (can happen at level 0).
-                if (neighborLeaf == key) {
-                    continue;
-                }
-
-                auto neighborIt = tiles_.find(neighborLeaf);
-                if (neighborIt == tiles_.end()) {
-                    continue;
-                }
-                const Tile& tileB = neighborIt->second;
-
-                Extent extent = Extent::FromTileWGS84(key.x, key.y, key.level);
-                double edgeMaxDeltaM = 0.0;
-                bool edgeHadSample = false;
-
-                for (int i = 0; i < kEdgeSamples; ++i) {
-                    double t = (kEdgeSamples == 1) ? 0.5 : static_cast<double>(i) / static_cast<double>(kEdgeSamples - 1);
-                    double lon = 0.0;
-                    double lat = 0.0;
-                    if (dir == 0) {
-                        lon = extent.East();
-                        lat = extent.North() + (extent.South() - extent.North()) * t;
-                    } else {
-                        lon = extent.West() + (extent.East() - extent.West()) * t;
-                        lat = extent.South();
+                    if (edgeMaxDeltaM > kCliffM) {
+                        ++cliffEdgeCount;
                     }
 
-                    DemSampleResult sampleA;
-                    DemSampleResult sampleB;
-                    int levelA = std::clamp(static_cast<int>(tileA.demEffectiveLevel), 0, key.level);
-                    int levelB = std::clamp(static_cast<int>(tileB.demEffectiveLevel), 0, neighborLeaf.level);
-                    bool okA = demManager_->SampleHeightDetailed(lon, lat, levelA, sampleA);
-                    bool okB = demManager_->SampleHeightDetailed(lon, lat, levelB, sampleB);
-                    if (okA && okB && sampleA.ok && sampleB.ok) {
-                        double deltaM = std::abs(sampleA.heightMeters - sampleB.heightMeters);
-                        seamDeltas.push_back(deltaM);
-                        seamEdgeDeltaSumM += deltaM;
-                        ++seamEdgeSamples;
-                        edgeMaxDeltaM = std::max(edgeMaxDeltaM, deltaM);
-                        edgeHadSample = true;
-                    } else {
-                        seamDeltas.push_back(kCliffM);
-                        seamEdgeDeltaSumM += kCliffM;
-                        ++seamEdgeSamples;
-                        edgeMaxDeltaM = std::max(edgeMaxDeltaM, kCliffM);
+                    // Per-edge max seam gap (telemetry + future per-edge policies).
+                    {
+                        int edgeIndexA = edgeIndexFromBit(edgeBits[dir]);
+                        int edgeIndexB = edgeIndexFromBit(oppositeEdgeBit(edgeBits[dir]));
+                        if (edgeIndexA >= 0) {
+                            tileA.edgeGapM[edgeIndexA] = std::max(tileA.edgeGapM[edgeIndexA],
+                                                                 static_cast<float>(edgeMaxDeltaM));
+                        }
+                        if (edgeIndexB >= 0) {
+                            tileB.edgeGapM[edgeIndexB] = std::max(tileB.edgeGapM[edgeIndexB],
+                                                                 static_cast<float>(edgeMaxDeltaM));
+                        }
                     }
-                }
 
-                if (edgeHadSample && edgeMaxDeltaM > kSeamWarnM) {
-                    ++seamEdgeCount;
-                } else if (!edgeHadSample) {
-                    ++seamEdgeCount;
+                    tileA.edgeGapMaxM = std::max(tileA.edgeGapMaxM, static_cast<float>(edgeMaxDeltaM));
+                    tileB.edgeGapMaxM = std::max(tileB.edgeGapMaxM, static_cast<float>(edgeMaxDeltaM));
                 }
-                if (edgeMaxDeltaM > kCliffM) {
-                    ++cliffEdgeCount;
-                }
-                // P0: Populate per-tile seam metric (max across all edges)
-                tileA.edgeGapMaxM = std::max(tileA.edgeGapMaxM,
-                    static_cast<float>(edgeMaxDeltaM));
             }
         }
 
         if (!seamDeltas.empty()) {
             std::sort(seamDeltas.begin(), seamDeltas.end());
             seamGapMaxM = seamDeltas.back();
-            std::size_t p95Index = static_cast<std::size_t>(std::floor(0.95 * static_cast<double>(seamDeltas.size() - 1)));
+            std::size_t p95Index = static_cast<std::size_t>(
+                std::floor(0.95 * static_cast<double>(seamDeltas.size() - 1)));
             seamGapP95M = seamDeltas[p95Index];
         }
     }
@@ -1164,6 +1411,8 @@ void GlobeEngine::Render() {
     debugStats_.avgEdgeHeightDeltaM = seamEdgeSamples > 0
         ? seamEdgeDeltaSumM / static_cast<double>(seamEdgeSamples)
         : 0.0;
+    debugStats_.demFlatLeaves = demFlatLeaves;
+    debugStats_.demPendingLeaves = demPendingLeaves;
     debugStats_.tilesUsingAncestorDem = tilesUsingAncestorDem;
     debugStats_.seamGapP95M = seamGapP95M;
     debugStats_.seamGapMaxM = seamGapMaxM;
@@ -1199,10 +1448,14 @@ void GlobeEngine::Render() {
 
 void GlobeEngine::BuildTileMesh(Tile& tile) {
     // Delegate to TileMeshBuilder (GE-style separation)
-    auto result = TileMeshBuilder::Build(tile.key, tile.extent, tile.edgeCoarserMask,
+    // Feed measured seam gap edges back into the DEM edge-equalization mask.
+    // This reduces residual "tile grid" cracks by sampling one level coarser on
+    // problematic borders (GE-style edge continuity).
+    auto result = TileMeshBuilder::Build(tile.key, tile.extent,
+                                         static_cast<uint8_t>(tile.edgeCoarserMask | tile.seamGapMask),
                                          tile.stitchMask,
                                          tile.skirtMask,
-                                         static_cast<int>(tile.demEffectiveLevel),
+                                         static_cast<int>(tile.demTargetLevel),
                                          demManager_.get(), config_, true);
     result.meshRevision = tile.meshRevision;
     TileMeshBuilder::UploadToGPU(tile, result);
@@ -1561,6 +1814,8 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Seam Gap P95/Max: %.2f / %.2f m",
                         debugStats_.seamGapP95M, debugStats_.seamGapMaxM);
             ImGui::Text("Cliff Edge Count: %d", debugStats_.cliffEdgeCount);
+            ImGui::Text("DEM Flat/Pending: %d / %d",
+                        debugStats_.demFlatLeaves, debugStats_.demPendingLeaves);
             ImGui::Text("Ancestor DEM Ratio: %.1f%%",
                         debugStats_.ancestorDemRatio * 100.0);
             ImGui::Text("Legacy Seam Edges: %d", debugStats_.seamEdgeCount);
@@ -1617,6 +1872,15 @@ void GlobeEngine::RenderDebugPanel() {
                 config_.logDepthEnabled = false;
             }
             ImGui::Text("Depth Near/Far: %.3f / %.0f km", currentNearPlaneKm_, currentFarPlaneKm_);
+
+            // Culling toggles (diagnostic): helps confirm whether residual black gaps are
+            // caused by visibility false-negatives (frustum/horizon) or by streaming.
+            if (ImGui::Checkbox("Disable Frustum Cull", &config_.disableFrustumCull)) {
+                frameRequested_ = true;
+            }
+            if (ImGui::Checkbox("Disable Horizon Cull", &config_.disableHorizonCull)) {
+                frameRequested_ = true;
+            }
             
             // Displacement mode toggle
             const char* modeNames[] = { "CPU Mesh Bake", "GPU Heightmap" };
@@ -1842,9 +2106,19 @@ void GlobeEngine::QueueMeshBuild(const TileKey& key, bool isVisible) {
         config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE &&
         demManager_->GetHealthStatus() == DemHealthStatus::Healthy) {
         constexpr double kDemMeshWaitTimeoutSec = 0.5;
-        const bool hasDemData = demManager_->HasData(key);
-        const bool hasAncestorFallback = demManager_->HasDataOrAncestor(key);
-        const bool demPendingRequest = demManager_->HasPendingRequest(key);
+        // Wait for the DEM level that this tile is actually targeting (which can be an
+        // ancestor level for coherence). Waiting only on the exact child key causes
+        // meshes to be baked "flat" even when a coarser DEM tile is already in flight,
+        // producing the "each tile lifts independently" cliff/wall artifact.
+        TileKey demTargetKey = key;
+        int targetLevel = std::clamp(static_cast<int>(tile.demTargetLevel), 0, key.level);
+        while (demTargetKey.level > targetLevel) {
+            demTargetKey = demTargetKey.Parent();
+        }
+
+        const bool hasDemData = demManager_->HasData(demTargetKey);
+        const bool hasAncestorFallback = demManager_->HasDataOrAncestor(demTargetKey);
+        const bool demPendingRequest = demManager_->HasPendingRequest(demTargetKey);
         const double nowSec = glfwGetTime();
 
         if (!hasDemData && !hasAncestorFallback && demPendingRequest) {
@@ -1870,10 +2144,11 @@ void GlobeEngine::QueueMeshBuild(const TileKey& key, bool isVisible) {
     TileMeshScheduler::MeshRequest request;
     request.key = key;
     request.extent = tile.extent;
-    request.edgeMask = tile.edgeCoarserMask;
+    // Feed measured seam gap edges back into the DEM edge-equalization mask.
+    request.edgeMask = static_cast<uint8_t>(tile.edgeCoarserMask | tile.seamGapMask);
     request.stitchMask = tile.stitchMask;
     request.skirtMask = tile.skirtMask;
-    request.demTargetLevel = static_cast<int>(tile.demEffectiveLevel);
+    request.demTargetLevel = static_cast<int>(tile.demTargetLevel);
     request.meshRevision = tile.meshRevision;
     request.priority = isVisible ? Priority::Urgent : Priority::Normal;
     request.score = tile.importance;
@@ -1928,6 +2203,7 @@ void GlobeEngine::PreloadBaseTiles() {
     // LOD 0: 1 tile, LOD 1: 4 tiles = 5 tiles total
     constexpr int MAX_PRELOAD_LEVEL = 1;
     uint32_t loadingTexture = textureManager_->GetLoadingTexture();
+    const double nowSec = glfwGetTime();
     
     for (int level = 0; level <= MAX_PRELOAD_LEVEL; ++level) {
         int tilesPerSide = 1 << level;
@@ -1944,7 +2220,8 @@ void GlobeEngine::PreloadBaseTiles() {
                 }
                 
                 Tile& tile = it->second;
-                tile.demEffectiveLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
+                tile.demTargetLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
+                tile.demEffectiveLevel = tile.demTargetLevel;
                 tile.stitchMask = 0;
                 tile.skirtMask = config_.selectiveSkirts
                     ? static_cast<uint8_t>(Tile::EDGE_NORTH | Tile::EDGE_EAST | Tile::EDGE_SOUTH | Tile::EDGE_WEST)
@@ -1965,9 +2242,15 @@ void GlobeEngine::PreloadBaseTiles() {
                 // Request real texture with high priority (state machine handles transitions)
                 if (tile.state == TileState::Unloaded) {
                     tile.requestPriority = static_cast<uint8_t>(Priority::Urgent);
-                    scheduler_->Request(key, Priority::Urgent, 1.0f);
-                    TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
-                    TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
+                    if (scheduler_->Request(key, Priority::Urgent, 1.0f)) {
+                        TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule, nowSec);
+                        TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart, nowSec);
+                    }
+                }
+
+                // Ensure coarse global DEM exists early for seamless terrain fallback (GE-style).
+                if (demManager_) {
+                    demManager_->Request(key, /*priority=*/2, /*score=*/1.0);
                 }
             }
         }

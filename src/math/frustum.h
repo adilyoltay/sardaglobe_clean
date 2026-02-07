@@ -2,6 +2,8 @@
 
 #include <glm/glm.hpp>
 #include <array>
+#include <algorithm>
+#include <cmath>
 
 namespace globe {
 
@@ -126,33 +128,21 @@ public:
             return true;
         }
 
-        glm::vec3 toTarget = center - cameraPos_;
-        float targetDist = glm::length(toTarget);
-        if (targetDist < 0.001f) return true;
-
-        glm::vec3 dir = toTarget / targetDist;
-
-        // Intersect camera ray with globe sphere (origin-centered).
-        // If first hit is significantly before target's near boundary,
-        // target is occluded by globe horizon.
-        float b = glm::dot(cameraPos_, dir);
-        float c = glm::dot(cameraPos_, cameraPos_) - globeRadius_ * globeRadius_;
-        float disc = b * b - c;
-        if (disc <= 0.0f) {
-            return true;  // No globe hit along this ray => visible.
-        }
-
-        float sqrtDisc = std::sqrt(disc);
-        float t0 = -b - sqrtDisc;  // nearest intersection
-        float t1 = -b + sqrtDisc;
-        float tHit = (t0 > 0.0f) ? t0 : t1;
-        if (tHit <= 0.0f) {
+        if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z)) {
             return true;
         }
 
-        // Conservative allowance for target radius and numeric noise.
-        float nearTarget = std::max(0.0f, targetDist - radius);
-        return tHit + 1e-3f >= nearTarget;
+        // Horizon plane (exact for points on the occluder sphere):
+        // Tangent points satisfy: C·P = R^2 where C is camera position (origin-centered).
+        //
+        // For a target sphere, test if ANY point of that sphere can lie on the visible side:
+        // max(C·P) over P in targetSphere = C·center + |C|*radius.
+        //
+        // This is conservative and avoids false negatives that lead to low-LOD coverage holes.
+        float dotCenter = glm::dot(cameraPos_, center);
+        float maxDot = dotCenter + std::max(0.0f, radius) * cameraHeight_;
+        float horizon = globeRadius_ * globeRadius_;
+        return maxDot >= horizon - 1e-3f;
     }
 
 private:

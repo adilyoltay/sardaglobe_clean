@@ -64,7 +64,9 @@ public:
     ~TileScheduler();
     
     // Request a tile to be loaded
-    void Request(const TileKey& key, Priority priority, float score = 0.0f);
+    // Returns true if the request was enqueued, false if it was skipped due to
+    // backpressure or because the tile is already in-flight.
+    bool Request(const TileKey& key, Priority priority, float score = 0.0f);
     
     // Cancel a pending request
     void Cancel(const TileKey& key);
