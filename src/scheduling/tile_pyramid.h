@@ -37,6 +37,7 @@ public:
     // Returns the selection result for this frame
     const LodSelection& Select(
         const glm::vec3& cameraPos,
+        const glm::vec3& cameraVelocity, // Camera velocity (km/s) for predictive prefetch
         const glm::vec3& viewDir,  // Camera forward direction for center bias
         const glm::mat4& mvp,
         float fovDegrees,
@@ -81,8 +82,8 @@ private:
                        const glm::vec3& viewDir, float fovDegrees, int viewportHeight);
     
     // Build ranked lists from selection
-    void BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& viewDir,
-                          float fovDegrees, int viewportHeight);
+    void BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& cameraVelocity,
+                          const glm::vec3& viewDir, float fovDegrees, int viewportHeight);
     
     LodSelector selector_;
     LodSelector::Settings settings_;

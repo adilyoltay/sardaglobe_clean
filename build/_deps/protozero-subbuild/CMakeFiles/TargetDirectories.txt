@@ -1,3 +1,0 @@
-/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/protozero-subbuild/CMakeFiles/protozero-populate.dir
-/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/protozero-subbuild/CMakeFiles/edit_cache.dir
-/Users/adilyoltay/Desktop/sardaglobe_clean/build/_deps/protozero-subbuild/CMakeFiles/rebuild_cache.dir

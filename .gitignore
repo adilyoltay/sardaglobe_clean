@@ -26,3 +26,6 @@ tile_cache/
 # Temporary files
 *.tmp
 *.log
+build_review/
+imgui.ini
+test_screenshots/

@@ -112,13 +112,16 @@ HeightmapTexture HeightmapManager::CreateTexture(const HeightmapUploadRequest& r
                  req.gridSize, req.gridSize, 0,
                  GL_RED, GL_FLOAT, req.normalizedHeights.data());
     
-    // Bilinear filtering for smooth height interpolation
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    // Trilinear filtering: needed for corner-LOD interpolation (textureLod in vertex shader)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     
     // Clamp to edge to prevent seam artifacts
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // Build mip chain for LOD-aware sampling on mixed-LOD tile borders.
+    glGenerateMipmap(GL_TEXTURE_2D);
     
     glBindTexture(GL_TEXTURE_2D, 0);
     

@@ -36,6 +36,7 @@ public:
         int maxNeighborDelta = 1;      // Max LOD difference between neighbors
         bool enforceNeighborDelta = true;  // Enable conformance pass
         int maxConformPasses = 6;      // Prevent infinite refinement
+        bool lodChildQuorum = true;    // Refine only when full child set is render-ready
         
         // Debug culling toggles (for gap diagnosis)
         bool disableFrustumCull = false;
@@ -48,6 +49,7 @@ public:
     // fovDegrees should come directly from camera, NOT extracted from MVP
     LodSelection Select(
         const glm::vec3& cameraPos,
+        const glm::vec3& cameraVelocity,
         const glm::mat4& mvp,
         float fovDegrees,  // CRITICAL: Pass FOV directly from camera
         float tiltDegrees, // Camera tilt (0=looking down, 90=horizon)
@@ -85,7 +87,7 @@ private:
         float tiltFactor
     );
     
-    bool AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady);
+    bool AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady, const Settings& settings);
     
     // Neighbor LOD conformance (FAZ 1.2)
     void EnforceNeighborConformance(
@@ -95,6 +97,12 @@ private:
     );
     
     void RebuildRequiredSet(LodSelection& result);
+    void AddPredictivePrefetch(
+        const glm::vec3& cameraPos,
+        const glm::vec3& cameraVelocity,
+        const Settings& settings,
+        LodSelection& result
+    );
     
     Frustum frustum_;
     HorizonCuller horizon_;

@@ -94,7 +94,9 @@ add_executable(native_globe
   # IO module
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
+  src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
+  src/io/memory_tile_cache.cpp
   src/io/tile_url_template.cpp
   src/io/dem_manager.cpp
   # Scheduling module
@@ -105,12 +107,14 @@ add_executable(native_globe
   src/scheduling/job_system.cpp
   # Rendering module
   src/rendering/texture_manager.cpp
+  src/rendering/texture_atlas_allocator.cpp
   src/rendering/shader_manager.cpp
   src/rendering/tile_renderer.cpp
   src/rendering/mesh_template.cpp
   src/rendering/tile_mesh_builder.cpp
   src/rendering/tile_mesh_scheduler.cpp
   src/rendering/render_frame.cpp
+  src/rendering/heightmap_manager.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
   src/core/layer_manager.cpp
@@ -161,6 +165,18 @@ target_include_directories(lod_conformance_test PRIVATE
 target_link_libraries(lod_conformance_test PRIVATE glm::glm)
 add_test(NAME LodConformanceTest COMMAND lod_conformance_test)
 
+# Predictive prefetch selection test (velocity-aware expansion)
+add_executable(predictive_prefetch_test
+  tests/predictive_prefetch_test.cpp
+  src/scheduling/lod_selector.cpp
+)
+target_include_directories(predictive_prefetch_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(predictive_prefetch_test PRIVATE glm::glm)
+add_test(NAME PredictivePrefetchTest COMMAND predictive_prefetch_test)
+
 # Edge Mask Test
 add_executable(edge_mask_test
   tests/edge_mask_test.cpp
@@ -183,3 +199,255 @@ target_include_directories(globe_system_test PRIVATE
 )
 target_link_libraries(globe_system_test PRIVATE glm::glm)
 add_test(NAME GlobeSystemTest COMMAND globe_system_test)
+
+# Tile Fade Test (Unpop behavior)
+add_executable(tile_fade_test
+  tests/tile_fade_test.cpp
+)
+target_include_directories(tile_fade_test PRIVATE
+  src
+)
+target_link_libraries(tile_fade_test PRIVATE glm::glm)
+add_test(NAME TileFadeTest COMMAND tile_fade_test)
+
+# Corner LOD mapping test (uCornerLods helpers)
+add_executable(corner_lod_test
+  tests/corner_lod_test.cpp
+)
+target_include_directories(corner_lod_test PRIVATE
+  src
+)
+target_link_libraries(corner_lod_test PRIVATE glm::glm)
+add_test(NAME CornerLodTest COMMAND corner_lod_test)
+
+# Tile terrain morph timing test
+add_executable(tile_terrain_morph_test
+  tests/tile_terrain_morph_test.cpp
+)
+target_include_directories(tile_terrain_morph_test PRIVATE
+  src
+)
+target_link_libraries(tile_terrain_morph_test PRIVATE glm::glm)
+add_test(NAME TileTerrainMorphTest COMMAND tile_terrain_morph_test)
+
+# Tile cache telemetry counters test
+add_executable(tile_cache_stats_test
+  tests/tile_cache_stats_test.cpp
+  src/io/tile_cache.cpp
+)
+target_include_directories(tile_cache_stats_test PRIVATE
+  src
+)
+target_link_libraries(tile_cache_stats_test PRIVATE glm::glm)
+add_test(NAME TileCacheStatsTest COMMAND tile_cache_stats_test)
+
+# Depth precision projection test (standard vs reversed-Z)
+add_executable(depth_precision_test
+  tests/depth_precision_test.cpp
+  src/camera/earth_camera.cpp
+)
+target_include_directories(depth_precision_test PRIVATE
+  src
+)
+target_link_libraries(depth_precision_test PRIVATE glm::glm)
+add_test(NAME DepthPrecisionTest COMMAND depth_precision_test)
+
+# Memory tile cache LRU/telemetry test
+add_executable(memory_tile_cache_test
+  tests/memory_tile_cache_test.cpp
+  src/io/memory_tile_cache.cpp
+)
+target_include_directories(memory_tile_cache_test PRIVATE
+  src
+)
+target_link_libraries(memory_tile_cache_test PRIVATE glm::glm)
+add_test(NAME MemoryTileCacheTest COMMAND memory_tile_cache_test)
+
+# Decoded blob pack/unpack format test
+add_executable(decoded_tile_blob_test
+  tests/decoded_tile_blob_test.cpp
+  src/io/decoded_tile_blob.cpp
+)
+target_include_directories(decoded_tile_blob_test PRIVATE
+  src
+)
+target_link_libraries(decoded_tile_blob_test PRIVATE glm::glm)
+add_test(NAME DecodedTileBlobTest COMMAND decoded_tile_blob_test)
+
+# Decoder fast-path test for pre-decoded cache blobs
+add_executable(tile_decoder_blob_fastpath_test
+  tests/tile_decoder_blob_fastpath_test.cpp
+  src/io/tile_decoder.cpp
+  src/io/decoded_tile_blob.cpp
+)
+target_include_directories(tile_decoder_blob_fastpath_test PRIVATE
+  src
+  third_party
+)
+target_link_libraries(tile_decoder_blob_fastpath_test PRIVATE glm::glm)
+add_test(NAME TileDecoderBlobFastpathTest COMMAND tile_decoder_blob_fastpath_test)
+
+# Texture atlas allocator test
+add_executable(texture_atlas_allocator_test
+  tests/texture_atlas_allocator_test.cpp
+  src/rendering/texture_atlas_allocator.cpp
+)
+target_include_directories(texture_atlas_allocator_test PRIVATE
+  src
+)
+target_link_libraries(texture_atlas_allocator_test PRIVATE glm::glm)
+add_test(NAME TextureAtlasAllocatorTest COMMAND texture_atlas_allocator_test)
+
+# Frustum extraction regression test
+add_executable(frustum_extract_test
+  tests/frustum_extract_test.cpp
+)
+target_include_directories(frustum_extract_test PRIVATE
+  src
+)
+target_link_libraries(frustum_extract_test PRIVATE glm::glm)
+add_test(NAME FrustumExtractTest COMMAND frustum_extract_test)
+
+# LOD leaf non-empty regression test
+add_executable(lod_leaf_nonempty_test
+  tests/lod_leaf_nonempty_test.cpp
+  src/scheduling/lod_selector.cpp
+)
+target_include_directories(lod_leaf_nonempty_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(lod_leaf_nonempty_test PRIVATE glm::glm)
+add_test(NAME LodLeafNonEmptyTest COMMAND lod_leaf_nonempty_test)
+
+# Atlas gutter + UV inset regression test
+add_executable(atlas_gutter_uv_test
+  tests/atlas_gutter_uv_test.cpp
+  src/rendering/texture_atlas_allocator.cpp
+)
+target_include_directories(atlas_gutter_uv_test PRIVATE
+  src
+)
+target_link_libraries(atlas_gutter_uv_test PRIVATE glm::glm)
+add_test(NAME AtlasGutterUvTest COMMAND atlas_gutter_uv_test)
+
+# DEM parent fallback sampling test
+add_executable(dem_fallback_test
+  tests/dem_fallback_test.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(dem_fallback_test PRIVATE
+  src
+)
+target_link_libraries(dem_fallback_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME DemFallbackTest COMMAND dem_fallback_test)
+
+# DEM continuity test (exact + ancestor mixed path)
+add_executable(dem_continuity_test
+  tests/dem_continuity_test.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(dem_continuity_test PRIVATE
+  src
+)
+target_link_libraries(dem_continuity_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME DemContinuityTest COMMAND dem_continuity_test)
+
+# DEM edge equalization fallback regression test
+add_executable(dem_edge_equalization_fallback_test
+  tests/dem_edge_equalization_fallback_test.cpp
+  src/rendering/tile_mesh_builder.cpp
+  src/rendering/mesh_template.cpp
+  src/core/ellipsoid.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(dem_edge_equalization_fallback_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(dem_edge_equalization_fallback_test PRIVATE glm::glm glad CURL::libcurl)
+add_test(NAME DemEdgeEqualizationFallbackTest COMMAND dem_edge_equalization_fallback_test)
+
+# Mesh template stitch/skirt mask variant test
+add_executable(mesh_template_stitch_mask_test
+  tests/mesh_template_stitch_mask_test.cpp
+  src/rendering/mesh_template.cpp
+)
+target_include_directories(mesh_template_stitch_mask_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(mesh_template_stitch_mask_test PRIVATE glm::glm glad)
+add_test(NAME MeshTemplateStitchMaskTest COMMAND mesh_template_stitch_mask_test)
+
+# Selective skirt mask test
+add_executable(selective_skirt_mask_test
+  tests/selective_skirt_mask_test.cpp
+  src/rendering/tile_mesh_builder.cpp
+  src/rendering/mesh_template.cpp
+  src/core/ellipsoid.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(selective_skirt_mask_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(selective_skirt_mask_test PRIVATE glm::glm glad CURL::libcurl)
+add_test(NAME SelectiveSkirtMaskTest COMMAND selective_skirt_mask_test)
+
+# LOD child quorum policy test
+add_executable(lod_child_quorum_test
+  tests/lod_child_quorum_test.cpp
+  src/scheduling/lod_selector.cpp
+)
+target_include_directories(lod_child_quorum_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(lod_child_quorum_test PRIVATE glm::glm)
+add_test(NAME LodChildQuorumTest COMMAND lod_child_quorum_test)
+
+# TilePyramid child-ready policy test
+add_executable(tile_pyramid_child_ready_test
+  tests/tile_pyramid_child_ready_test.cpp
+  src/scheduling/tile_pyramid.cpp
+  src/scheduling/lod_selector.cpp
+)
+target_include_directories(tile_pyramid_child_ready_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(tile_pyramid_child_ready_test PRIVATE glm::glm)
+add_test(NAME TilePyramidChildReadyTest COMMAND tile_pyramid_child_ready_test)
+
+# DEM effective-level policy test
+add_executable(dem_effective_level_policy_test
+  tests/dem_effective_level_policy_test.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(dem_effective_level_policy_test PRIVATE
+  src
+)
+target_link_libraries(dem_effective_level_policy_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME DemEffectiveLevelPolicyTest COMMAND dem_effective_level_policy_test)
+
+# Seam metric truth test
+add_executable(seam_metric_truth_test
+  tests/seam_metric_truth_test.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(seam_metric_truth_test PRIVATE
+  src
+)
+target_link_libraries(seam_metric_truth_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME SeamMetricTruthTest COMMAND seam_metric_truth_test)
+
+# Visual parity preset gate test
+add_executable(visual_parity_presets_test
+  tests/visual_parity_presets_test.cpp
+)
+target_include_directories(visual_parity_presets_test PRIVATE
+  src
+)
+target_link_libraries(visual_parity_presets_test PRIVATE glm::glm)
+add_test(NAME VisualParityPresetsTest COMMAND visual_parity_presets_test)

@@ -111,6 +111,21 @@ private:
     // Tiles
     std::unordered_map<TileKey, Tile> tiles_;
     std::unordered_set<TileKey> baseTileKeys_;
+
+    // BuildNextScene -> RenderScene snapshot (P2.1).
+    struct SceneSnapshot {
+        bool valid = false;
+        glm::mat4 mvp{1.0f};
+        glm::vec3 cameraPos{0.0f};
+        std::unordered_set<TileKey> leafSet;
+        double currentTime = 0.0;
+        uint32_t loadingTexture = 0;
+        bool wireframe = false;
+        bool useLogDepth = false;
+        float logDepthFarKm = 1.0f;
+        bool useHeightmap = false;
+    };
+    SceneSnapshot sceneSnapshot_;
     
     // Current leaf set for render filtering (updated each frame in Update)
     std::unordered_set<TileKey> currentLeafSet_;
@@ -118,6 +133,19 @@ private:
     std::unordered_set<TileKey> renderLeafSet_;
     std::unordered_map<TileKey, double> lastLeafSeenTime_;
     double leafHoldSeconds_ = 0.5;
+    uint64_t leafUnderflowFrames_ = 0;
+    int consecutiveLeafUnderflow_ = 0;
+    std::unordered_map<TileKey, double> demMeshWaitStartSec_;
+    double demWaitAccumMs_ = 0.0;
+    uint64_t demWaitSamples_ = 0;
+    size_t demTriggeredMeshRebuilds_ = 0;
+    glm::dvec3 prevCameraPos_{0.0};
+    bool hasPrevCameraPos_ = false;
+    glm::vec3 cameraVelocityKmPerSec_{0.0f};
+    float cameraSpeedKmPerSec_ = 0.0f;
+    float currentNearPlaneKm_ = 0.001f;
+    float currentFarPlaneKm_ = 30000.0f;
+    bool frameRequested_ = true;
     
     // Mesh rebuild via JobSystem (time-budgeted, visible-priority)
     static constexpr int MAX_MESH_REBUILDS_PER_FRAME = 4;
@@ -154,6 +182,29 @@ private:
         size_t decodeQueueSize = 0;
         double avgFetchMs = 0.0;
         double avgDecodeMs = 0.0;
+        size_t droppedFetchResults = 0;
+        size_t droppedDecodeResults = 0;
+        size_t decodedCacheReadHits = 0;
+        size_t decodedCacheReadMisses = 0;
+        size_t decodedCacheWrites = 0;
+        size_t decodedCacheWriteRejects = 0;
+        size_t decodedCacheEvictions = 0;
+        size_t decodedCacheEntries = 0;
+        size_t decodedCacheBytesUsed = 0;
+        size_t decodeBypassHits = 0;
+        size_t memoryCacheReadHits = 0;
+        size_t memoryCacheReadMisses = 0;
+        size_t memoryCacheWrites = 0;
+        size_t memoryCacheWriteRejects = 0;
+        size_t memoryCacheEvictions = 0;
+        size_t memoryCacheEntries = 0;
+        size_t memoryCacheBytesUsed = 0;
+        size_t diskCacheReadHits = 0;
+        size_t diskCacheReadMisses = 0;
+        size_t diskCacheWrites = 0;
+        size_t diskCacheWriteFails = 0;
+        size_t networkFetches = 0;
+        size_t totalFetchRequests = 0;
         int visibleTiles = 0;
         int currentZoom = 0;
         double altitude = 0.0;
@@ -164,11 +215,31 @@ private:
         size_t textureMemoryMB = 0;
         // Gap-free telemetry
         int renderableLeaves = 0;   // Leaves rendered normally
+        int crossfadingLeaves = 0;  // Leaves currently blending from parent
         int fallbackTiles = 0;      // Parent fallback tiles
         int placeholderTiles = 0;   // Last-resort placeholder
         int leafNoMesh = 0;         // Leaves without mesh
         int leafNoTexture = 0;      // Leaves with mesh but no texture
         int missingTiles = 0;       // True gaps
+        int drawCalls = 0;
+        int trianglesRendered = 0;
+        bool atlasEnabled = false;
+        int atlasPages = 0;
+        int atlasUsedSlots = 0;
+        int atlasCapacitySlots = 0;
+        int instancedBatches = 0;
+        int instancedTiles = 0;
+        float cameraSpeedKmPerSec = 0.0f;
+        double demWaitMs = 0.0;
+        size_t meshRebuildCount = 0;
+        uint64_t leafUnderflowFrames = 0;
+        int seamEdgeCount = 0;
+        double avgEdgeHeightDeltaM = 0.0;
+        int tilesUsingAncestorDem = 0;
+        double seamGapP95M = 0.0;
+        double seamGapMaxM = 0.0;
+        int cliffEdgeCount = 0;
+        double ancestorDemRatio = 0.0;
     };
     DebugStats debugStats_;
     bool showDebugPanel_ = true;

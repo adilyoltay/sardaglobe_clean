@@ -13,27 +13,53 @@ namespace globe {
 // Google Earth style: batch rendering with state management
 class TileRenderer {
 public:
+    struct FlatTileInstance {
+        const Tile* tile = nullptr;
+        float fade = 1.0f;
+    };
+
     struct RenderStats {
         int tilesRendered = 0;
         int drawCalls = 0;
         int trianglesRendered = 0;
+        int instancedBatches = 0;
+        int instancedTiles = 0;
     };
     
     explicit TileRenderer(ShaderManager& shaderManager);
-    ~TileRenderer() = default;
+    ~TileRenderer();
     
     // Begin a render batch
-    void BeginBatch(const glm::mat4& mvp, bool wireframe = false);
+    void BeginBatch(const glm::mat4& mvp, bool wireframe = false,
+                    bool useLogDepth = false, float logDepthFarKm = 1.0f);
     
     // Render a single tile (uses tile's own texture)
-    void RenderTile(const Tile& tile);
+    void RenderTile(const Tile& tile, float terrainMorph = 1.0f);
     
     // Render a tile with a specific texture (for placeholder)
-    void RenderTileWithTexture(const Tile& tile, uint32_t textureId);
+    void RenderTileWithTexture(const Tile& tile, uint32_t textureId, float terrainMorph = 1.0f);
     
     // Render a tile with heightmap for terrain displacement
     void RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapId, 
-                                  float heightMin, float heightMax);
+                                  float heightMin, float heightMax,
+                                  float terrainMorph = 1.0f);
+
+    // Render child tile with shader-level parent/child crossfade (unpop)
+    void RenderTileWithCrossfade(const Tile& tile,
+                                 uint32_t unpopTextureId,
+                                 const glm::vec4& texScaleOffsetUnpop,
+                                 float unpopBlend,
+                                 uint32_t heightmapId = 0,
+                                 float heightMin = 0.0f,
+                                 float heightMax = 0.0f,
+                                 float terrainMorph = 1.0f);
+
+    // Render flat (no-heightmap/no-crossfade) tiles as a single instanced draw.
+    // All instances must share the same textureId and mesh segment count.
+    void RenderFlatTilesInstanced(uint32_t textureId,
+                                  int segments,
+                                  const std::vector<FlatTileInstance>& instances);
+    bool SupportsInstancedFlatPath() const { return instancedProgram_ != 0; }
     
     // End the batch and restore state
     void EndBatch();
@@ -49,12 +75,20 @@ public:
     void DestroyPivotGeometry();
 
 private:
+    bool InitInstancedResources();
+    void DestroyInstancedResources();
+    bool EnsureInstancedGrid(int segments);
+    uint32_t CompileShader(uint32_t type, const char* source);
+    uint32_t LinkProgram(uint32_t vertexShader, uint32_t fragmentShader);
+
     ShaderManager& shaderManager_;
     
     // Batch state
     bool batchActive_ = false;
     bool wireframeMode_ = false;
     glm::mat4 currentMvp_;
+    bool useLogDepthBatch_ = false;
+    float logDepthFarBatch_ = 1.0f;
     
     // Stats
     RenderStats stats_;
@@ -63,6 +97,20 @@ private:
     uint32_t pivotVao_ = 0;
     uint32_t pivotVbo_ = 0;
     int pivotVertexCount_ = 0;
+
+    // Flat tile instancing batch path (P3.2 draw-call reduction).
+    uint32_t instancedProgram_ = 0;
+    uint32_t instancedVao_ = 0;
+    uint32_t instancedGridVbo_ = 0;
+    uint32_t instancedGridEbo_ = 0;
+    uint32_t instancedInstanceVbo_ = 0;
+    int instancedSegments_ = -1;
+    uint32_t instancedIndexCount_ = 0;
+    int instancedMvpLoc_ = -1;
+    int instancedTextureLoc_ = -1;
+    int instancedUseLogDepthLoc_ = -1;
+    int instancedLogDepthFarLoc_ = -1;
+    std::vector<float> instancedInstanceData_;
 };
 
 } // namespace globe

@@ -24,41 +24,37 @@ public:
     
     // Extract frustum planes from MVP matrix
     void Extract(const glm::mat4& mvp) {
-        // Left
-        planes_[Left].normal.x = mvp[0][3] + mvp[0][0];
-        planes_[Left].normal.y = mvp[1][3] + mvp[1][0];
-        planes_[Left].normal.z = mvp[2][3] + mvp[2][0];
-        planes_[Left].distance = mvp[3][3] + mvp[3][0];
-        
-        // Right
-        planes_[Right].normal.x = mvp[0][3] - mvp[0][0];
-        planes_[Right].normal.y = mvp[1][3] - mvp[1][0];
-        planes_[Right].normal.z = mvp[2][3] - mvp[2][0];
-        planes_[Right].distance = mvp[3][3] - mvp[3][0];
-        
-        // Bottom
-        planes_[Bottom].normal.x = mvp[0][3] + mvp[0][1];
-        planes_[Bottom].normal.y = mvp[1][3] + mvp[1][1];
-        planes_[Bottom].normal.z = mvp[2][3] + mvp[2][1];
-        planes_[Bottom].distance = mvp[3][3] + mvp[3][1];
-        
-        // Top
-        planes_[Top].normal.x = mvp[0][3] - mvp[0][1];
-        planes_[Top].normal.y = mvp[1][3] - mvp[1][1];
-        planes_[Top].normal.z = mvp[2][3] - mvp[2][1];
-        planes_[Top].distance = mvp[3][3] - mvp[3][1];
-        
-        // Near
-        planes_[Near].normal.x = mvp[0][3] + mvp[0][2];
-        planes_[Near].normal.y = mvp[1][3] + mvp[1][2];
-        planes_[Near].normal.z = mvp[2][3] + mvp[2][2];
-        planes_[Near].distance = mvp[3][3] + mvp[3][2];
-        
-        // Far
-        planes_[Far].normal.x = mvp[0][3] - mvp[0][2];
-        planes_[Far].normal.y = mvp[1][3] - mvp[1][2];
-        planes_[Far].normal.z = mvp[2][3] - mvp[2][2];
-        planes_[Far].distance = mvp[3][3] - mvp[3][2];
+        // GLM is column-major (`m[col][row]`). Build explicit rows first and
+        // then apply the canonical extraction: row3 +/- row{0,1,2}.
+        glm::vec4 row0(mvp[0][0], mvp[1][0], mvp[2][0], mvp[3][0]);
+        glm::vec4 row1(mvp[0][1], mvp[1][1], mvp[2][1], mvp[3][1]);
+        glm::vec4 row2(mvp[0][2], mvp[1][2], mvp[2][2], mvp[3][2]);
+        glm::vec4 row3(mvp[0][3], mvp[1][3], mvp[2][3], mvp[3][3]);
+
+        const glm::vec4 left = row3 + row0;
+        const glm::vec4 right = row3 - row0;
+        const glm::vec4 bottom = row3 + row1;
+        const glm::vec4 top = row3 - row1;
+        const glm::vec4 nearPlane = row3 + row2;
+        const glm::vec4 farPlane = row3 - row2;
+
+        planes_[Left].normal = glm::vec3(left);
+        planes_[Left].distance = left.w;
+
+        planes_[Right].normal = glm::vec3(right);
+        planes_[Right].distance = right.w;
+
+        planes_[Bottom].normal = glm::vec3(bottom);
+        planes_[Bottom].distance = bottom.w;
+
+        planes_[Top].normal = glm::vec3(top);
+        planes_[Top].distance = top.w;
+
+        planes_[Near].normal = glm::vec3(nearPlane);
+        planes_[Near].distance = nearPlane.w;
+
+        planes_[Far].normal = glm::vec3(farPlane);
+        planes_[Far].distance = farPlane.w;
         
         // Normalize planes
         for (auto& plane : planes_) {

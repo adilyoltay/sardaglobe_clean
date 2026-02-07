@@ -48,6 +48,7 @@ public:
     int GetPendingCount() const;
     uint64_t GetDecodeCount() const;
     uint64_t GetTotalDecodeTimeUs() const;
+    uint64_t GetDecodedBlobHits() const;
 
 private:
     void WorkerLoop();
@@ -66,6 +67,7 @@ private:
     // Timing stats (microseconds)
     std::atomic<uint64_t> decodeCount_{0};
     std::atomic<uint64_t> totalDecodeTimeUs_{0};
+    std::atomic<uint64_t> decodedBlobHits_{0};
     
     ResultCallback resultCallback_;
     std::mutex callbackMutex_;

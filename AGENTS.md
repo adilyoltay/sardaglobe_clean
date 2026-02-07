@@ -16,6 +16,7 @@ Amacımız Google Earth kalitesinde bir globe engine geliştirmektir. Tüm davra
 ## Dokümanlar
 
 - `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` — **ANA TEKNİK REFERANS** (3 bölüm birleşik: GE WASM RE + 3D Terrain Planı + Tile Pipeline Optimizasyon Planı)
+- `docs/GOOGLE_EARTH_PRO_DESKTOP_RE_ANALYSIS.md` — **GE Pro Desktop Native Binary RE** (earth::evll sınıf hiyerarşisi, IG render engine, Drawable sistem, Navigation detay, Proto şemaları)
 - `docs/GOOGLE_EARTH_MOUSE_NAVIGATION_ANALYSIS.md` — GE navigasyon RE (kamera, orbit, zoom, momentum)
 - `docs/MASTER_DEVELOPMENT_PLAN.md` — 7-faz geliştirme yol haritası
 - `README.md` — Proje genel açıklaması (build/run notları)

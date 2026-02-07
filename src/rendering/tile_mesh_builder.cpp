@@ -8,10 +8,19 @@
 
 namespace globe {
 
+namespace {
+
+constexpr int kVertexStrideFloats = 9;  // pos(3), normal(3), uv(2), heightKm(1)
+
+} // namespace
+
 TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     const TileKey& key,
     const Extent& inputExtent,
     uint8_t edgeMask,
+    uint8_t stitchMask,
+    uint8_t skirtMask,
+    int demTargetLevel,
     DemManager* demManager,
     const Config& config,
     bool useSharedEBO
@@ -19,6 +28,9 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     BuildResult result;
     result.key = key;
     result.useSharedEBO = useSharedEBO;
+    result.stitchMask = stitchMask;
+    result.skirtMask = skirtMask;
+    result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(demTargetLevel, 0, 255));
     
     // Use more segments for terrain mesh when DEM is enabled
     // Match segments to DEM grid: demMeshN points = demMeshN-1 segments
@@ -27,7 +39,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     const int indexCount = segments * segments * 6;
     result.segments = segments;
     
-    result.vertices.reserve(vertexCount * 8);  // pos(3) + normal(3) + uv(2)
+    result.vertices.reserve(vertexCount * kVertexStrideFloats);
     if (!useSharedEBO) {
         result.indices.reserve(indexCount);
     }
@@ -55,23 +67,63 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     double mercatorYTop = std::log(std::tan(M_PI / 4.0 + latTopRad / 2.0));
     double mercatorYBottom = std::log(std::tan(M_PI / 4.0 + latBottomRad / 2.0));
     
-    // Get height sampler if DEM is available AND we're in CPU_MESH_BAKE mode
-    // In GPU_HEIGHTMAP_DISPLACE mode, mesh stays flat - shader does displacement
-    HeightSampler heightSampler = nullptr;
+    // DEM sampling for CPU-mesh displacement mode.
+    bool demSamplingEnabled = false;
+    bool hasExactDemTile = false;
+    int authoritativeLevel = -1;
     if (demManager && config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
-        heightSampler = demManager->GetHeightSampler();
+        hasExactDemTile = demManager->HasData(key);
+        if (demTargetLevel >= 0) {
+            int clampedTargetLevel = std::clamp(demTargetLevel, 0, key.level);
+            TileKey targetKey = key;
+            while (targetKey.level > clampedTargetLevel) {
+                targetKey = targetKey.Parent();
+            }
+            if (demManager->HasData(targetKey)) {
+                authoritativeLevel = targetKey.level;
+                demSamplingEnabled = true;
+            }
+        }
+
+        if (!demSamplingEnabled) {
+            TileKey probe = key;
+            while (probe.level >= 0) {
+                if (demManager->HasData(probe)) {
+                    authoritativeLevel = probe.level;
+                    demSamplingEnabled = true;
+                    break;
+                }
+                if (probe.level == 0) {
+                    break;
+                }
+                probe = probe.Parent();
+            }
+        }
     }
+    if (authoritativeLevel < 0) {
+        authoritativeLevel = key.level;
+    }
+    result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(authoritativeLevel, 0, 255));
     
     result.demUsed = false;
-    result.demPending = false;
+    // Keep pending=true while exact child DEM is missing, even if parent fallback provides heights.
+    result.demPending = demSamplingEnabled && !hasExactDemTile;
     
-    // Track min/max height for height-aware skirt depth
-    double minHeightKm = std::numeric_limits<double>::max();
-    double maxHeightKm = std::numeric_limits<double>::lowest();
-    
-    // First pass: Generate positions (normals computed in second pass for DEM terrain)
+    // First pass: compute lon/lat + DEM sample heights.
+    std::vector<double> sampleLonDeg;
+    std::vector<double> sampleLatDeg;
+    sampleLonDeg.reserve(static_cast<size_t>(vertexCount));
+    sampleLatDeg.reserve(static_cast<size_t>(vertexCount));
+
     std::vector<glm::dvec3> positions;
-    positions.reserve((segments + 1) * (segments + 1));
+    std::vector<float> heightsKm;
+    positions.reserve(static_cast<size_t>(vertexCount));
+    heightsKm.resize(static_cast<size_t>(vertexCount), 0.0f);
+
+    int demSourceLevelMin = std::numeric_limits<int>::max();
+    int demSourceLevelMax = std::numeric_limits<int>::min();
+    int demMissingSamples = 0;
+    bool sawUnexpectedAncestorSample = false;
     
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
@@ -94,38 +146,103 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             bool isWestBorder = (ix == 0);
             bool isEastBorder = (ix == segments);
             
-            // Determine sample level for DEM (edge equalization)
-            int sampleLevel = key.level;
-            if (heightSampler && sampleLevel > 0) {
-                // Use coarser level for border vertices with coarser neighbors
-                bool useCoarser = false;
-                if (isNorthBorder && (edgeMask & Tile::EDGE_NORTH)) useCoarser = true;
-                if (isEastBorder && (edgeMask & Tile::EDGE_EAST)) useCoarser = true;
-                if (isSouthBorder && (edgeMask & Tile::EDGE_SOUTH)) useCoarser = true;
-                if (isWestBorder && (edgeMask & Tile::EDGE_WEST)) useCoarser = true;
-                
-                if (useCoarser) {
-                    sampleLevel = std::max(0, sampleLevel - 1);
+            const size_t vertexIndex = static_cast<size_t>(iy * (segments + 1) + ix);
+            sampleLonDeg.push_back(lon);
+            sampleLatDeg.push_back(lat);
+
+            if (demSamplingEnabled) {
+                int sampleLevel = authoritativeLevel;
+                bool useCoarserEdgeLevel = false;
+                // Edge equalization should only be applied when sampling exact child DEM.
+                if (sampleLevel == key.level && sampleLevel > 0) {
+                    if (isNorthBorder && (edgeMask & Tile::EDGE_NORTH)) useCoarserEdgeLevel = true;
+                    if (isEastBorder && (edgeMask & Tile::EDGE_EAST)) useCoarserEdgeLevel = true;
+                    if (isSouthBorder && (edgeMask & Tile::EDGE_SOUTH)) useCoarserEdgeLevel = true;
+                    if (isWestBorder && (edgeMask & Tile::EDGE_WEST)) useCoarserEdgeLevel = true;
+                    if (useCoarserEdgeLevel) {
+                        sampleLevel = std::max(0, sampleLevel - 1);
+                    }
                 }
-            }
-            
-            // Get elevation from DEM
-            double heightKm = 0.0;
-            if (heightSampler) {
-                double heightMeters = 0.0;
-                if (heightSampler(lon, lat, sampleLevel, heightMeters)) {
-                    heightKm = heightMeters * 0.001 * config.demHeightScale;
+
+                DemSampleResult sample;
+                if (demManager->SampleHeightDetailed(lon, lat, sampleLevel, sample) && sample.ok) {
+                    heightsKm[vertexIndex] =
+                        static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
                     result.demUsed = true;
-                    minHeightKm = std::min(minHeightKm, heightKm);
-                    maxHeightKm = std::max(maxHeightKm, heightKm);
+                    demSourceLevelMin = std::min(demSourceLevelMin, sample.sourceLevel);
+                    demSourceLevelMax = std::max(demSourceLevelMax, sample.sourceLevel);
+                    if (sample.sourceLevel < sampleLevel) {
+                        int fallbackDelta = sampleLevel - sample.sourceLevel;
+                        bool isBorderVertex = isNorthBorder || isEastBorder || isSouthBorder || isWestBorder;
+                        bool toleratedBorderFallback = isBorderVertex && fallbackDelta <= 1;
+                        // Expected mixed source levels can happen on border vertices:
+                        // - explicit edge equalization (requested one level coarser)
+                        // - coordinate quantization exactly on tile boundaries
+                        // Interior fallbacks still indicate partial DEM availability.
+                        if (!toleratedBorderFallback) {
+                            sawUnexpectedAncestorSample = true;
+                        }
+                    }
                 } else {
+                    ++demMissingSamples;
                     result.demPending = true;
                 }
             }
-            
-            // Use Ellipsoid for geodetic to cartesian (OpenGlobus style)
-            glm::dvec3 pos = ellipsoid.GeodeticToCartesian(lon, lat, heightKm);
-            positions.push_back(pos);
+        }
+    }
+
+    // Parent-only fallback rule for partial availability:
+    // Only trigger when data is incomplete (missing samples or deeper fallback than requested).
+    // Mixed levels from intentional border equalization should not force full-tile downgrade.
+    if (demSamplingEnabled &&
+        (demMissingSamples > 0 ||
+         sawUnexpectedAncestorSample)) {
+        int uniformLevel = demSourceLevelMin;
+        if (uniformLevel == std::numeric_limits<int>::max()) {
+            uniformLevel = std::max(0, authoritativeLevel - 1);
+        }
+
+        const std::vector<float> previousHeightsKm = heightsKm;
+        demSourceLevelMin = std::numeric_limits<int>::max();
+        demSourceLevelMax = std::numeric_limits<int>::min();
+        demMissingSamples = 0;
+        result.demUsed = false;
+
+        for (size_t i = 0; i < heightsKm.size(); ++i) {
+            DemSampleResult sample;
+            if (demManager->SampleHeightDetailed(sampleLonDeg[i], sampleLatDeg[i], uniformLevel, sample) && sample.ok) {
+                heightsKm[i] = static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
+                result.demUsed = true;
+                demSourceLevelMin = std::min(demSourceLevelMin, sample.sourceLevel);
+                demSourceLevelMax = std::max(demSourceLevelMax, sample.sourceLevel);
+            } else {
+                // Preserve the first-pass value instead of forcing sea-level zero.
+                // Zero-injection creates visible cliffs at tile boundaries.
+                heightsKm[i] = previousHeightsKm[i];
+                ++demMissingSamples;
+                if (std::fabs(heightsKm[i]) > 1e-6f) {
+                    result.demUsed = true;
+                }
+            }
+        }
+        result.demPending = !hasExactDemTile || demMissingSamples > 0;
+    }
+
+    // Build cartesian positions from final sampled heights.
+    for (size_t i = 0; i < heightsKm.size(); ++i) {
+        glm::dvec3 pos = ellipsoid.GeodeticToCartesian(sampleLonDeg[i], sampleLatDeg[i], heightsKm[i]);
+        positions.push_back(pos);
+    }
+
+    // Track final min/max height for skirt-depth and terrain stats.
+    double minHeightKm = 0.0;
+    double maxHeightKm = 0.0;
+    if (result.demUsed && !heightsKm.empty()) {
+        minHeightKm = std::numeric_limits<double>::max();
+        maxHeightKm = std::numeric_limits<double>::lowest();
+        for (float h : heightsKm) {
+            minHeightKm = std::min(minHeightKm, static_cast<double>(h));
+            maxHeightKm = std::max(maxHeightKm, static_cast<double>(h));
         }
     }
     
@@ -139,6 +256,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             int idx = iy * (segments + 1) + ix;
             
             glm::dvec3 pos = positions[idx];
+            float heightKm = heightsKm[idx];
             glm::vec3 normal;
             
             if (result.demUsed) {
@@ -181,12 +299,23 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             result.vertices.push_back(normal.z);
             result.vertices.push_back(u);
             result.vertices.push_back(1.0f - v);  // Flip V
+            result.vertices.push_back(heightKm);
         }
     }
     
-    // Store height range for skirt depth calculation
+    // Store height/sample diagnostics for skirt depth + continuity telemetry
     result.minHeightKm = (minHeightKm != std::numeric_limits<double>::max()) ? minHeightKm : 0.0;
     result.maxHeightKm = (maxHeightKm != std::numeric_limits<double>::lowest()) ? maxHeightKm : 0.0;
+    if (!result.demUsed) {
+        demSourceLevelMin = key.level;
+        demSourceLevelMax = key.level;
+    } else {
+        if (demSourceLevelMin == std::numeric_limits<int>::max()) demSourceLevelMin = key.level;
+        if (demSourceLevelMax == std::numeric_limits<int>::min()) demSourceLevelMax = key.level;
+    }
+    result.demSourceLevelMin = static_cast<uint8_t>(std::clamp(demSourceLevelMin, 0, 255));
+    result.demSourceLevelMax = static_cast<uint8_t>(std::clamp(demSourceLevelMax, 0, 255));
+    result.demMissingSamples = static_cast<uint16_t>(std::clamp(demMissingSamples, 0, 65535));
     
     if (!useSharedEBO) {
         // Indices for main grid
@@ -205,15 +334,38 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                 result.indices.push_back(br);
             }
         }
+        result.mainIndexCount = static_cast<uint32_t>(result.indices.size());
     }
     
     // Generate skirts (GE-style seam hiding)
     double heightRange = result.maxHeightKm - result.minHeightKm;
-    GenerateSkirts(result.vertices, useSharedEBO ? nullptr : &result.indices, segments, key.level, heightRange);
+    uint8_t effectiveSkirtMask = config.selectiveSkirts ? skirtMask : static_cast<uint8_t>(Tile::EDGE_NORTH |
+                                                                                            Tile::EDGE_EAST |
+                                                                                            Tile::EDGE_SOUTH |
+                                                                                            Tile::EDGE_WEST);
+    GenerateSkirts(result.vertices,
+                   useSharedEBO ? nullptr : &result.indices,
+                   segments,
+                   key.level,
+                   effectiveSkirtMask,
+                   config,
+                   heightRange);
+    result.skirtMask = effectiveSkirtMask;
+    result.stitchMask = config.edgeStitching ? stitchMask : 0;
 
     if (useSharedEBO) {
-        result.indexCount = MeshTemplate::GetIndexCount(segments);
+        result.mainIndexCount = MeshTemplate::GetMainIndexCount(segments, result.stitchMask);
+        result.skirtIndexCount = MeshTemplate::GetSkirtIndexCount(segments, result.skirtMask);
+        result.indexCount = MeshTemplate::GetIndexCount(segments, result.stitchMask, result.skirtMask);
     } else {
+        if (result.mainIndexCount == 0) {
+            result.mainIndexCount = MeshTemplate::GetMainIndexCount(segments);
+        }
+        if (result.indices.size() >= result.mainIndexCount) {
+            result.skirtIndexCount = static_cast<uint32_t>(result.indices.size()) - result.mainIndexCount;
+        } else {
+            result.skirtIndexCount = 0;
+        }
         result.indexCount = static_cast<uint32_t>(result.indices.size());
     }
     
@@ -225,28 +377,31 @@ void TileMeshBuilder::GenerateSkirts(
     std::vector<unsigned int>* indices,
     int segments,
     int level,
+    uint8_t skirtMask,
+    const Config& config,
     double heightRange
 ) {
     const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
     
     // Calculate skirt depth based on tile size at this zoom level
     double tileArcKm = 40075.0 / (1 << level);
-    double skirtDepth = std::max(tileArcKm * 0.01, 0.001);  // 1% of tile or min 1m
-    
-    // Height-aware: ensure skirt covers terrain relief (2x height range)
+    double minDepth = std::max(0.001, static_cast<double>(config.skirtDepthNearKm));
+    double maxDepth = std::max(minDepth, static_cast<double>(config.skirtDepthFarKm));
+    double lodT = std::clamp(tileArcKm / 2500.0, 0.0, 1.0);
+    double skirtDepth = minDepth + (maxDepth - minDepth) * lodT;
     if (heightRange > 0.0) {
-        skirtDepth = std::max(skirtDepth, heightRange * 2.0);
+        skirtDepth = std::max(skirtDepth, heightRange * 0.10);
     }
-    
-    skirtDepth = std::min(skirtDepth, tileArcKm * 0.5);     // Max 50% of tile
+    skirtDepth = std::clamp(skirtDepth, minDepth, maxDepth);
     
     // Lambda to add a skirt vertex
     auto addSkirtVertex = [&](int mainIdx) {
-        float px = vertices[mainIdx * 8 + 0];
-        float py = vertices[mainIdx * 8 + 1];
-        float pz = vertices[mainIdx * 8 + 2];
-        float u = vertices[mainIdx * 8 + 6];
-        float v = vertices[mainIdx * 8 + 7];
+        float px = vertices[mainIdx * kVertexStrideFloats + 0];
+        float py = vertices[mainIdx * kVertexStrideFloats + 1];
+        float pz = vertices[mainIdx * kVertexStrideFloats + 2];
+        float u = vertices[mainIdx * kVertexStrideFloats + 6];
+        float v = vertices[mainIdx * kVertexStrideFloats + 7];
+        float h = vertices[mainIdx * kVertexStrideFloats + 8];
         
         // Push vertex inward (toward Earth center)
         glm::vec3 pos(px, py, pz);
@@ -261,6 +416,7 @@ void TileMeshBuilder::GenerateSkirts(
         vertices.push_back(radialDir.z);
         vertices.push_back(u);
         vertices.push_back(v);
+        vertices.push_back(h);
     };
     
     // Add skirt vertices for all 4 edges
@@ -289,53 +445,66 @@ void TileMeshBuilder::GenerateSkirts(
     unsigned int eastSkirtStart = westSkirtStart + segments + 1;
     
     // Generate skirt triangles
-    // North edge skirt
-    for (int i = 0; i < segments; ++i) {
-        unsigned int v0 = i;
-        unsigned int v1 = i + 1;
-        unsigned int v2 = northSkirtStart + i;
-        unsigned int v3 = northSkirtStart + i + 1;
-        if (indices) {
-            indices->push_back(v0); indices->push_back(v2); indices->push_back(v3);
-            indices->push_back(v0); indices->push_back(v3); indices->push_back(v1);
+    auto emitNorth = [&]() {
+        if ((skirtMask & Tile::EDGE_NORTH) == 0) return;
+        for (int i = 0; i < segments; ++i) {
+            unsigned int v0 = i;
+            unsigned int v1 = i + 1;
+            unsigned int v2 = northSkirtStart + i;
+            unsigned int v3 = northSkirtStart + i + 1;
+            if (indices) {
+                indices->push_back(v0); indices->push_back(v2); indices->push_back(v3);
+                indices->push_back(v0); indices->push_back(v3); indices->push_back(v1);
+            }
         }
-    }
-    
-    // South edge skirt (reversed winding)
-    for (int i = 0; i < segments; ++i) {
-        unsigned int v0 = segments * (segments + 1) + i;
-        unsigned int v1 = segments * (segments + 1) + i + 1;
-        unsigned int v2 = southSkirtStart + i;
-        unsigned int v3 = southSkirtStart + i + 1;
-        if (indices) {
-            indices->push_back(v0); indices->push_back(v3); indices->push_back(v2);
-            indices->push_back(v0); indices->push_back(v1); indices->push_back(v3);
+    };
+
+    auto emitSouth = [&]() {
+        if ((skirtMask & Tile::EDGE_SOUTH) == 0) return;
+        for (int i = 0; i < segments; ++i) {
+            unsigned int v0 = segments * (segments + 1) + i;
+            unsigned int v1 = segments * (segments + 1) + i + 1;
+            unsigned int v2 = southSkirtStart + i;
+            unsigned int v3 = southSkirtStart + i + 1;
+            if (indices) {
+                indices->push_back(v0); indices->push_back(v3); indices->push_back(v2);
+                indices->push_back(v0); indices->push_back(v1); indices->push_back(v3);
+            }
         }
-    }
-    
-    // West edge skirt (reversed winding)
-    for (int j = 0; j < segments; ++j) {
-        unsigned int v0 = j * (segments + 1);
-        unsigned int v1 = (j + 1) * (segments + 1);
-        unsigned int v2 = westSkirtStart + j;
-        unsigned int v3 = westSkirtStart + j + 1;
-        if (indices) {
-            indices->push_back(v0); indices->push_back(v3); indices->push_back(v2);
-            indices->push_back(v0); indices->push_back(v1); indices->push_back(v3);
+    };
+
+    auto emitWest = [&]() {
+        if ((skirtMask & Tile::EDGE_WEST) == 0) return;
+        for (int j = 0; j < segments; ++j) {
+            unsigned int v0 = j * (segments + 1);
+            unsigned int v1 = (j + 1) * (segments + 1);
+            unsigned int v2 = westSkirtStart + j;
+            unsigned int v3 = westSkirtStart + j + 1;
+            if (indices) {
+                indices->push_back(v0); indices->push_back(v3); indices->push_back(v2);
+                indices->push_back(v0); indices->push_back(v1); indices->push_back(v3);
+            }
         }
-    }
-    
-    // East edge skirt
-    for (int j = 0; j < segments; ++j) {
-        unsigned int v0 = j * (segments + 1) + segments;
-        unsigned int v1 = (j + 1) * (segments + 1) + segments;
-        unsigned int v2 = eastSkirtStart + j;
-        unsigned int v3 = eastSkirtStart + j + 1;
-        if (indices) {
-            indices->push_back(v0); indices->push_back(v2); indices->push_back(v3);
-            indices->push_back(v0); indices->push_back(v3); indices->push_back(v1);
+    };
+
+    auto emitEast = [&]() {
+        if ((skirtMask & Tile::EDGE_EAST) == 0) return;
+        for (int j = 0; j < segments; ++j) {
+            unsigned int v0 = j * (segments + 1) + segments;
+            unsigned int v1 = (j + 1) * (segments + 1) + segments;
+            unsigned int v2 = eastSkirtStart + j;
+            unsigned int v3 = eastSkirtStart + j + 1;
+            if (indices) {
+                indices->push_back(v0); indices->push_back(v2); indices->push_back(v3);
+                indices->push_back(v0); indices->push_back(v3); indices->push_back(v1);
+            }
         }
-    }
+    };
+
+    emitNorth();
+    emitEast();
+    emitSouth();
+    emitWest();
 }
 
 void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
@@ -356,7 +525,7 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
                  result.vertices.data(), GL_STATIC_DRAW);
     
     if (result.useSharedEBO) {
-        tile.ebo = MeshTemplate::GetOrCreateEbo(result.segments);
+        tile.ebo = MeshTemplate::GetOrCreateEbo(result.segments, result.stitchMask, result.skirtMask);
         tile.ownsEBO = false;
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, tile.ebo);
     } else {
@@ -367,21 +536,33 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     }
     
     // Position
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kVertexStrideFloats * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
     // Normal
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kVertexStrideFloats * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
     // TexCoord
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, kVertexStrideFloats * sizeof(float), (void*)(6 * sizeof(float)));
     glEnableVertexAttribArray(2);
+    // Height (km) for CPU mesh terrain morph in shader path
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, kVertexStrideFloats * sizeof(float), (void*)(8 * sizeof(float)));
+    glEnableVertexAttribArray(3);
     
     glBindVertexArray(0);
     
     tile.indexCount = result.indexCount;
+    tile.mainIndexCount = result.mainIndexCount;
+    tile.skirtIndexCount = result.skirtIndexCount;
     tile.hasMesh = true;
     tile.demUsed = result.demUsed;
     tile.demPending = result.demPending;
+    tile.demSourceLevelMin = result.demSourceLevelMin;
+    tile.demSourceLevelMax = result.demSourceLevelMax;
+    tile.demMissingSamples = result.demMissingSamples;
+    tile.demEffectiveLevel = result.demEffectiveLevel;
+    tile.stitchMask = result.stitchMask;
+    tile.skirtMask = result.skirtMask;
+    tile.edgeGapMaxM = 0.0f;
     tile.builtSegments = result.segments;
     tile.meshPending = false;
 }
@@ -392,6 +573,9 @@ void TileMeshBuilder::DeleteMesh(Tile& tile) {
         if (tile.vbo != 0) glDeleteBuffers(1, &tile.vbo);
         if (tile.ebo != 0 && tile.ownsEBO) glDeleteBuffers(1, &tile.ebo);
         tile.vao = tile.vbo = tile.ebo = 0;
+        tile.indexCount = 0;
+        tile.mainIndexCount = 0;
+        tile.skirtIndexCount = 0;
         tile.hasMesh = false;
         tile.ownsEBO = true;
     }

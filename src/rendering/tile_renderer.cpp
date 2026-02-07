@@ -1,24 +1,344 @@
 #include "tile_renderer.h"
 #include <glad/glad.h>
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <iostream>
 
 namespace globe {
 
-TileRenderer::TileRenderer(ShaderManager& shaderManager)
-    : shaderManager_(shaderManager) {
+namespace {
+
+inline void ApplyPerTileUniforms(ShaderManager& shaderManager, const Tile& tile, const glm::vec4& texScaleOffsetMain) {
+    glUniform4f(shaderManager.GetCornerLodsLocation(),
+                tile.cornerLods.x,
+                tile.cornerLods.y,
+                tile.cornerLods.z,
+                tile.cornerLods.w);
+    glUniform4f(shaderManager.GetTexScaleOffsetMainLocation(),
+                texScaleOffsetMain.x,
+                texScaleOffsetMain.y,
+                texScaleOffsetMain.z,
+                texScaleOffsetMain.w);
 }
 
-void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe) {
+struct DrawCallBreakdown {
+    int drawCalls = 0;
+    int triangles = 0;
+};
+
+DrawCallBreakdown DrawTileGeometry(const Tile& tile) {
+    DrawCallBreakdown out;
+    const uint32_t mainCount = (tile.mainIndexCount > 0 || tile.skirtIndexCount > 0)
+        ? tile.mainIndexCount
+        : tile.indexCount;
+    const uint32_t skirtCount = tile.skirtIndexCount;
+
+    if (mainCount > 0) {
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mainCount), GL_UNSIGNED_INT, nullptr);
+        ++out.drawCalls;
+        out.triangles += static_cast<int>(mainCount / 3);
+    }
+
+    if (skirtCount > 0) {
+        GLboolean cullEnabled = glIsEnabled(GL_CULL_FACE);
+        if (cullEnabled) {
+            glDisable(GL_CULL_FACE);
+        }
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(1.5f, 2.0f);
+        const std::size_t offsetBytes = static_cast<std::size_t>(mainCount) * sizeof(unsigned int);
+        glDrawElements(GL_TRIANGLES,
+                       static_cast<GLsizei>(skirtCount),
+                       GL_UNSIGNED_INT,
+                       reinterpret_cast<const void*>(offsetBytes));
+        ++out.drawCalls;
+        out.triangles += static_cast<int>(skirtCount / 3);
+        if (cullEnabled) {
+            glEnable(GL_CULL_FACE);
+        }
+    }
+
+    return out;
+}
+
+constexpr char kInstancedFlatTileVertexShader[] = R"(
+#version 330 core
+layout(location = 0) in vec2 aGridUv;
+layout(location = 1) in vec4 aExtentDeg;       // west, east, south, north
+layout(location = 2) in vec4 aTexScaleOffset;  // xy scale, zw offset
+layout(location = 3) in vec4 aInstanceData;    // x: fade
+
+uniform mat4 uMVP;
+
+out vec2 vTexCoord;
+out vec3 vNormal;
+out float vFade;
+out float vViewDepth;
+
+const float PI = 3.14159265358979323846;
+const float WGS84_A_KM = 6378.137;
+const float WGS84_E2 = 0.00669437999014;
+
+void main() {
+    float north = radians(aExtentDeg.w);
+    float south = radians(aExtentDeg.z);
+    float west = radians(aExtentDeg.x);
+    float east = radians(aExtentDeg.y);
+
+    float mercTop = log(tan(PI * 0.25 + north * 0.5));
+    float mercBottom = log(tan(PI * 0.25 + south * 0.5));
+    float merc = mix(mercBottom, mercTop, aGridUv.y);
+    float lat = 2.0 * atan(exp(merc)) - PI * 0.5;
+    float lon = mix(west, east, aGridUv.x);
+
+    float sinLat = sin(lat);
+    float cosLat = cos(lat);
+    float sinLon = sin(lon);
+    float cosLon = cos(lon);
+
+    float N = WGS84_A_KM / sqrt(max(1e-8, 1.0 - WGS84_E2 * sinLat * sinLat));
+    vec3 pos = vec3(
+        N * cosLat * cosLon,
+        N * cosLat * sinLon,
+        (N * (1.0 - WGS84_E2)) * sinLat
+    );
+
+    gl_Position = uMVP * vec4(pos, 1.0);
+    vViewDepth = max(1e-6, gl_Position.w);
+    vNormal = normalize(pos);
+    vTexCoord = aGridUv * aTexScaleOffset.xy + aTexScaleOffset.zw;
+    vFade = clamp(aInstanceData.x, 0.0, 1.0);
+}
+)";
+
+constexpr char kInstancedFlatTileFragmentShader[] = R"(
+#version 330 core
+in vec2 vTexCoord;
+in vec3 vNormal;
+in float vFade;
+in float vViewDepth;
+
+uniform sampler2D uTexture;
+uniform int uUseLogDepth;
+uniform float uLogDepthFar;
+
+out vec4 fragColor;
+
+void main() {
+    vec4 texColor = texture(uTexture, vTexCoord);
+    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+    float diff = max(dot(normalize(vNormal), lightDir), 0.3);
+    vec3 color = texColor.rgb * diff;
+    fragColor = vec4(color, texColor.a * vFade);
+
+    if (uUseLogDepth == 1) {
+        float farVal = max(1.0, uLogDepthFar);
+        float denom = max(1e-6, log2(farVal + 1.0));
+        float logDepth = clamp(log2(vViewDepth + 1.0) / denom, 0.0, 1.0);
+        gl_FragDepth = logDepth;
+    }
+}
+)";
+
+} // namespace
+
+TileRenderer::TileRenderer(ShaderManager& shaderManager)
+    : shaderManager_(shaderManager) {
+    InitInstancedResources();
+}
+
+TileRenderer::~TileRenderer() {
+    DestroyInstancedResources();
+}
+
+uint32_t TileRenderer::CompileShader(uint32_t type, const char* source) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    GLint success = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        char log[1024];
+        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+        std::cerr << "Instanced shader compile error: " << log << std::endl;
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+uint32_t TileRenderer::LinkProgram(uint32_t vertexShader, uint32_t fragmentShader) {
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+    GLint success = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (!success) {
+        char log[1024];
+        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+        std::cerr << "Instanced program link error: " << log << std::endl;
+        glDeleteProgram(program);
+        return 0;
+    }
+    return program;
+}
+
+bool TileRenderer::InitInstancedResources() {
+    uint32_t vertexShader = CompileShader(GL_VERTEX_SHADER, kInstancedFlatTileVertexShader);
+    uint32_t fragmentShader = CompileShader(GL_FRAGMENT_SHADER, kInstancedFlatTileFragmentShader);
+    if (vertexShader == 0 || fragmentShader == 0) {
+        if (vertexShader != 0) glDeleteShader(vertexShader);
+        if (fragmentShader != 0) glDeleteShader(fragmentShader);
+        return false;
+    }
+
+    instancedProgram_ = LinkProgram(vertexShader, fragmentShader);
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+    if (instancedProgram_ == 0) {
+        return false;
+    }
+
+    instancedMvpLoc_ = glGetUniformLocation(instancedProgram_, "uMVP");
+    instancedTextureLoc_ = glGetUniformLocation(instancedProgram_, "uTexture");
+    instancedUseLogDepthLoc_ = glGetUniformLocation(instancedProgram_, "uUseLogDepth");
+    instancedLogDepthFarLoc_ = glGetUniformLocation(instancedProgram_, "uLogDepthFar");
+
+    glGenVertexArrays(1, &instancedVao_);
+    glGenBuffers(1, &instancedGridVbo_);
+    glGenBuffers(1, &instancedGridEbo_);
+    glGenBuffers(1, &instancedInstanceVbo_);
+    return true;
+}
+
+void TileRenderer::DestroyInstancedResources() {
+    if (instancedInstanceVbo_ != 0) {
+        glDeleteBuffers(1, &instancedInstanceVbo_);
+        instancedInstanceVbo_ = 0;
+    }
+    if (instancedGridEbo_ != 0) {
+        glDeleteBuffers(1, &instancedGridEbo_);
+        instancedGridEbo_ = 0;
+    }
+    if (instancedGridVbo_ != 0) {
+        glDeleteBuffers(1, &instancedGridVbo_);
+        instancedGridVbo_ = 0;
+    }
+    if (instancedVao_ != 0) {
+        glDeleteVertexArrays(1, &instancedVao_);
+        instancedVao_ = 0;
+    }
+    if (instancedProgram_ != 0) {
+        glDeleteProgram(instancedProgram_);
+        instancedProgram_ = 0;
+    }
+    instancedSegments_ = -1;
+    instancedIndexCount_ = 0;
+    instancedMvpLoc_ = -1;
+    instancedTextureLoc_ = -1;
+    instancedUseLogDepthLoc_ = -1;
+    instancedLogDepthFarLoc_ = -1;
+}
+
+bool TileRenderer::EnsureInstancedGrid(int segments) {
+    if (instancedProgram_ == 0 || instancedVao_ == 0 || segments <= 0) {
+        return false;
+    }
+    if (instancedSegments_ == segments && instancedIndexCount_ > 0) {
+        return true;
+    }
+
+    std::vector<float> gridVertices;
+    std::vector<unsigned int> gridIndices;
+    gridVertices.reserve(static_cast<size_t>((segments + 1) * (segments + 1) * 2));
+    gridIndices.reserve(static_cast<size_t>(segments * segments * 6));
+
+    for (int iy = 0; iy <= segments; ++iy) {
+        float v = static_cast<float>(iy) / static_cast<float>(segments);
+        for (int ix = 0; ix <= segments; ++ix) {
+            float u = static_cast<float>(ix) / static_cast<float>(segments);
+            gridVertices.push_back(u);
+            gridVertices.push_back(1.0f - v);  // Match tile UV orientation.
+        }
+    }
+
+    for (int iy = 0; iy < segments; ++iy) {
+        for (int ix = 0; ix < segments; ++ix) {
+            unsigned int tl = static_cast<unsigned int>(iy * (segments + 1) + ix);
+            unsigned int tr = tl + 1;
+            unsigned int bl = tl + static_cast<unsigned int>(segments + 1);
+            unsigned int br = bl + 1;
+            gridIndices.push_back(tl);
+            gridIndices.push_back(bl);
+            gridIndices.push_back(tr);
+            gridIndices.push_back(tr);
+            gridIndices.push_back(bl);
+            gridIndices.push_back(br);
+        }
+    }
+
+    glBindVertexArray(instancedVao_);
+
+    glBindBuffer(GL_ARRAY_BUFFER, instancedGridVbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(gridVertices.size() * sizeof(float)),
+                 gridVertices.data(),
+                 GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, instancedGridEbo_);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(gridIndices.size() * sizeof(unsigned int)),
+                 gridIndices.data(),
+                 GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ARRAY_BUFFER, instancedInstanceVbo_);
+    glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+
+    constexpr GLsizei stride = static_cast<GLsizei>(12 * sizeof(float));
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribDivisor(1, 1);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(4 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribDivisor(2, 1);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(8 * sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribDivisor(3, 1);
+
+    glBindVertexArray(0);
+
+    instancedSegments_ = segments;
+    instancedIndexCount_ = static_cast<uint32_t>(gridIndices.size());
+    return true;
+}
+
+void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
+                              bool useLogDepth, float logDepthFarKm) {
     stats_ = RenderStats{};
     batchActive_ = true;
     wireframeMode_ = wireframe;
     currentMvp_ = mvp;
+    useLogDepthBatch_ = useLogDepth;
+    logDepthFarBatch_ = std::max(1.0f, logDepthFarKm);
     
     // Setup shader
     shaderManager_.UseTileShader();
     glUniformMatrix4fv(shaderManager_.GetMvpLocation(), 1, GL_FALSE, glm::value_ptr(mvp));
     glUniform1i(shaderManager_.GetTextureLocation(), 0);
     glUniform1f(shaderManager_.GetFadeLocation(), 1.0f);
+    glUniform1i(shaderManager_.GetTextureUnpopLocation(), 2);  // Unpop texture on unit 2
+    glUniform1f(shaderManager_.GetUnpopBlendLocation(), 1.0f);
+    glUniform4f(shaderManager_.GetTexScaleOffsetMainLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
+    glUniform4f(shaderManager_.GetTexScaleOffsetUnpopLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
+    glUniform1i(shaderManager_.GetRasterCrossfadeLocation(), 0);
+    glUniform4f(shaderManager_.GetCornerLodsLocation(), 0.0f, 0.0f, 0.0f, 0.0f);
+    glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
+    glUniform1i(shaderManager_.GetUseLogDepthLocation(), useLogDepthBatch_ ? 1 : 0);
+    glUniform1f(shaderManager_.GetLogDepthFarLocation(), logDepthFarBatch_);
     
     // Default: no heightmap (terrain displacement disabled)
     glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
@@ -34,7 +354,7 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe) {
     }
 }
 
-void TileRenderer::RenderTile(const Tile& tile) {
+void TileRenderer::RenderTile(const Tile& tile, float terrainMorph) {
     if (!batchActive_) return;
     // Renderable = hasMesh && textureId != 0 (not IsReady!)
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
@@ -42,45 +362,55 @@ void TileRenderer::RenderTile(const Tile& tile) {
     // Bind texture
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tile.textureId);
+    ApplyPerTileUniforms(shaderManager_, tile, tile.texScaleOffset);
+    glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     
     // Draw tile mesh
     glBindVertexArray(tile.vao);
-    glDrawElements(GL_TRIANGLES, tile.indexCount, GL_UNSIGNED_INT, nullptr);
+    DrawCallBreakdown breakdown = DrawTileGeometry(tile);
     glBindVertexArray(0);
+    glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
     
     // Update stats
     stats_.tilesRendered++;
-    stats_.drawCalls++;
-    stats_.trianglesRendered += tile.indexCount / 3;
+    stats_.drawCalls += breakdown.drawCalls;
+    stats_.trianglesRendered += breakdown.triangles;
 }
 
-void TileRenderer::RenderTileWithTexture(const Tile& tile, uint32_t textureId) {
+void TileRenderer::RenderTileWithTexture(const Tile& tile, uint32_t textureId, float terrainMorph) {
     if (!batchActive_) return;
     if (!tile.hasMesh || tile.vao == 0 || textureId == 0) return;
     
     // Bind specified texture (for placeholder)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, textureId);
+    ApplyPerTileUniforms(shaderManager_, tile, glm::vec4(1.0f, 1.0f, 0.0f, 0.0f));
+    glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     
     // Draw tile mesh
     glBindVertexArray(tile.vao);
-    glDrawElements(GL_TRIANGLES, tile.indexCount, GL_UNSIGNED_INT, nullptr);
+    DrawCallBreakdown breakdown = DrawTileGeometry(tile);
     glBindVertexArray(0);
+    glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
     
     // Update stats
     stats_.tilesRendered++;
-    stats_.drawCalls++;
-    stats_.trianglesRendered += tile.indexCount / 3;
+    stats_.drawCalls += breakdown.drawCalls;
+    stats_.trianglesRendered += breakdown.triangles;
 }
 
 void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapId,
-                                            float heightMin, float heightMax) {
+                                            float heightMin, float heightMax,
+                                            float terrainMorph) {
     if (!batchActive_) return;
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
     
     // Bind color texture on unit 0
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tile.textureId);
+    ApplyPerTileUniforms(shaderManager_, tile, tile.texScaleOffset);
     
     // Bind heightmap texture on unit 1 and enable displacement
     if (heightmapId != 0) {
@@ -89,25 +419,176 @@ void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapI
         glUniform1i(shaderManager_.GetHasHeightmapLocation(), 1);
         glUniform1f(shaderManager_.GetHeightMinLocation(), heightMin);
         glUniform1f(shaderManager_.GetHeightMaxLocation(), heightMax);
+        glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     } else {
         glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+        glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     }
     
     // Draw tile mesh
     glBindVertexArray(tile.vao);
-    glDrawElements(GL_TRIANGLES, tile.indexCount, GL_UNSIGNED_INT, nullptr);
+    DrawCallBreakdown breakdown = DrawTileGeometry(tile);
     glBindVertexArray(0);
     
     // Reset heightmap state for next tile
-    if (heightmapId != 0) {
-        glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
-        glActiveTexture(GL_TEXTURE0);  // Reset to default texture unit
-    }
+    glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
+    glActiveTexture(GL_TEXTURE0);  // Reset to default texture unit
     
     // Update stats
     stats_.tilesRendered++;
-    stats_.drawCalls++;
-    stats_.trianglesRendered += tile.indexCount / 3;
+    stats_.drawCalls += breakdown.drawCalls;
+    stats_.trianglesRendered += breakdown.triangles;
+}
+
+void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
+                                           uint32_t unpopTextureId,
+                                           const glm::vec4& texScaleOffsetUnpop,
+                                           float unpopBlend,
+                                           uint32_t heightmapId,
+                                           float heightMin,
+                                           float heightMax,
+                                           float terrainMorph) {
+    if (!batchActive_) return;
+    if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
+    if (unpopTextureId == 0) {
+        if (heightmapId != 0) {
+            RenderTileWithHeightmap(tile, heightmapId, heightMin, heightMax, terrainMorph);
+        } else {
+            RenderTile(tile, terrainMorph);
+        }
+        return;
+    }
+
+    // Bind child texture (current tile)
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tile.textureId);
+    ApplyPerTileUniforms(shaderManager_, tile, tile.texScaleOffset);
+
+    // Bind unpop (ancestor) texture on unit 2
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, unpopTextureId);
+
+    glUniform1i(shaderManager_.GetRasterCrossfadeLocation(), 1);
+    glUniform1f(shaderManager_.GetUnpopBlendLocation(), std::clamp(unpopBlend, 0.0f, 1.0f));
+    glUniform4f(shaderManager_.GetTexScaleOffsetUnpopLocation(),
+                texScaleOffsetUnpop.x,
+                texScaleOffsetUnpop.y,
+                texScaleOffsetUnpop.z,
+                texScaleOffsetUnpop.w);
+
+    // Optional heightmap displacement for child geometry
+    if (heightmapId != 0) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, heightmapId);
+        glUniform1i(shaderManager_.GetHasHeightmapLocation(), 1);
+        glUniform1f(shaderManager_.GetHeightMinLocation(), heightMin);
+        glUniform1f(shaderManager_.GetHeightMaxLocation(), heightMax);
+        glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
+    } else {
+        glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+        glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
+    }
+
+    glBindVertexArray(tile.vao);
+    DrawCallBreakdown breakdown = DrawTileGeometry(tile);
+    glBindVertexArray(0);
+
+    // Restore defaults for subsequent single-texture draws
+    glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
+    glUniform1i(shaderManager_.GetRasterCrossfadeLocation(), 0);
+    glUniform1f(shaderManager_.GetUnpopBlendLocation(), 1.0f);
+    glUniform4f(shaderManager_.GetTexScaleOffsetUnpopLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
+    glActiveTexture(GL_TEXTURE0);
+
+    stats_.tilesRendered++;
+    stats_.drawCalls += breakdown.drawCalls;
+    stats_.trianglesRendered += breakdown.triangles;
+}
+
+void TileRenderer::RenderFlatTilesInstanced(uint32_t textureId,
+                                            int segments,
+                                            const std::vector<FlatTileInstance>& instances) {
+    if (!batchActive_ || instances.empty() || textureId == 0) {
+        return;
+    }
+    if (!EnsureInstancedGrid(segments) || instancedProgram_ == 0 || instancedIndexCount_ == 0) {
+        return;
+    }
+
+    // extent(4) + texScaleOffset(4) + data(4: fade + padding)
+    instancedInstanceData_.clear();
+    instancedInstanceData_.reserve(instances.size() * 12);
+
+    int renderedTiles = 0;
+    for (const FlatTileInstance& instance : instances) {
+        if (instance.tile == nullptr || !instance.tile->hasMesh || instance.tile->textureId == 0) {
+            continue;
+        }
+        Extent extent = instance.tile->extent;
+        if (extent.Width() == 0.0 || extent.Height() == 0.0) {
+            extent = Extent::FromTileWGS84(instance.tile->key.x, instance.tile->key.y, instance.tile->key.level);
+        }
+        instancedInstanceData_.push_back(static_cast<float>(extent.West()));
+        instancedInstanceData_.push_back(static_cast<float>(extent.East()));
+        instancedInstanceData_.push_back(static_cast<float>(extent.South()));
+        instancedInstanceData_.push_back(static_cast<float>(extent.North()));
+        instancedInstanceData_.push_back(instance.tile->texScaleOffset.x);
+        instancedInstanceData_.push_back(instance.tile->texScaleOffset.y);
+        instancedInstanceData_.push_back(instance.tile->texScaleOffset.z);
+        instancedInstanceData_.push_back(instance.tile->texScaleOffset.w);
+        instancedInstanceData_.push_back(std::clamp(instance.fade, 0.0f, 1.0f));
+        instancedInstanceData_.push_back(0.0f);
+        instancedInstanceData_.push_back(0.0f);
+        instancedInstanceData_.push_back(0.0f);
+        ++renderedTiles;
+    }
+
+    if (renderedTiles == 0) {
+        return;
+    }
+
+    GLint prevProgram = 0;
+    GLint prevVao = 0;
+    GLint prevActiveTex = 0;
+    GLint prevTex2D = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActiveTex);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex2D);
+
+    glUseProgram(instancedProgram_);
+    glUniformMatrix4fv(instancedMvpLoc_, 1, GL_FALSE, glm::value_ptr(currentMvp_));
+    glUniform1i(instancedTextureLoc_, 0);
+    glUniform1i(instancedUseLogDepthLoc_, useLogDepthBatch_ ? 1 : 0);
+    glUniform1f(instancedLogDepthFarLoc_, logDepthFarBatch_);
+
+    glBindTexture(GL_TEXTURE_2D, textureId);
+    glBindVertexArray(instancedVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, instancedInstanceVbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(instancedInstanceData_.size() * sizeof(float)),
+                 instancedInstanceData_.data(),
+                 GL_DYNAMIC_DRAW);
+    glDrawElementsInstanced(GL_TRIANGLES,
+                            static_cast<GLsizei>(instancedIndexCount_),
+                            GL_UNSIGNED_INT,
+                            nullptr,
+                            renderedTiles);
+    glBindVertexArray(static_cast<GLuint>(prevVao));
+
+    glUseProgram(static_cast<GLuint>(prevProgram));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prevTex2D));
+    glActiveTexture(static_cast<GLenum>(prevActiveTex));
+
+    stats_.tilesRendered += renderedTiles;
+    stats_.drawCalls += 1;
+    stats_.trianglesRendered += static_cast<int>((instancedIndexCount_ / 3) * renderedTiles);
+    stats_.instancedBatches += 1;
+    stats_.instancedTiles += renderedTiles;
 }
 
 void TileRenderer::EndBatch() {

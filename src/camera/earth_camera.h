@@ -79,6 +79,8 @@ public:
     double GetFov() const;
     void SetAspectRatio(double aspect);
     void SetNearFar(double near_plane, double far_plane);
+    void SetReverseZEnabled(bool enabled);
+    bool IsReverseZEnabled() const { return m_reverseZ; }
     
     // Direct position setting (for smooth animations)
     void SetPositionECEF(const glm::dvec3& pos);
@@ -111,6 +113,7 @@ private:
     double m_aspect = 1.777;
     double m_near = 0.1;
     double m_far = 100000000.0;
+    bool m_reverseZ = false;
     
     // Cached
     mutable glm::dvec3 m_pos_ecef;

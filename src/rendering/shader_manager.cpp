@@ -98,9 +98,17 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     ss << "in vec2 vTexCoord;\n";
     ss << "in vec3 vNormal;\n";
     ss << "in vec3 vWorldPos;\n";
+    ss << "in float vViewDepth;\n";
     ss << "\n";
     ss << "uniform sampler2D uTexture;\n";
+    ss << "uniform sampler2D uPhotoTileTextureUnpop;\n";
     ss << "uniform float uFade;\n";
+    ss << "uniform float uUnpopBlend;\n";
+    ss << "uniform vec4 uTexScaleOffsetMain;\n";   // xy=scale, zw=offset
+    ss << "uniform vec4 uTexScaleOffsetUnpop;\n";  // xy=scale, zw=offset
+    ss << "uniform int uRasterCrossfade;\n";       // 0=single texture, 1=crossfade
+    ss << "uniform int uUseLogDepth;\n";
+    ss << "uniform float uLogDepthFar;\n";
     
     if (HasFlag(flags, ShaderFlags::DebugLOD)) {
         ss << "uniform int uLodLevel;\n";
@@ -110,7 +118,14 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     ss << "out vec4 fragColor;\n";
     ss << "\n";
     ss << "void main() {\n";
-    ss << "    vec4 texColor = texture(uTexture, vTexCoord);\n";
+    ss << "    vec2 uvMain = vTexCoord * uTexScaleOffsetMain.xy + uTexScaleOffsetMain.zw;\n";
+    ss << "    vec4 texColor = texture(uTexture, uvMain);\n";
+    ss << "    if (uRasterCrossfade == 1) {\n";
+    ss << "        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;\n";
+    ss << "        vec4 unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);\n";
+    ss << "        float blend = clamp(uUnpopBlend, 0.0, 1.0);\n";
+    ss << "        texColor = mix(unpopColor, texColor, blend);\n";
+    ss << "    }\n";
     
     if (HasFlag(flags, ShaderFlags::DebugSeams)) {
         // Highlight tile edges
@@ -134,10 +149,16 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
         ss << "    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));\n";
         ss << "    vec3 normal = normalize(vNormal);\n";
         ss << "    float diff = max(dot(normal, lightDir), 0.3);\n";
-        ss << "    vec3 color = texColor.rgb * diff;\n";
+    ss << "    vec3 color = texColor.rgb * diff;\n";
     }
     
     ss << "    fragColor = vec4(color, texColor.a * uFade);\n";
+    ss << "    if (uUseLogDepth == 1) {\n";
+    ss << "        float farVal = max(1.0, uLogDepthFar);\n";
+    ss << "        float denom = max(1e-6, log2(farVal + 1.0));\n";
+    ss << "        float logDepth = clamp(log2(vViewDepth + 1.0) / denom, 0.0, 1.0);\n";
+    ss << "        gl_FragDepth = logDepth;\n";
+    ss << "    }\n";
     ss << "}\n";
     
     return ss.str();
@@ -148,6 +169,14 @@ void ShaderManager::CacheUniformLocations(uint32_t program) {
     texLoc_ = glGetUniformLocation(program, "uTexture");
     fadeLoc_ = glGetUniformLocation(program, "uFade");
     lodLevelLoc_ = glGetUniformLocation(program, "uLodLevel");
+    texScaleOffsetMainLoc_ = glGetUniformLocation(program, "uTexScaleOffsetMain");
+    texUnpopLoc_ = glGetUniformLocation(program, "uPhotoTileTextureUnpop");
+    unpopBlendLoc_ = glGetUniformLocation(program, "uUnpopBlend");
+    texScaleOffsetUnpopLoc_ = glGetUniformLocation(program, "uTexScaleOffsetUnpop");
+    rasterCrossfadeLoc_ = glGetUniformLocation(program, "uRasterCrossfade");
+    cornerLodsLoc_ = glGetUniformLocation(program, "uCornerLods");
+    useLogDepthLoc_ = glGetUniformLocation(program, "uUseLogDepth");
+    logDepthFarLoc_ = glGetUniformLocation(program, "uLogDepthFar");
     
     // Terrain uniforms
     heightmapLoc_ = glGetUniformLocation(program, "uHeightmap");
@@ -155,6 +184,7 @@ void ShaderManager::CacheUniformLocations(uint32_t program) {
     heightMinLoc_ = glGetUniformLocation(program, "uHeightMin");
     heightMaxLoc_ = glGetUniformLocation(program, "uHeightMax");
     hasHeightmapLoc_ = glGetUniformLocation(program, "uHasHeightmap");
+    terrainMorphLoc_ = glGetUniformLocation(program, "uTerrainMorph");
 }
 
 void ShaderManager::UseTileShader() {

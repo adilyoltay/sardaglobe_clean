@@ -1,11 +1,16 @@
 #include "lod_selector.h"
 #include "../math/tile_math.h"
 #include "../core/constants.h"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <unordered_set>
 
 namespace globe {
 
 LodSelection LodSelector::Select(
     const glm::vec3& cameraPos,
+    const glm::vec3& cameraVelocity,
     const glm::mat4& mvp,
     float fovDegrees,
     float tiltDegrees,
@@ -53,6 +58,28 @@ LodSelection LodSelector::Select(
     // Enforce neighbor LOD conformance (FAZ 1.2)
     if (settings.enforceNeighborDelta) {
         EnforceNeighborConformance(result, isReady, settings);
+    }
+
+    // Predictive prefetch (GE-style): bias prefetch towards camera momentum.
+    AddPredictivePrefetch(cameraPos, cameraVelocity, settings, result);
+
+    // Hard guard: never return an empty leaf set when we still have required tiles.
+    // This prevents one-frame "all missing" artifacts during rapid LOD transitions.
+    if (result.leafSet.empty() && !result.required.empty()) {
+        int minLevel = std::numeric_limits<int>::max();
+        for (const TileKey& key : result.required) {
+            minLevel = std::min(minLevel, key.level);
+        }
+        if (minLevel == std::numeric_limits<int>::max()) {
+            minLevel = 0;
+        }
+
+        for (const TileKey& key : result.required) {
+            if (key.level == minLevel) {
+                result.leafSet.insert(key);
+                result.leaves.push_back(key);
+            }
+        }
     }
     
     return result;
@@ -168,32 +195,63 @@ bool LodSelector::TraverseTile(
     }
     
     // Should subdivide - check if children are ready
-    bool childrenReady = AreChildrenReady(key, isReady);
+    bool childrenReady = AreChildrenReady(key, isReady, settings);
     
-    // Child-cull parent fill: if not all 4 children are visible, keep parent as fallback
-    int childVisibleCount = 0;
     auto children = key.Children();
-    for (const auto& child : children) {
-        if (IsTileVisible(child, cameraPos, settings)) {
-            childVisibleCount++;
-        }
-    }
-    // Parent fallback when children are not ready OR not fully visible
-    if (!childrenReady || childVisibleCount < 4) {
+    // Keep parent fallback only when children are not ready.
+    // If children are ready, retaining a coarse parent can violate neighbor conformance
+    // and produce unnecessary mixed-LOD artifacts.
+    if (!childrenReady) {
         result.leaves.push_back(key);
         result.leafSet.insert(key);
     }
     
-    // Traverse children when ready, otherwise request for loading
+    // Traverse children when ready, otherwise request for loading.
     if (childrenReady) {
+        // NOTE: Do not require all 4 children to be "visible" before refining.
+        // That stalls refinement at the horizon and can lock the engine at very
+        // coarse LODs (visible in debug as Leaves: 1, Required: ~4 and no new
+        // network fetches on zoom-in/out).
+        //
+        // We simply traverse all children and let conservative per-tile culling
+        // decide which subtrees contribute to the final leaf set.
+        bool anyChildVisible = false;
         for (const auto& child : children) {
-            TraverseTile(child, cameraPos, mvp, viewportHeight, isReady, settings, result, depth + 1);
+            bool childVisible = TraverseTile(child, cameraPos, mvp, viewportHeight, isReady, settings, result, depth + 1);
+            anyChildVisible = anyChildVisible || childVisible;
+        }
+        // Guard against visibility edge-cases: if all refined children were culled,
+        // keep parent as fallback leaf for full coverage continuity.
+        if (!anyChildVisible) {
+            result.leaves.push_back(key);
+            result.leafSet.insert(key);
         }
         result.refinedCount++;
     } else {
-        for (const auto& child : children) {
-            if (IsTileVisible(child, cameraPos, settings)) {
+        // Child quorum requires *all* children to eventually become ready; otherwise,
+        // refinement can deadlock when some children are culled and therefore never
+        // requested. This manifests as "no new tiles load on zoom" after startup.
+        if (settings.lodChildQuorum) {
+            for (const auto& child : children) {
                 result.required.insert(child);
+            }
+        } else {
+            // IMPORTANT: Request children conservatively even when visibility tests fail.
+            // If the parent tile is visible and subdivide is requested, at least one child must
+            // be visible geometrically. When our conservative sphere/frustum/horizon tests
+            // produce a false-negative for all 4 children, failing to request them causes a
+            // permanent LOD stall (no new raster/DEM tiles ever get scheduled).
+            int visibleChildCount = 0;
+            for (const auto& child : children) {
+                if (IsTileVisible(child, cameraPos, settings)) {
+                    result.required.insert(child);
+                    ++visibleChildCount;
+                }
+            }
+            if (visibleChildCount == 0) {
+                for (const auto& child : children) {
+                    result.required.insert(child);
+                }
             }
         }
     }
@@ -228,14 +286,18 @@ bool LodSelector::ShouldSubdivide(
     return sse > adjustedThreshold;
 }
 
-bool LodSelector::AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady) {
+bool LodSelector::AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady, const Settings& settings) {
     auto children = key.Children();
+    int readyCount = 0;
     for (const auto& child : children) {
-        if (!isReady(child)) {
-            return false;
+        if (isReady(child)) {
+            ++readyCount;
         }
     }
-    return true;
+    if (settings.lodChildQuorum) {
+        return readyCount == static_cast<int>(children.size());
+    }
+    return readyCount > 0;
 }
 
 void LodSelector::EnforceNeighborConformance(
@@ -286,7 +348,7 @@ void LodSelector::EnforceNeighborConformance(
                 // Check if neighbor is deeper than allowed
                 if (neighborDeepest > leaf.level + settings.maxNeighborDelta) {
                     // Need to refine this leaf if children are ready
-                    if (AreChildrenReady(leaf, isReady)) {
+                    if (AreChildrenReady(leaf, isReady, settings)) {
                         toRefine.push_back(leaf);
                         break;  // Only need to refine once
                     }
@@ -344,6 +406,82 @@ void LodSelector::RebuildRequiredSet(LodSelection& result) {
             result.required.insert(key);
             if (key.level == 0) break;
             key = key.Parent();
+        }
+    }
+}
+
+void LodSelector::AddPredictivePrefetch(
+    const glm::vec3& cameraPos,
+    const glm::vec3& cameraVelocity,
+    const Settings& settings,
+    LodSelection& result
+) {
+    float speedKmPerSec = glm::length(cameraVelocity);
+    if (!std::isfinite(speedKmPerSec) || speedKmPerSec < 0.05f) {
+        return;  // Ignore tiny/noisy velocity.
+    }
+
+    glm::vec3 velocityDir = glm::normalize(cameraVelocity);
+    float predictionSeconds = std::clamp(1.0f + speedKmPerSec * 0.0015f, 1.0f, 2.0f);
+    glm::vec3 predictedCameraPos = cameraPos + cameraVelocity * predictionSeconds;
+
+    std::unordered_set<TileKey> seen;
+    seen.reserve(result.required.size() + result.prefetch.size() + 32);
+    for (const TileKey& key : result.required) {
+        seen.insert(key);
+    }
+    for (const TileKey& key : result.prefetch) {
+        seen.insert(key);
+    }
+
+    constexpr int kMaxPredictiveAdds = 64;
+    int added = 0;
+
+    auto tryAddCandidate = [&](const TileKey& candidate) {
+        if (added >= kMaxPredictiveAdds) return;
+        if (!candidate.IsValid()) return;
+        if (seen.find(candidate) != seen.end()) return;
+        if (candidate.level < settings.minZoom || candidate.level > settings.maxZoom) return;
+
+        glm::vec3 center = TileCenterWorld(candidate);
+        float radius = TileBoundingRadius(candidate);
+        float currentDist = glm::length(center - cameraPos);
+        float predictedDist = glm::length(center - predictedCameraPos);
+        if (!std::isfinite(currentDist) || !std::isfinite(predictedDist)) return;
+
+        glm::vec3 toTileDir = glm::normalize(center - cameraPos);
+        float directional = glm::dot(velocityDir, toTileDir);
+        bool predictedCloser = predictedDist + radius < currentDist;
+        if (directional < 0.10f && !predictedCloser) {
+            return;
+        }
+
+        // Conservative frustum guard: keep candidates near the current view volume.
+        if (!frustum_.IsSphereVisible(center, radius * 1.8f)) {
+            return;
+        }
+
+        result.prefetch.push_back(candidate);
+        seen.insert(candidate);
+        ++added;
+    };
+
+    // Use current leaves as seed; expand in motion direction.
+    for (const TileKey& leaf : result.leaves) {
+        if (added >= kMaxPredictiveAdds) break;
+
+        auto neighbors = leaf.Neighbors();
+        for (const TileKey& neighbor : neighbors) {
+            tryAddCandidate(neighbor);
+            if (added >= kMaxPredictiveAdds) break;
+        }
+
+        if (leaf.level < settings.maxZoom) {
+            auto children = leaf.Children();
+            for (const TileKey& child : children) {
+                tryAddCandidate(child);
+                if (added >= kMaxPredictiveAdds) break;
+            }
         }
     }
 }

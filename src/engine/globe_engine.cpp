@@ -5,6 +5,7 @@
 #include "../rendering/shader_manager.h"
 #include "../rendering/tile_renderer.h"
 #include "../rendering/tile_mesh_builder.h"
+#include "../rendering/corner_lod.h"
 #include "../rendering/mesh_template.h"
 #include "../scheduling/tile_state_machine.h"
 #include "../math/frustum.h"
@@ -17,6 +18,10 @@
 #include <cstring>
 #include <filesystem>
 #include <algorithm>
+#include <cmath>
+#include <chrono>
+#include <thread>
+#include <numeric>
 
 // ImGui
 #include <imgui.h>
@@ -184,8 +189,16 @@ void GlobeEngine::Run() {
         glfwPollEvents();
         ProcessInput(currentTime);
         Update(dt, currentTime);
-        Render();
-        glfwSwapBuffers(window_);
+
+        bool shouldRender = !config_.requestDrivenFrame || frameRequested_;
+        if (shouldRender) {
+            Render();
+            glfwSwapBuffers(window_);
+            frameRequested_ = false;
+        } else {
+            // Reduce idle CPU/GPU usage when no frame is requested.
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
     }
 }
 
@@ -245,6 +258,24 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Get camera position (in km from EarthCamera)
     glm::dvec3 cameraPosD = camera_->GetPositionECEF();
     glm::vec3 cameraPos = glm::vec3(cameraPosD);
+
+    // Camera speed telemetry for unpop speed limit.
+    cameraSpeedKmPerSec_ = 0.0f;
+    cameraVelocityKmPerSec_ = glm::vec3(0.0f);
+    if (hasPrevCameraPos_ && dt > 1e-6) {
+        glm::dvec3 deltaKm = cameraPosD - prevCameraPos_;
+        double distKm = glm::length(deltaKm);
+        double speedKmPerSec = distKm / dt;
+        if (std::isfinite(speedKmPerSec)) {
+            cameraSpeedKmPerSec_ = static_cast<float>(std::clamp(speedKmPerSec, 0.0, 1.0e6));
+        }
+        if (std::isfinite(deltaKm.x) && std::isfinite(deltaKm.y) && std::isfinite(deltaKm.z)) {
+            glm::dvec3 vel = deltaKm / dt;
+            cameraVelocityKmPerSec_ = glm::vec3(vel);
+        }
+    }
+    prevCameraPos_ = cameraPosD;
+    hasPrevCameraPos_ = true;
     
     // Dynamic near/far planes based on altitude (Google Earth style)
     // This prevents z-fighting at both close and far distances
@@ -256,6 +287,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
     double nearPlane = std::max(0.001, altitudeKm * 0.01);
     double farPlane = cameraDistKm + EARTH_RADIUS_KM * 2.0;
     camera_->SetNearFar(nearPlane, farPlane);
+    camera_->SetReverseZEnabled(config_.reversedZEnabled);
+    currentNearPlaneKm_ = static_cast<float>(nearPlane);
+    currentFarPlaneKm_ = static_cast<float>(farPlane);
     
     // Get camera matrices
     glm::dmat4 view = camera_->GetViewMatrix();
@@ -267,15 +301,28 @@ void GlobeEngine::Update(double dt, double currentTime) {
     auto& lodSettings = tilePyramid_.GetSettings();
     lodSettings.minZoom = config_.minZoom;
     lodSettings.maxZoom = config_.maxZoom;
-    lodSettings.sseThreshold = config_.sseThreshold;
     lodSettings.disableFrustumCull = config_.disableFrustumCull;
     lodSettings.disableHorizonCull = config_.disableHorizonCull;
+    lodSettings.lodChildQuorum = config_.lodChildQuorum;
     
     // TiltFactor: reduce detail when camera is tilted toward horizon
     // tilt=0 (looking down) → tiltFactor=1.0 (full detail)
     // tilt=90 (looking at horizon) → tiltFactor=0.0 (reduced detail)
     double tilt = camera_->GetTilt();  // degrees, 0=looking down, 90=looking at horizon
     lodSettings.tiltFactor = static_cast<float>(1.0 - std::clamp(tilt / 90.0, 0.0, 1.0));
+
+    // Adaptive SSE tuning (phase 4):
+    // - Low altitude: request more detail (smaller threshold).
+    // - High tilt: preserve extra detail to avoid excessive blur in oblique views.
+    double altitudeNorm = std::clamp(altitudeKm / 2000.0, 0.0, 1.0);
+    double tiltNorm = std::clamp(tilt / 75.0, 0.0, 1.0);
+    double altitudeScale = (0.55 * (1.0 - altitudeNorm)) + (1.0 * altitudeNorm);
+    double tiltScale = (1.0 * (1.0 - tiltNorm)) + (0.85 * tiltNorm);
+    double adaptiveSse = static_cast<double>(config_.sseThreshold) * altitudeScale * tiltScale;
+    adaptiveSse = std::clamp(adaptiveSse,
+                             static_cast<double>(config_.sseThreshold) * 0.45,
+                             static_cast<double>(config_.sseThreshold) * 1.15);
+    lodSettings.sseThreshold = static_cast<float>(adaptiveSse);
     
     // CRITICAL: Pass FOV directly from camera, not extracted from MVP
     float fovDegrees = static_cast<float>(camera_->GetFov());
@@ -288,14 +335,29 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     double lodStartMs = glfwGetTime() * 1000.0;
     const LodSelection& selection = tilePyramid_.Select(
-        cameraPos, viewDir, mvp, fovDegrees, tiltDegrees,
+        cameraPos, cameraVelocityKmPerSec_, viewDir, mvp, fovDegrees, tiltDegrees,
         config_.windowWidth, config_.windowHeight,
         tiles_
     );
     frameTimings_.lodSelectMs = (glfwGetTime() * 1000.0) - lodStartMs;
     
-    // Store leafSet for render filtering
-    currentLeafSet_ = selection.leafSet;
+    // Store leafSet for render filtering.
+    // Safety: if selector underflows once, reuse previous non-empty leaves for one frame.
+    std::unordered_set<TileKey> previousLeafSet = currentLeafSet_;
+    if (selection.leafSet.empty() && !selection.required.empty()) {
+        ++leafUnderflowFrames_;
+    }
+    if (selection.leafSet.empty() && !previousLeafSet.empty() && consecutiveLeafUnderflow_ == 0) {
+        currentLeafSet_ = previousLeafSet;
+        consecutiveLeafUnderflow_ = 1;
+    } else {
+        currentLeafSet_ = selection.leafSet;
+        if (selection.leafSet.empty()) {
+            ++consecutiveLeafUnderflow_;
+        } else {
+            consecutiveLeafUnderflow_ = 0;
+        }
+    }
     
     // Temporal leaf hold: keep recent leaves to avoid gaps during fast pan/zoom
     double nowTime = glfwGetTime();
@@ -317,6 +379,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
     }
     
     double requestStartMs = glfwGetTime() * 1000.0;
+    const uint32_t loadingTextureId = textureManager_ ? textureManager_->GetLoadingTexture() : 0;
     // Request required tiles using ranked list (GE-style SSE + center bias priority)
     for (const RankedTile& ranked : tilePyramid_.GetRankedRequired()) {
         const TileKey& key = ranked.key;
@@ -343,17 +406,31 @@ void GlobeEngine::Update(double dt, double currentTime) {
         if (tile.state == TileState::Unloaded) {
             scheduler_->Request(key, priority, ranked.score);
             TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
+            TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
         }
         else if (tile.state == TileState::Failed) {
             // Exponential backoff for failed tiles (prevents hammering failed servers)
             // Backoff: 1s, 2s, 4s, 8s, 16s, max 32s
             double backoffSeconds = std::min(32.0, std::pow(2.0, tile.retryCount));
             double timeSinceLastRetry = glfwGetTime() - tile.lastRetryTime;
-            
-            if (timeSinceLastRetry >= backoffSeconds && tile.retryCount < 5) {
+
+            const bool hasPlaceholderTexture =
+                (tile.textureId != 0 && tile.textureId == loadingTextureId);
+            // Keep retrying tiles that still have no real imagery (especially coarse/base tiles).
+            // A hard retry cap here can leave permanent black placeholder patches.
+            const int retryLimit = hasPlaceholderTexture ? 1000000 : 5;
+
+            if (timeSinceLastRetry >= backoffSeconds && tile.retryCount < retryLimit) {
                 scheduler_->Request(key, priority, ranked.score);
                 TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
+                TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
             }
+        }
+
+        // P5.3: Coordinate DEM request with imagery request in the same traversal.
+        if (demManager_) {
+            int demPriority = isLeaf ? 2 : 1;
+            demManager_->Request(key, demPriority, ranked.score);
         }
     }
     
@@ -392,6 +469,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             tile.accessCount++;
             scheduler_->Request(key, Priority::Low, ranked.score);  // Low priority prefetch with score
             TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
+            TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
             ++prefetchCount;
         }
     }
@@ -413,15 +491,42 @@ void GlobeEngine::Update(double dt, double currentTime) {
     textureManager_->ProcessUploads(tiles_, config_.uploadBudgetMs);
     frameTimings_.textureUploadMs = (glfwGetTime() * 1000.0) - uploadStartMs;
     
-    // Request DEM data for visible tiles - priority ordered (FAZ 3)
+    // DEM update + optional heightmap upload.
+    // Requests are already coordinated in the required imagery traversal above (P5.3).
     if (demManager_) {
-        // Use ranked list: closer/more-visible tiles get DEM first
-        const auto& rankedRequired = tilePyramid_.GetRankedRequired();
-        for (const auto& ranked : rankedRequired) {
-            bool isLeaf = selection.leafSet.count(ranked.key) > 0;
-            int demPriority = isLeaf ? 2 : 1;
-            demManager_->Request(ranked.key, demPriority, ranked.score);
+        // Pin visible DEM chain (leaves + 1-ring neighbors) against cache eviction.
+        std::vector<TileKey> demPinnedKeys;
+        demPinnedKeys.reserve(static_cast<size_t>(config_.demVisiblePinBudget));
+        std::unordered_set<TileKey> demPinnedSet;
+        demPinnedSet.reserve(static_cast<size_t>(config_.demVisiblePinBudget));
+        auto pushPinned = [&](const TileKey& key) {
+            if (config_.demVisiblePinBudget <= 0) {
+                return;
+            }
+            if (static_cast<int>(demPinnedKeys.size()) >= config_.demVisiblePinBudget) {
+                return;
+            }
+            if (demPinnedSet.insert(key).second) {
+                demPinnedKeys.push_back(key);
+            }
+        };
+
+        for (const TileKey& leaf : selection.leafSet) {
+            pushPinned(leaf);
+            if (static_cast<int>(demPinnedKeys.size()) >= config_.demVisiblePinBudget) {
+                break;
+            }
+            static const int nDx[] = {0, 1, 0, -1};
+            static const int nDy[] = {-1, 0, 1, 0};
+            for (int i = 0; i < 4; ++i) {
+                TileKey n = leaf.Neighbor(nDx[i], nDy[i]);
+                if (n.IsValid()) {
+                    pushPinned(n);
+                }
+            }
         }
+        demManager_->SetPinnedTiles(demPinnedKeys);
+
         demManager_->Update();
         
         // Queue DEM data for GPU heightmap texture upload only when DEM endpoint is healthy.
@@ -443,14 +548,48 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
     }
     
-    // Compute edge coarser mask for seam fix (FAZ 6.1)
-    // An edge is "coarser" if the neighbor at same level is NOT a leaf but its parent IS
+    // Compute edge masks + DEM effective level for seam/cliff fixes.
+    // An edge is "coarser" if the neighbor at same level is NOT a leaf but its parent IS.
     const int expectedSegments = demManager_ ? std::max(config_.meshSegments, config_.demMeshN - 1) : config_.meshSegments;
+
+    // Reset corner LOD uniforms each frame; only current leaves get non-zero values.
+    for (auto& [_, tile] : tiles_) {
+        tile.cornerLods = glm::vec4(0.0f);
+    }
+
+    auto resolveBestAvailableDemLevel = [&](const TileKey& tileKey) -> int {
+        if (!demManager_) {
+            return tileKey.level;
+        }
+        int bestLevel = tileKey.level;
+        if (demManager_->GetBestAvailableLevel(tileKey, bestLevel)) {
+            return std::clamp(bestLevel, 0, tileKey.level);
+        }
+        return tileKey.level;
+    };
+
+    auto leafRegionHasCoverage = [&](const TileKey& regionKey) -> bool {
+        for (const TileKey& leaf : selection.leafSet) {
+            if (leaf.level < regionKey.level) {
+                continue;
+            }
+            TileKey probe = leaf;
+            while (probe.level > regionKey.level) {
+                probe = probe.Parent();
+            }
+            if (probe == regionKey) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
         if (it == tiles_.end()) continue;
         
-        uint8_t newMask = 0;
+        uint8_t newEdgeCoarserMask = 0;
+        uint8_t newSkirtMask = 0;
         if (key.level > 0) {  // Level 0 has no coarser neighbors
             // Check 4 cardinal directions: N(0,-1), E(1,0), S(0,1), W(-1,0)
             static const int dx[] = {0, 1, 0, -1};
@@ -460,7 +599,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
             
             for (int dir = 0; dir < 4; ++dir) {
                 TileKey neighborSame = key.Neighbor(dx[dir], dy[dir]);
-                if (!neighborSame.IsValid()) continue;
+                if (!neighborSame.IsValid()) {
+                    newSkirtMask |= edgeBits[dir];
+                    continue;
+                }
                 
                 // Neighbor is coarser if: neighborSame NOT in leafSet AND neighborSame.Parent() IS in leafSet
                 bool neighborSameIsLeaf = selection.leafSet.count(neighborSame) > 0;
@@ -468,19 +610,74 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     TileKey neighborParent = neighborSame.Parent();
                     bool neighborParentIsLeaf = selection.leafSet.count(neighborParent) > 0;
                     if (neighborParentIsLeaf) {
-                        newMask |= edgeBits[dir];
+                        newEdgeCoarserMask |= edgeBits[dir];
+                        newSkirtMask |= edgeBits[dir];
+                        continue;
+                    }
+
+                    // For finer-neighbor coverage, avoid redundant skirts (visible black seams).
+                    // Keep skirts only for true coverage holes.
+                    if (!leafRegionHasCoverage(neighborSame)) {
+                        newSkirtMask |= edgeBits[dir];
                     }
                 }
             }
         }
-        
+
         Tile& tile = it->second;
+        int effectiveDemLevel = key.level;
+        if (demManager_) {
+            effectiveDemLevel = resolveBestAvailableDemLevel(key);
+            static const int dx[] = {0, 1, 0, -1};
+            static const int dy[] = {-1, 0, 1, 0};
+            static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
+                                               Tile::EDGE_SOUTH, Tile::EDGE_WEST};
+            for (int dir = 0; dir < 4; ++dir) {
+                TileKey n = key.Neighbor(dx[dir], dy[dir]);
+                if (!n.IsValid() || selection.leafSet.count(n) == 0) {
+                    continue;
+                }
+                int neighborLevel = resolveBestAvailableDemLevel(n);
+                bool coarserLodEdge = (newEdgeCoarserMask & edgeBits[dir]) != 0;
+                bool openCoverageEdge = (newSkirtMask & edgeBits[dir]) != 0;
+
+                // Preserve local detail and only coordinate aggressively on risky edges.
+                if (coarserLodEdge || openCoverageEdge) {
+                    effectiveDemLevel = std::min(effectiveDemLevel, neighborLevel);
+                } else if (effectiveDemLevel > neighborLevel + 1) {
+                    // Same-LOD neighbors: allow at most one-level mismatch to reduce cliffs
+                    // without collapsing whole regions to a deep ancestor level.
+                    effectiveDemLevel = neighborLevel + 1;
+                }
+            }
+            effectiveDemLevel = std::clamp(effectiveDemLevel, 0, key.level);
+        }
+
+        uint8_t stitchedMask = config_.edgeStitching ? newEdgeCoarserMask : 0;
+        uint8_t resolvedSkirtMask = config_.selectiveSkirts
+            ? newSkirtMask
+            : static_cast<uint8_t>(Tile::EDGE_NORTH | Tile::EDGE_EAST | Tile::EDGE_SOUTH | Tile::EDGE_WEST);
+
+        tile.cornerLods = CornerLodsFromEdgeMask(newEdgeCoarserMask);
         bool revisionChanged = false;
-        if (newMask != tile.edgeCoarserMask) {
-            tile.edgeCoarserMask = newMask;
+        if (newEdgeCoarserMask != tile.edgeCoarserMask) {
+            tile.edgeCoarserMask = newEdgeCoarserMask;
             if (tile.edgeCoarserMask != tile.prevEdgeCoarserMask) {
                 revisionChanged = true;
             }
+        }
+        if (tile.stitchMask != stitchedMask) {
+            tile.stitchMask = stitchedMask;
+            revisionChanged = true;
+        }
+        if (tile.skirtMask != resolvedSkirtMask) {
+            tile.skirtMask = resolvedSkirtMask;
+            revisionChanged = true;
+        }
+        uint8_t newEffectiveLevel = static_cast<uint8_t>(std::clamp(effectiveDemLevel, 0, 255));
+        if (tile.demEffectiveLevel != newEffectiveLevel) {
+            tile.demEffectiveLevel = newEffectiveLevel;
+            revisionChanged = true;
         }
         
         // Check DEM availability - check edge-specific coarser neighbor parents
@@ -513,6 +710,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             if (hasOwnDem && hasAllCoarserDem) {
                 revisionChanged = true;
                 tile.demPending = false;
+                ++demTriggeredMeshRebuilds_;
             }
         }
         
@@ -560,6 +758,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 if (heightmapManager_) {
                     heightmapManager_->Release(it->first);
                 }
+                if (textureManager_) {
+                    textureManager_->ReleaseTileResources(tile);
+                }
+                demMeshWaitStartSec_.erase(it->first);
                 it = tiles_.erase(it);
                 continue;
             }
@@ -570,6 +772,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 if (heightmapManager_) {
                     heightmapManager_->Release(it->first);
                 }
+                if (textureManager_) {
+                    textureManager_->ReleaseTileResources(tile);
+                }
+                demMeshWaitStartSec_.erase(it->first);
                 it = tiles_.erase(it);
                 continue;
             }
@@ -596,34 +802,227 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Evict old tiles (respects pinned tiles)
     textureManager_->EvictIfNeeded(tiles_, config_.maxTiles);
 
+    // BuildNextScene snapshot (P2.1): Render consumes this immutable frame input.
+    sceneSnapshot_.valid = true;
+    sceneSnapshot_.mvp = mvp;
+    sceneSnapshot_.cameraPos = cameraPos;
+    sceneSnapshot_.leafSet = renderLeafSet_;
+    sceneSnapshot_.currentTime = currentTime;
+    sceneSnapshot_.loadingTexture = textureManager_ ? textureManager_->GetLoadingTexture() : 0;
+    sceneSnapshot_.wireframe = config_.wireframeMode;
+    sceneSnapshot_.useLogDepth = config_.logDepthEnabled && !config_.reversedZEnabled;
+    sceneSnapshot_.logDepthFarKm = currentFarPlaneKm_;
+    sceneSnapshot_.useHeightmap =
+        (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) &&
+        demManager_ &&
+        (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
+
+    bool hasBackgroundWork = false;
+    if (flightController_ && flightController_->IsMoving()) {
+        hasBackgroundWork = true;
+    }
+    if (scheduler_) {
+        auto s = scheduler_->GetStats();
+        hasBackgroundWork = hasBackgroundWork ||
+            (s.pendingFetches > 0) ||
+            (s.pendingDecodes > 0) ||
+            (s.activeFetches > 0) ||
+            (s.fetchResultQueue > 0) ||
+            (s.decodeResultQueue > 0);
+    }
+    if (textureManager_ && textureManager_->GetPendingUploads() > 0) {
+        hasBackgroundWork = true;
+    }
+    if (meshScheduler_ && meshScheduler_->GetPendingCount() > 0) {
+        hasBackgroundWork = true;
+    }
+    if (!rebuildPending_.empty()) {
+        hasBackgroundWork = true;
+    }
+    if (demManager_ && demManager_->GetPendingCount() > 0) {
+        hasBackgroundWork = true;
+    }
+    if (heightmapManager_ && heightmapManager_->GetPendingCount() > 0) {
+        hasBackgroundWork = true;
+    }
+
+    // Keep rendering while tile fade or terrain morph animations are active.
+    if (!hasBackgroundWork) {
+        for (const TileKey& key : renderLeafSet_) {
+            auto it = tiles_.find(key);
+            if (it == tiles_.end()) continue;
+            const Tile& tile = it->second;
+            if ((tile.hasMesh && tile.textureId != 0 && !tile.fadeComplete) || tile.terrainMorphActive) {
+                hasBackgroundWork = true;
+                break;
+            }
+        }
+    }
+
+    if (hasBackgroundWork) {
+        frameRequested_ = true;
+    }
+
     frameTimings_.totalMs = (glfwGetTime() * 1000.0) - updateStartMs;
 }
 
 void GlobeEngine::Render() {
     double renderStartMs = glfwGetTime() * 1000.0;
+    if (config_.reversedZEnabled) {
+        glClearDepth(0.0);
+        glDepthFunc(GL_GEQUAL);
+    } else {
+        glClearDepth(1.0);
+        glDepthFunc(GL_LEQUAL);
+    }
     glClearColor(0.02f, 0.02f, 0.05f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
-    // Get MVP from camera (Google Earth parity - double precision internally)
-    glm::dmat4 viewD = camera_->GetViewMatrix();
-    glm::dmat4 projD = camera_->GetProjectionMatrix();
-    glm::mat4 mvp = glm::mat4(projD * viewD);
-    
-    // Draw tiles via RenderFrame (GE-style separation)
-    double currentTime = glfwGetTime();
-    uint32_t loadingTexture = textureManager_->GetLoadingTexture();
-    // Only pass heightmap manager when GPU displacement mode is active and DEM is healthy.
-    // This avoids unstable rendering when DEM endpoint is unavailable/intermittent.
-    HeightmapManager* hmForRender = nullptr;
-    if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE &&
-        demManager_ &&
-        demManager_->GetHealthStatus() == DemHealthStatus::Healthy) {
-        hmForRender = heightmapManager_.get();
+    if (!sceneSnapshot_.valid) {
+        return;
     }
+
+    // RenderScene: consume immutable snapshot produced during Update.
+    const glm::mat4& mvp = sceneSnapshot_.mvp;
+    HeightmapManager* hmForRender = sceneSnapshot_.useHeightmap ? heightmapManager_.get() : nullptr;
     auto drawStats = renderFrame_->DrawTiles(
-        renderLeafSet_, tiles_, mvp, currentTime, config_.wireframeMode, loadingTexture,
+        sceneSnapshot_.leafSet, tiles_, mvp, sceneSnapshot_.cameraPos,
+        sceneSnapshot_.currentTime, cameraSpeedKmPerSec_,
+        sceneSnapshot_.useLogDepth, sceneSnapshot_.logDepthFarKm,
+        sceneSnapshot_.wireframe, sceneSnapshot_.loadingTexture,
         hmForRender
     );
+    const auto& renderStats = tileRenderer_->GetStats();
+
+    // Seam/continuity telemetry (P5 parity gates).
+    int seamEdgeCount = 0;          // Legacy threshold-count metric.
+    double seamEdgeDeltaSumM = 0.0; // Legacy average seam delta.
+    int seamEdgeSamples = 0;        // Legacy sample count.
+    int tilesUsingAncestorDem = 0;
+    double seamGapP95M = 0.0;
+    double seamGapMaxM = 0.0;
+    int cliffEdgeCount = 0;
+    double ancestorDemRatio = 0.0;
+    if (demManager_) {
+        int visibleDemTiles = 0;
+        for (const TileKey& key : sceneSnapshot_.leafSet) {
+            auto it = tiles_.find(key);
+            if (it == tiles_.end()) {
+                continue;
+            }
+            const Tile& tile = it->second;
+            ++visibleDemTiles;
+            if (tile.demEffectiveLevel < key.level || tile.demSourceLevelMax < key.level) {
+                ++tilesUsingAncestorDem;
+            }
+        }
+        if (visibleDemTiles > 0) {
+            ancestorDemRatio = static_cast<double>(tilesUsingAncestorDem) / static_cast<double>(visibleDemTiles);
+        }
+
+        std::vector<double> seamDeltas;
+        seamDeltas.reserve(sceneSnapshot_.leafSet.size() * 8);
+
+        static const int dx[] = {1, 0};   // East, South (no duplicate edge pairs)
+        static const int dy[] = {0, 1};
+        constexpr int kEdgeSamples = 5;
+        constexpr double kSeamWarnM = 4.0;
+        constexpr double kCliffM = 15.0;
+
+        for (const TileKey& key : sceneSnapshot_.leafSet) {
+            auto tileIt = tiles_.find(key);
+            if (tileIt == tiles_.end()) {
+                continue;
+            }
+            const Tile& tileA = tileIt->second;
+
+            for (int dir = 0; dir < 2; ++dir) {
+                TileKey neighborKey = key.Neighbor(dx[dir], dy[dir]);
+                if (!neighborKey.IsValid()) {
+                    continue;
+                }
+
+                // Seam metrics must include same-LOD and delta-LOD neighbors.
+                // If the neighbor at the same level is not a leaf, it may be covered by a
+                // coarser leaf (parent). That edge is where cliffs/cracks most often appear.
+                TileKey neighborLeaf = neighborKey;
+                if (sceneSnapshot_.leafSet.count(neighborLeaf) == 0) {
+                    if (neighborLeaf.level == 0) {
+                        continue;
+                    }
+                    TileKey parent = neighborLeaf.Parent();
+                    if (sceneSnapshot_.leafSet.count(parent) == 0) {
+                        continue;
+                    }
+                    neighborLeaf = parent;
+                }
+
+                // Avoid comparing a tile to itself (can happen at level 0).
+                if (neighborLeaf == key) {
+                    continue;
+                }
+
+                auto neighborIt = tiles_.find(neighborLeaf);
+                if (neighborIt == tiles_.end()) {
+                    continue;
+                }
+                const Tile& tileB = neighborIt->second;
+
+                Extent extent = Extent::FromTileWGS84(key.x, key.y, key.level);
+                double edgeMaxDeltaM = 0.0;
+                bool edgeHadSample = false;
+
+                for (int i = 0; i < kEdgeSamples; ++i) {
+                    double t = (kEdgeSamples == 1) ? 0.5 : static_cast<double>(i) / static_cast<double>(kEdgeSamples - 1);
+                    double lon = 0.0;
+                    double lat = 0.0;
+                    if (dir == 0) {
+                        lon = extent.East();
+                        lat = extent.North() + (extent.South() - extent.North()) * t;
+                    } else {
+                        lon = extent.West() + (extent.East() - extent.West()) * t;
+                        lat = extent.South();
+                    }
+
+                    DemSampleResult sampleA;
+                    DemSampleResult sampleB;
+                    int levelA = std::clamp(static_cast<int>(tileA.demEffectiveLevel), 0, key.level);
+                    int levelB = std::clamp(static_cast<int>(tileB.demEffectiveLevel), 0, neighborLeaf.level);
+                    bool okA = demManager_->SampleHeightDetailed(lon, lat, levelA, sampleA);
+                    bool okB = demManager_->SampleHeightDetailed(lon, lat, levelB, sampleB);
+                    if (okA && okB && sampleA.ok && sampleB.ok) {
+                        double deltaM = std::abs(sampleA.heightMeters - sampleB.heightMeters);
+                        seamDeltas.push_back(deltaM);
+                        seamEdgeDeltaSumM += deltaM;
+                        ++seamEdgeSamples;
+                        edgeMaxDeltaM = std::max(edgeMaxDeltaM, deltaM);
+                        edgeHadSample = true;
+                    } else {
+                        seamDeltas.push_back(kCliffM);
+                        seamEdgeDeltaSumM += kCliffM;
+                        ++seamEdgeSamples;
+                        edgeMaxDeltaM = std::max(edgeMaxDeltaM, kCliffM);
+                    }
+                }
+
+                if (edgeHadSample && edgeMaxDeltaM > kSeamWarnM) {
+                    ++seamEdgeCount;
+                } else if (!edgeHadSample) {
+                    ++seamEdgeCount;
+                }
+                if (edgeMaxDeltaM > kCliffM) {
+                    ++cliffEdgeCount;
+                }
+            }
+        }
+
+        if (!seamDeltas.empty()) {
+            std::sort(seamDeltas.begin(), seamDeltas.end());
+            seamGapMaxM = seamDeltas.back();
+            std::size_t p95Index = static_cast<std::size_t>(std::floor(0.95 * static_cast<double>(seamDeltas.size() - 1)));
+            seamGapP95M = seamDeltas[p95Index];
+        }
+    }
     
     // Render pivot gizmo (Google Earth style target icon)
     RenderPivot(mvp);
@@ -649,13 +1048,60 @@ void GlobeEngine::Render() {
     debugStats_.decodeQueueSize = schedulerStats.decodeResultQueue;
     debugStats_.avgFetchMs = schedulerStats.avgFetchMs;
     debugStats_.avgDecodeMs = schedulerStats.avgDecodeMs;
+    debugStats_.droppedFetchResults = schedulerStats.droppedFetchResults;
+    debugStats_.droppedDecodeResults = schedulerStats.droppedDecodeResults;
+    debugStats_.decodedCacheReadHits = schedulerStats.decodedCacheReadHits;
+    debugStats_.decodedCacheReadMisses = schedulerStats.decodedCacheReadMisses;
+    debugStats_.decodedCacheWrites = schedulerStats.decodedCacheWrites;
+    debugStats_.decodedCacheWriteRejects = schedulerStats.decodedCacheWriteRejects;
+    debugStats_.decodedCacheEvictions = schedulerStats.decodedCacheEvictions;
+    debugStats_.decodedCacheEntries = schedulerStats.decodedCacheEntries;
+    debugStats_.decodedCacheBytesUsed = schedulerStats.decodedCacheBytesUsed;
+    debugStats_.decodeBypassHits = schedulerStats.decodeBypassHits;
+    debugStats_.memoryCacheReadHits = schedulerStats.memoryCacheReadHits;
+    debugStats_.memoryCacheReadMisses = schedulerStats.memoryCacheReadMisses;
+    debugStats_.memoryCacheWrites = schedulerStats.memoryCacheWrites;
+    debugStats_.memoryCacheWriteRejects = schedulerStats.memoryCacheWriteRejects;
+    debugStats_.memoryCacheEvictions = schedulerStats.memoryCacheEvictions;
+    debugStats_.memoryCacheEntries = schedulerStats.memoryCacheEntries;
+    debugStats_.memoryCacheBytesUsed = schedulerStats.memoryCacheBytesUsed;
+    debugStats_.diskCacheReadHits = schedulerStats.diskCacheReadHits;
+    debugStats_.diskCacheReadMisses = schedulerStats.diskCacheReadMisses;
+    debugStats_.diskCacheWrites = schedulerStats.diskCacheWrites;
+    debugStats_.diskCacheWriteFails = schedulerStats.diskCacheWriteFails;
+    debugStats_.networkFetches = schedulerStats.networkFetches;
+    debugStats_.totalFetchRequests = schedulerStats.totalFetchRequests;
     debugStats_.renderableLeaves = drawStats.renderableLeaves;
+    debugStats_.crossfadingLeaves = drawStats.crossfadingLeaves;
     debugStats_.fallbackTiles = drawStats.fallbackTiles;
     debugStats_.placeholderTiles = drawStats.placeholderTiles;
     debugStats_.leafNoMesh = drawStats.leafNoMesh;
     debugStats_.leafNoTexture = drawStats.leafNoTexture;
     debugStats_.missingTiles = drawStats.missing;
     debugStats_.visibleTiles = drawStats.renderableLeaves + drawStats.fallbackTiles;
+    debugStats_.drawCalls = renderStats.drawCalls;
+    debugStats_.trianglesRendered = renderStats.trianglesRendered;
+    debugStats_.instancedBatches = renderStats.instancedBatches;
+    debugStats_.instancedTiles = renderStats.instancedTiles;
+    debugStats_.atlasEnabled = textureManager_ && textureManager_->IsAtlasEnabled();
+    debugStats_.atlasPages = textureManager_ ? textureManager_->GetAtlasPageCount() : 0;
+    debugStats_.atlasUsedSlots = textureManager_ ? textureManager_->GetAtlasUsedSlots() : 0;
+    debugStats_.atlasCapacitySlots = textureManager_ ? textureManager_->GetAtlasCapacitySlots() : 0;
+    debugStats_.cameraSpeedKmPerSec = cameraSpeedKmPerSec_;
+    debugStats_.demWaitMs = (demWaitSamples_ > 0)
+        ? (demWaitAccumMs_ / static_cast<double>(demWaitSamples_))
+        : 0.0;
+    debugStats_.meshRebuildCount = demTriggeredMeshRebuilds_;
+    debugStats_.leafUnderflowFrames = leafUnderflowFrames_;
+    debugStats_.seamEdgeCount = seamEdgeCount;
+    debugStats_.avgEdgeHeightDeltaM = seamEdgeSamples > 0
+        ? seamEdgeDeltaSumM / static_cast<double>(seamEdgeSamples)
+        : 0.0;
+    debugStats_.tilesUsingAncestorDem = tilesUsingAncestorDem;
+    debugStats_.seamGapP95M = seamGapP95M;
+    debugStats_.seamGapMaxM = seamGapMaxM;
+    debugStats_.cliffEdgeCount = cliffEdgeCount;
+    debugStats_.ancestorDemRatio = ancestorDemRatio;
     debugStats_.leafCount = tilePyramid_.GetLeafCount();
     debugStats_.requiredCount = tilePyramid_.GetRequiredCount();
     debugStats_.currentZoom = GetCurrentZoom();
@@ -674,6 +1120,9 @@ void GlobeEngine::Render() {
 void GlobeEngine::BuildTileMesh(Tile& tile) {
     // Delegate to TileMeshBuilder (GE-style separation)
     auto result = TileMeshBuilder::Build(tile.key, tile.extent, tile.edgeCoarserMask,
+                                         tile.stitchMask,
+                                         tile.skirtMask,
+                                         static_cast<int>(tile.demEffectiveLevel),
                                          demManager_.get(), config_, true);
     result.meshRevision = tile.meshRevision;
     TileMeshBuilder::UploadToGPU(tile, result);
@@ -764,10 +1213,12 @@ bool GlobeEngine::PickGlobe(double screenX, double screenY, glm::dvec3& outPoint
 void GlobeEngine::FlyTo(double lat, double lon, double altMeters, 
                         double heading, double tilt, double duration) {
     flightController_->FlyToLocation(lat, lon, altMeters, heading, tilt, duration);
+    frameRequested_ = true;
 }
 
 void GlobeEngine::LookAt(double lat, double lon, double altitude) {
     camera_->SetLatLonAlt(lat, lon, altitude);
+    frameRequested_ = true;
 }
 
 void GlobeEngine::GetCameraLatLonAlt(double& lat, double& lon, double& alt) const {
@@ -785,6 +1236,7 @@ int GlobeEngine::GetCurrentZoom() const {
 // Input callbacks - delegate to FlightController (Google Earth parity)
 void GlobeEngine::KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     auto* engine = static_cast<GlobeEngine*>(glfwGetWindowUserPointer(window));
+    engine->frameRequested_ = true;
     
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, true);
@@ -820,6 +1272,7 @@ void GlobeEngine::KeyCallback(GLFWwindow* window, int key, int scancode, int act
 
 void GlobeEngine::ScrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
     auto* engine = static_cast<GlobeEngine*>(glfwGetWindowUserPointer(window));
+    engine->frameRequested_ = true;
     
     // Update modifiers for Shift+Scroll = Tilt
     bool shift = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ||
@@ -833,6 +1286,7 @@ void GlobeEngine::ScrollCallback(GLFWwindow* window, double xoffset, double yoff
 
 void GlobeEngine::MouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
     auto* engine = static_cast<GlobeEngine*>(glfwGetWindowUserPointer(window));
+    engine->frameRequested_ = true;
     double x, y;
     glfwGetCursorPos(window, &x, &y);
     double time = glfwGetTime();
@@ -874,11 +1328,13 @@ void GlobeEngine::MouseButtonCallback(GLFWwindow* window, int button, int action
 
 void GlobeEngine::CursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
     auto* engine = static_cast<GlobeEngine*>(glfwGetWindowUserPointer(window));
+    engine->frameRequested_ = true;
     engine->flightController_->OnMouseMove(xpos, ypos, glfwGetTime());
 }
 
 void GlobeEngine::FramebufferSizeCallback(GLFWwindow* window, int width, int height) {
     auto* engine = static_cast<GlobeEngine*>(glfwGetWindowUserPointer(window));
+    engine->frameRequested_ = true;
     if (width <= 0 || height <= 0) return;
     
     // Get window size (for cursor coordinate system - may differ from framebuffer on HiDPI)
@@ -969,17 +1425,67 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Leaves: %d", debugStats_.leafCount);
             ImGui::Text("Required: %d", debugStats_.requiredCount);
             ImGui::Text("Visible: %d", debugStats_.visibleTiles);
+            ImGui::Text("Draw Calls: %d", debugStats_.drawCalls);
+            ImGui::Text("Triangles: %d", debugStats_.trianglesRendered);
+            ImGui::Text("Instanced: %d batches / %d tiles",
+                        debugStats_.instancedBatches, debugStats_.instancedTiles);
+            if (debugStats_.atlasEnabled) {
+                ImGui::Text("Atlas Slots: %d / %d (%d pages)",
+                            debugStats_.atlasUsedSlots,
+                            debugStats_.atlasCapacitySlots,
+                            debugStats_.atlasPages);
+            } else {
+                ImGui::Text("Atlas: disabled");
+            }
             ImGui::Text("Pending Fetch: %d", debugStats_.pendingFetches);
             ImGui::Text("Pending Decode: %d", debugStats_.pendingDecodes);
             ImGui::Text("Active Fetch: %d", debugStats_.activeFetches);
             ImGui::Text("FetchQ/DecodeQ: %zu / %zu",
                         debugStats_.fetchQueueSize, debugStats_.decodeQueueSize);
+            ImGui::Text("Dropped F/D: %zu / %zu",
+                        debugStats_.droppedFetchResults, debugStats_.droppedDecodeResults);
             ImGui::Text("Avg Fetch/Decode: %.2f / %.2f ms",
                         debugStats_.avgFetchMs, debugStats_.avgDecodeMs);
+            ImGui::Text("Decoded Cache Hit/Miss: %zu / %zu",
+                        debugStats_.decodedCacheReadHits, debugStats_.decodedCacheReadMisses);
+            ImGui::Text("Decoded Entries: %zu (%.1f MB)",
+                        debugStats_.decodedCacheEntries,
+                        static_cast<double>(debugStats_.decodedCacheBytesUsed) / (1024.0 * 1024.0));
+            ImGui::Text("Decoded Writes/Reject/Evict: %zu / %zu / %zu",
+                        debugStats_.decodedCacheWrites,
+                        debugStats_.decodedCacheWriteRejects,
+                        debugStats_.decodedCacheEvictions);
+            ImGui::Text("Decode Bypass Hits: %zu", debugStats_.decodeBypassHits);
+            ImGui::Text("Memory Cache Hit/Miss: %zu / %zu",
+                        debugStats_.memoryCacheReadHits, debugStats_.memoryCacheReadMisses);
+            ImGui::Text("Memory Cache Entries: %zu (%.1f MB)",
+                        debugStats_.memoryCacheEntries,
+                        static_cast<double>(debugStats_.memoryCacheBytesUsed) / (1024.0 * 1024.0));
+            ImGui::Text("Memory Writes/Reject/Evict: %zu / %zu / %zu",
+                        debugStats_.memoryCacheWrites,
+                        debugStats_.memoryCacheWriteRejects,
+                        debugStats_.memoryCacheEvictions);
+            ImGui::Text("Disk Cache Hit/Miss: %zu / %zu",
+                        debugStats_.diskCacheReadHits, debugStats_.diskCacheReadMisses);
+            ImGui::Text("Disk Cache Writes/Fails: %zu / %zu",
+                        debugStats_.diskCacheWrites, debugStats_.diskCacheWriteFails);
+            ImGui::Text("Network Fetches: %zu / %zu req",
+                        debugStats_.networkFetches, debugStats_.totalFetchRequests);
             
             // Gap-free telemetry
             ImGui::Text("Renderable: %d", debugStats_.renderableLeaves);
+            ImGui::Text("Crossfading: %d", debugStats_.crossfadingLeaves);
             ImGui::Text("Fallback: %d", debugStats_.fallbackTiles);
+            ImGui::Text("Leaf Underflow Frames: %llu",
+                        static_cast<unsigned long long>(debugStats_.leafUnderflowFrames));
+            ImGui::Text("Seam Gap P95/Max: %.2f / %.2f m",
+                        debugStats_.seamGapP95M, debugStats_.seamGapMaxM);
+            ImGui::Text("Cliff Edge Count: %d", debugStats_.cliffEdgeCount);
+            ImGui::Text("Ancestor DEM Ratio: %.1f%%",
+                        debugStats_.ancestorDemRatio * 100.0);
+            ImGui::Text("Legacy Seam Edges: %d", debugStats_.seamEdgeCount);
+            ImGui::Text("Legacy Avg Edge Delta: %.2f m", debugStats_.avgEdgeHeightDeltaM);
+            ImGui::Text("Ancestor DEM Tiles: %d", debugStats_.tilesUsingAncestorDem);
             if (debugStats_.placeholderTiles > 0) {
                 ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Placeholder: %d", debugStats_.placeholderTiles);
             }
@@ -1002,6 +1508,7 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Lon: %.4f", debugStats_.longitude);
             ImGui::Text("Heading: %.1f", debugStats_.heading);
             ImGui::Text("Tilt: %.1f", debugStats_.tilt);
+            ImGui::Text("Cam Speed: %.1f km/s", debugStats_.cameraSpeedKmPerSec);
             
             ImGui::Spacing();
             
@@ -1009,6 +1516,16 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Render Options");
             ImGui::Separator();
             ImGui::Checkbox("Wireframe Mode", &config_.wireframeMode);
+            ImGui::Checkbox("Log Depth Precision", &config_.logDepthEnabled);
+            if (ImGui::Checkbox("Reversed-Z Precision", &config_.reversedZEnabled)) {
+                if (config_.reversedZEnabled) {
+                    config_.logDepthEnabled = false;
+                }
+            }
+            if (config_.reversedZEnabled && config_.logDepthEnabled) {
+                config_.logDepthEnabled = false;
+            }
+            ImGui::Text("Depth Near/Far: %.3f / %.0f km", currentNearPlaneKm_, currentFarPlaneKm_);
             
             // Displacement mode toggle
             const char* modeNames[] = { "CPU Mesh Bake", "GPU Heightmap" };
@@ -1041,6 +1558,8 @@ void GlobeEngine::RenderDebugPanel() {
                     ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Auth Fails: %d", demStats.fetchAuth.load());
                 ImGui::Text("Parse OK/Fail: %d / %d", demStats.parseSuccess.load(), demStats.parseFail.load());
                 ImGui::Text("DEM Cache: %d", demManager_->GetCacheSize());
+                ImGui::Text("DEM Wait Avg: %.1f ms", debugStats_.demWaitMs);
+                ImGui::Text("DEM Rebuilds: %zu", debugStats_.meshRebuildCount);
             }
             
             ImGui::Spacing();
@@ -1224,11 +1743,46 @@ void GlobeEngine::QueueMeshBuild(const TileKey& key, bool isVisible) {
     
     Tile& tile = it->second;
     if (tile.meshPending) return;
+
+    // P5.3: DEM-aware mesh build coordination.
+    // If DEM fetch is already pending, wait up to 500ms before building a flat mesh.
+    if (isVisible &&
+        demManager_ &&
+        config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE &&
+        demManager_->GetHealthStatus() == DemHealthStatus::Healthy) {
+        constexpr double kDemMeshWaitTimeoutSec = 0.5;
+        const bool hasDemData = demManager_->HasData(key);
+        const bool hasAncestorFallback = demManager_->HasDataOrAncestor(key);
+        const bool demPendingRequest = demManager_->HasPendingRequest(key);
+        const double nowSec = glfwGetTime();
+
+        if (!hasDemData && !hasAncestorFallback && demPendingRequest) {
+            auto [waitIt, inserted] = demMeshWaitStartSec_.emplace(key, nowSec);
+            double waitedSec = std::max(0.0, nowSec - waitIt->second);
+            if (waitedSec < kDemMeshWaitTimeoutSec) {
+                return;  // Defer mesh build while DEM is likely to arrive soon.
+            }
+            demWaitAccumMs_ += waitedSec * 1000.0;
+            ++demWaitSamples_;
+            demMeshWaitStartSec_.erase(waitIt);
+        } else {
+            auto waitIt = demMeshWaitStartSec_.find(key);
+            if (waitIt != demMeshWaitStartSec_.end()) {
+                double waitedSec = std::max(0.0, nowSec - waitIt->second);
+                demWaitAccumMs_ += waitedSec * 1000.0;
+                ++demWaitSamples_;
+                demMeshWaitStartSec_.erase(waitIt);
+            }
+        }
+    }
     
     TileMeshScheduler::MeshRequest request;
     request.key = key;
     request.extent = tile.extent;
     request.edgeMask = tile.edgeCoarserMask;
+    request.stitchMask = tile.stitchMask;
+    request.skirtMask = tile.skirtMask;
+    request.demTargetLevel = static_cast<int>(tile.demEffectiveLevel);
     request.meshRevision = tile.meshRevision;
     request.priority = isVisible ? Priority::Urgent : Priority::Normal;
     request.score = tile.importance;
@@ -1299,6 +1853,11 @@ void GlobeEngine::PreloadBaseTiles() {
                 }
                 
                 Tile& tile = it->second;
+                tile.demEffectiveLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
+                tile.stitchMask = 0;
+                tile.skirtMask = config_.selectiveSkirts
+                    ? static_cast<uint8_t>(Tile::EDGE_NORTH | Tile::EDGE_EAST | Tile::EDGE_SOUTH | Tile::EDGE_WEST)
+                    : static_cast<uint8_t>(Tile::EDGE_NORTH | Tile::EDGE_EAST | Tile::EDGE_SOUTH | Tile::EDGE_WEST);
                 
                 // Ensure mesh exists for immediate fallback coverage
                 if (!tile.hasMesh) {
@@ -1309,6 +1868,7 @@ void GlobeEngine::PreloadBaseTiles() {
                 if (tile.textureId == 0 && loadingTexture != 0) {
                     tile.textureId = loadingTexture;
                     tile.ownsTexture = false;  // Shared placeholder texture
+                    tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
                 }
                 
                 // Request real texture with high priority (state machine handles transitions)
@@ -1316,6 +1876,7 @@ void GlobeEngine::PreloadBaseTiles() {
                     tile.requestPriority = static_cast<uint8_t>(Priority::Urgent);
                     scheduler_->Request(key, Priority::Urgent, 1.0f);
                     TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
+                    TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
                 }
             }
         }

@@ -17,6 +17,7 @@ class RenderFrame {
 public:
     struct TileDrawStats {
         int renderableLeaves = 0;   // Leaf tiles rendered normally
+        int crossfadingLeaves = 0;  // Leaves currently blending from parent
         int fallbackTiles = 0;      // Parent fallback tiles rendered
         int placeholderTiles = 0;   // Last-resort placeholder tiles
         int leafNoMesh = 0;         // Leaves without mesh
@@ -32,7 +33,11 @@ public:
         const std::unordered_set<TileKey>& leafSet,
         std::unordered_map<TileKey, Tile>& tiles,
         const glm::mat4& mvp,
+        const glm::vec3& cameraPos,
         double currentTime,
+        float cameraSpeedKmPerSec,
+        bool useLogDepth,
+        float logDepthFarKm,
         bool wireframe,
         uint32_t loadingTexture,  // Placeholder texture ID
         HeightmapManager* heightmapManager = nullptr  // Optional: GPU terrain displacement
@@ -40,8 +45,13 @@ public:
 
 private:
     // Find nearest renderable ancestor (parent → grandparent → base)
-    // Renderable = hasMesh && textureId != 0
-    Tile* FindRenderableAncestor(const TileKey& key, std::unordered_map<TileKey, Tile>& tiles);
+    // By default, renderable ancestor must have a non-placeholder raster texture.
+    // When allowPlaceholder=true, placeholder textures are accepted as a last-resort
+    // fallback to prevent transient black gaps while meshes/textures are streaming in.
+    Tile* FindRenderableAncestor(const TileKey& key,
+                                 std::unordered_map<TileKey, Tile>& tiles,
+                                 uint32_t loadingTexture,
+                                 bool allowPlaceholder);
 
     TileRenderer& tileRenderer_;
     ShaderManager& shaderManager_;

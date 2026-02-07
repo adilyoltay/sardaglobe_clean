@@ -6,6 +6,7 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <limits>
 
 namespace globe {
 
@@ -100,6 +101,9 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
     // Pending/in-flight dedupe with priority/score upgrade
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
+        if (inFlightKeys_.count(key) > 0) {
+            return;  // Worker already fetching this tile.
+        }
         auto it = pendingRanks_.find(key);
         if (it != pendingRanks_.end()) {
             bool better = (priority > it->second.priority) ||
@@ -121,6 +125,11 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
     queueCv_.notify_one();
 }
 
+bool DemManager::HasPendingRequest(const TileKey& key) {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    return pendingRanks_.count(key) > 0 || inFlightKeys_.count(key) > 0;
+}
+
 bool DemManager::HasData(const TileKey& key) const {
     std::lock_guard<std::mutex> lock(cacheMutex_);
     auto it = cache_.find(key);
@@ -129,6 +138,39 @@ bool DemManager::HasData(const TileKey& key) const {
         auto now = std::chrono::steady_clock::now();
         it->second.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
         return true;
+    }
+    return false;
+}
+
+bool DemManager::HasDataOrAncestor(const TileKey& key) const {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    TileKey probe = key;
+    while (probe.level >= 0) {
+        auto it = cache_.find(probe);
+        if (it != cache_.end() && it->second.valid) {
+            return true;
+        }
+        if (probe.level == 0) {
+            break;
+        }
+        probe = probe.Parent();
+    }
+    return false;
+}
+
+bool DemManager::GetBestAvailableLevel(const TileKey& key, int& outLevel) const {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    TileKey probe = key;
+    while (probe.level >= 0) {
+        auto it = cache_.find(probe);
+        if (it != cache_.end() && it->second.valid) {
+            outLevel = probe.level;
+            return true;
+        }
+        if (probe.level == 0) {
+            break;
+        }
+        probe = probe.Parent();
     }
     return false;
 }
@@ -143,11 +185,23 @@ double DemManager::Tile2Lat(int y, int z) {
 }
 
 bool DemManager::SampleHeight(double lonDeg, double latDeg, int level, double& heightMeters) const {
+    DemSampleResult detailed;
+    if (!SampleHeightDetailed(lonDeg, latDeg, level, detailed)) {
+        return false;
+    }
+    heightMeters = detailed.heightMeters;
+    return true;
+}
+
+bool DemManager::SampleHeightDetailed(double lonDeg, double latDeg, int level, DemSampleResult& out) const {
+    out = DemSampleResult{};
+    level = std::clamp(level, 0, 22);
+
     // Find the tile that contains this lat/lon at the given level
     int n = 1 << level;
-    double lonRad = lonDeg * M_PI / 180.0;
-    double latRad = latDeg * M_PI / 180.0;
-    
+    double latClamped = std::clamp(latDeg, -85.05112878, 85.05112878);
+    double latRad = latClamped * M_PI / 180.0;
+
     int tileX = static_cast<int>((lonDeg + 180.0) / 360.0 * n);
     int tileY = static_cast<int>((1.0 - std::log(std::tan(latRad) + 1.0 / std::cos(latRad)) / M_PI) / 2.0 * n);
     
@@ -155,34 +209,49 @@ bool DemManager::SampleHeight(double lonDeg, double latDeg, int level, double& h
     tileX = std::clamp(tileX, 0, n - 1);
     tileY = std::clamp(tileY, 0, n - 1);
     
-    TileKey key(level, tileX, tileY);
-    
     std::lock_guard<std::mutex> lock(cacheMutex_);
-    auto it = cache_.find(key);
-    if (it == cache_.end() || !it->second.valid) {
-        return false;
+
+    // Parent fallback chain:
+    // First try exact tile at requested level, then walk to ancestors.
+    // This reduces terrain pop when child DEM is pending but parent DEM is already cached.
+    int sampleX = tileX;
+    int sampleY = tileY;
+    for (int sampleLevel = level; sampleLevel >= 0; --sampleLevel) {
+        TileKey key(sampleLevel, sampleX, sampleY);
+        auto it = cache_.find(key);
+        if (it != cache_.end() && it->second.valid) {
+            const DemGridData& data = it->second;
+
+            // Update access time for LRU eviction.
+            auto now = std::chrono::steady_clock::now();
+            data.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+
+            // Compute UV inside the sampled tile (exact or ancestor).
+            double lonLeft = Tile2Lon(sampleX, sampleLevel);
+            double lonRight = Tile2Lon(sampleX + 1, sampleLevel);
+            double latTop = Tile2Lat(sampleY, sampleLevel);
+            double latBottom = Tile2Lat(sampleY + 1, sampleLevel);
+
+            double u = (lonDeg - lonLeft) / (lonRight - lonLeft);
+            double v = (latClamped - latTop) / (latBottom - latTop);
+            u = std::clamp(u, 0.0, 1.0);
+            v = std::clamp(v, 0.0, 1.0);
+
+            out.ok = true;
+            out.heightMeters = SampleBilinear(data, u, v);
+            out.sourceLevel = sampleLevel;
+            out.usedAncestor = sampleLevel != level;
+            return true;
+        }
+
+        if (sampleLevel == 0) {
+            break;
+        }
+        sampleX >>= 1;
+        sampleY >>= 1;
     }
-    
-    const DemGridData& data = it->second;
-    
-    // Update access time for LRU eviction
-    auto now = std::chrono::steady_clock::now();
-    data.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
-    
-    // Calculate UV within tile
-    double lonLeft = Tile2Lon(tileX, level);
-    double lonRight = Tile2Lon(tileX + 1, level);
-    double latTop = Tile2Lat(tileY, level);
-    double latBottom = Tile2Lat(tileY + 1, level);
-    
-    double u = (lonDeg - lonLeft) / (lonRight - lonLeft);
-    double v = (latDeg - latTop) / (latBottom - latTop);
-    
-    u = std::clamp(u, 0.0, 1.0);
-    v = std::clamp(v, 0.0, 1.0);
-    
-    heightMeters = SampleBilinear(data, u, v);
-    return true;
+
+    return false;
 }
 
 bool DemManager::GetGridData(const TileKey& key, DemGridData& outData) const {
@@ -193,6 +262,27 @@ bool DemManager::GetGridData(const TileKey& key, DemGridData& outData) const {
     }
     outData = it->second;
     return true;
+}
+
+void DemManager::PutGridData(const TileKey& key, const DemGridData& data) {
+    if (!data.valid || data.heights.empty() || data.meshN <= 1) {
+        return;
+    }
+    DemGridData copy = data;
+    auto now = std::chrono::steady_clock::now();
+    copy.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    cache_[key] = std::move(copy);
+}
+
+void DemManager::SetPinnedTiles(const std::vector<TileKey>& keys) {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    pinnedKeys_.clear();
+    pinnedKeys_.reserve(keys.size());
+    for (const TileKey& key : keys) {
+        pinnedKeys_.insert(key);
+    }
 }
 
 HeightSampler DemManager::GetHeightSampler() const {
@@ -207,14 +297,22 @@ void DemManager::Update() {
     
     // Evict least recently used entries if cache is too large
     while (cache_.size() > config_.cacheSize) {
-        // True LRU: remove entry with oldest lastAccessTime
+        // True LRU among unpinned entries: remove entry with oldest lastAccessTime.
         double oldestTime = std::numeric_limits<double>::max();
         TileKey oldestKey;
+        bool foundVictim = false;
         for (const auto& [key, data] : cache_) {
+            if (pinnedKeys_.count(key) > 0) {
+                continue;
+            }
             if (data.lastAccessTime < oldestTime) {
                 oldestTime = data.lastAccessTime;
                 oldestKey = key;
+                foundVictim = true;
             }
+        }
+        if (!foundVictim) {
+            break;  // Everything is pinned; postpone eviction for this frame.
         }
         cache_.erase(oldestKey);
     }
@@ -227,7 +325,7 @@ int DemManager::GetCacheSize() const {
 
 void DemManager::WorkerLoop() {
     while (running_) {
-        TileKey key;
+        std::vector<TileKey> batch;
         
         {
             std::unique_lock<std::mutex> lock(queueMutex_);
@@ -236,10 +334,10 @@ void DemManager::WorkerLoop() {
             });
             
             if (!running_) break;
-            if (requestQueue_.empty()) continue;
-
-            bool found = false;
-            while (!requestQueue_.empty()) {
+            
+            // Collect up to maxBatchSize tiles from priority queue
+            int maxBatch = std::max(1, config_.maxBatchSize);
+            while (!requestQueue_.empty() && static_cast<int>(batch.size()) < maxBatch) {
                 DemRequest req = requestQueue_.top();
                 requestQueue_.pop();
 
@@ -253,48 +351,66 @@ void DemManager::WorkerLoop() {
                     continue;
                 }
 
-                key = req.key;
+                batch.push_back(req.key);
                 pendingRanks_.erase(it);
+                inFlightKeys_.insert(req.key);
                 pendingCount_--;
-                found = true;
-                break;
-            }
-
-            if (!found) {
-                continue;
             }
         }
         
-        // Fetch DEM data
-        DemGridData data;
-        if (FetchDem(key, data)) {
-            // Set initial access time for LRU eviction
+        if (batch.empty()) continue;
+        
+        // Fetch batch DEM data
+        std::vector<DemGridData> results;
+        if (FetchBatch(batch, results)) {
             auto now = std::chrono::steady_clock::now();
-            data.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+            double accessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
             
             std::lock_guard<std::mutex> lock(cacheMutex_);
-            cache_[key] = std::move(data);
+            for (size_t i = 0; i < batch.size() && i < results.size(); ++i) {
+                results[i].lastAccessTime = accessTime;
+                cache_[batch[i]] = std::move(results[i]);
+            }
+        } else {
+            // Batch failed — add all tiles to fail TTL
+            std::lock_guard<std::mutex> lock(cacheMutex_);
+            auto failUntil = std::chrono::steady_clock::now() + 
+                             std::chrono::seconds(static_cast<int>(config_.failRetryDelaySec));
+            for (const auto& key : batch) {
+                failedUntil_[key] = failUntil;
+            }
         }
-        
+
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            for (const auto& key : batch) {
+                inFlightKeys_.erase(key);
+            }
+        }
     }
 }
 
-std::string DemManager::BuildDemUrl(const DemCell& cell) const {
+std::string DemManager::BuildBatchUrl(const std::vector<DemCell>& cells) const {
     std::ostringstream oss;
     oss.setf(std::ios::fixed);
-    oss.precision(6);
+    oss.precision(12);
     
+    // WGS84 bbox format matching webglobe.js GenerateURL (WGS84 mode)
+    // Format: ?FLOAT=1&MESHN=5&CN=N&C1LLX=lon&C1LLY=lat&C1URX=lon&C1URY=lat&C2...
     oss << config_.baseUrl
-        << "?MESHN=" << config_.meshN
-        << "&CN=1"
-        << "&FLOAT=1"
-        << "&C1z=" << cell.level
-        << "&C1x=" << cell.tileX
-        << "&C1y=" << cell.tileY
-        << "&C1LLX=" << cell.llx
-        << "&C1LLY=" << cell.lly
-        << "&C1URX=" << cell.urx
-        << "&C1URY=" << cell.ury;
+        << "?FLOAT=1"
+        << "&MESHN=" << config_.meshN
+        << "&CN=" << cells.size();
+    
+    // Cells indexed from CN down to 1 (webglobe iterates in reverse: for(o=length;o--;))
+    for (size_t i = 0; i < cells.size(); ++i) {
+        int idx = static_cast<int>(cells.size() - i);  // CN, CN-1, ..., 1
+        const DemCell& c = cells[i];
+        oss << "&C" << idx << "LLX=" << c.llx
+            << "&C" << idx << "LLY=" << c.lly
+            << "&C" << idx << "URX=" << c.urx
+            << "&C" << idx << "URY=" << c.ury;
+    }
     
     return oss.str();
 }
@@ -305,7 +421,7 @@ DemCell DemManager::BuildDemCell(const TileKey& key) const {
     cell.tileX = key.x;
     cell.tileY = key.y;
 
-    // WGS84 geographic coordinates only (service doesn't support WebMercator)
+    // WGS84 geographic coordinates (matching webglobe.js MercatorToLonLat)
     cell.llx = Tile2Lon(key.x, key.level);
     cell.urx = Tile2Lon(key.x + 1, key.level);
     cell.ury = Tile2Lat(key.y, key.level);      // Top (north)
@@ -314,78 +430,78 @@ DemCell DemManager::BuildDemCell(const TileKey& key) const {
     return cell;
 }
 
-bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
-    auto performRequest = [&](const std::string& url, std::string& response, long& responseCode) -> bool {
-        // Network panel: record start
-        NetworkPanel::Instance().RecordStart(key, RequestType::DemMesh, url);
-        auto startTime = std::chrono::high_resolution_clock::now();
-        
-        if (config_.debug) {
-            std::cerr << "[DEM] Fetching: " << url << std::endl;
-        }
-        
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            NetworkPanel::Instance().RecordComplete(key, RequestType::DemMesh, false, 0, 0, 0.0, false, "curl init failed");
-            return false;
-        }
-        
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.timeoutSec);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, config_.connectTimeoutSec);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        
-        curl_easy_setopt(curl, CURLOPT_USERAGENT,
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36");
-        
-        struct curl_slist* headers = nullptr;
-        std::string origin = ExtractOrigin(url);
-        if (!origin.empty()) {
-            headers = curl_slist_append(headers, ("Origin: " + origin).c_str());
-            headers = curl_slist_append(headers, ("Referer: " + origin + "/").c_str());
-            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        }
-        
-        CURLcode res = curl_easy_perform(curl);
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
-        if (headers) {
-            curl_slist_free_all(headers);
-        }
-        curl_easy_cleanup(curl);
-        
-        auto endTime = std::chrono::high_resolution_clock::now();
-        double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
-        
-        bool ok = (res == CURLE_OK && responseCode == 200);
-        
-        // Telemetry
-        if (ok) {
-            stats_.fetchSuccess++;
-            stats_.totalFetchMs.store(stats_.totalFetchMs.load() + elapsedMs);
-        } else {
-            stats_.fetchFail++;
-            if (res == CURLE_OPERATION_TIMEDOUT) stats_.fetchTimeout++;
-            if (responseCode == 401 || responseCode == 403) stats_.fetchAuth++;
-        }
-        
-        NetworkPanel::Instance().RecordComplete(key, RequestType::DemMesh, ok, responseCode, 
-                                                 response.size(), elapsedMs, false, ok ? "" : curl_easy_strerror(res));
-        return ok;
-    };
-
-    DemCell cell = BuildDemCell(key);
-    std::string url = BuildDemUrl(cell);
-
+bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGridData>& outDataVec) {
+    // Build cells and URL
+    std::vector<DemCell> cells;
+    cells.reserve(keys.size());
+    for (const auto& key : keys) {
+        cells.push_back(BuildDemCell(key));
+    }
+    std::string url = BuildBatchUrl(cells);
+    
+    // Network panel: record start (use first tile key for tracking)
+    NetworkPanel::Instance().RecordStart(keys[0], RequestType::DemMesh, url);
+    auto startTime = std::chrono::high_resolution_clock::now();
+    
+    if (config_.debug) {
+        std::cerr << "[DEM] Batch fetch (" << keys.size() << " tiles): " << url << std::endl;
+    }
+    
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        NetworkPanel::Instance().RecordComplete(keys[0], RequestType::DemMesh, false, 0, 0, 0.0, false, "curl init failed");
+        return false;
+    }
+    
     std::string response;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.timeoutSec);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, config_.connectTimeoutSec);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    
+    curl_easy_setopt(curl, CURLOPT_USERAGENT,
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36");
+    
+    struct curl_slist* headers = nullptr;
+    std::string origin = ExtractOrigin(url);
+    if (!origin.empty()) {
+        headers = curl_slist_append(headers, ("Origin: " + origin).c_str());
+        headers = curl_slist_append(headers, ("Referer: " + origin + "/").c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
+    
+    CURLcode res = curl_easy_perform(curl);
     long responseCode = 0;
-    bool ok = performRequest(url, response, responseCode);
-
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+    if (headers) {
+        curl_slist_free_all(headers);
+    }
+    curl_easy_cleanup(curl);
+    
+    auto endTime = std::chrono::high_resolution_clock::now();
+    double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+    
+    bool ok = (res == CURLE_OK && responseCode == 200);
+    
+    // Telemetry
+    if (ok) {
+        stats_.fetchSuccess++;
+        stats_.totalFetchMs.store(stats_.totalFetchMs.load() + elapsedMs);
+    } else {
+        stats_.fetchFail++;
+        if (res == CURLE_OPERATION_TIMEDOUT) stats_.fetchTimeout++;
+        if (responseCode == 401 || responseCode == 403) stats_.fetchAuth++;
+    }
+    
+    NetworkPanel::Instance().RecordComplete(keys[0], RequestType::DemMesh, ok, responseCode, 
+                                             response.size(), elapsedMs, false, ok ? "" : curl_easy_strerror(res));
+    
     if (!ok) {
         if (config_.debug) {
-            std::cerr << "[DEM] Fetch failed (code: " << responseCode << ")" << std::endl;
+            std::cerr << "[DEM] Batch fetch failed (code: " << responseCode << ")" << std::endl;
         }
         
         // 401/403 auth failure - trigger backoff
@@ -399,11 +515,6 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
                 std::cerr << "[DEM] Auth failed " << fails << " times, backoff " 
                           << config_.authBackoffSec << "s" << std::endl;
             }
-        } else {
-            // Non-auth failure: add to TTL cache for retry
-            std::lock_guard<std::mutex> lock(cacheMutex_);
-            failedUntil_[key] = std::chrono::steady_clock::now() + 
-                                std::chrono::seconds(static_cast<int>(config_.failRetryDelaySec));
         }
         return false;
     }
@@ -411,7 +522,7 @@ bool DemManager::FetchDem(const TileKey& key, DemGridData& outData) {
     // Success - reset auth fail counter
     consecutiveAuthFails_.store(0);
     
-    bool parsed = ParseDemGrid(response, outData);
+    bool parsed = ParseBatchResponse(response, static_cast<int>(keys.size()), outDataVec);
     if (parsed) {
         stats_.parseSuccess++;
     } else {
@@ -425,18 +536,19 @@ DemHealthStatus DemManager::CheckHealth() {
     
     // Use a known tile (z=1, x=1, y=0 = eastern hemisphere, north) as probe
     TileKey probeKey(1, 1, 0);
-    DemGridData probeData;
+    std::vector<TileKey> probeKeys = {probeKey};
+    std::vector<DemGridData> probeResults;
     
-    bool ok = FetchDem(probeKey, probeData);
+    bool ok = FetchBatch(probeKeys, probeResults);
     
     DemHealthStatus status;
-    if (ok && probeData.valid) {
+    if (ok && !probeResults.empty() && probeResults[0].valid) {
         status = DemHealthStatus::Healthy;
         // Cache probe result so it's not wasted
         std::lock_guard<std::mutex> lock(cacheMutex_);
         auto now = std::chrono::steady_clock::now();
-        probeData.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
-        cache_[probeKey] = std::move(probeData);
+        probeResults[0].lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+        cache_[probeKey] = std::move(probeResults[0]);
         std::cerr << "[DEM] Health: OK (" << cache_[probeKey].heights.size() << " samples, "
                   << "min=" << cache_[probeKey].minHeight << "m, max=" << cache_[probeKey].maxHeight << "m)" << std::endl;
     } else if (stats_.fetchAuth.load() > 0) {
@@ -454,57 +566,105 @@ DemHealthStatus DemManager::CheckHealth() {
     return status;
 }
 
-bool DemManager::ParseDemGrid(const std::string& payload, DemGridData& outData) const {
-    outData.heights.clear();
-    outData.meshN = config_.meshN;
-    outData.minHeight = std::numeric_limits<double>::max();
-    outData.maxHeight = std::numeric_limits<double>::lowest();
+bool DemManager::ParseBatchResponse(const std::string& payload, int cellCount,
+                                     std::vector<DemGridData>& outDataVec) const {
+    // Service returns a 2D array: [[row0], [row1], ...]
+    // For batch CN=N with MESHN=M, response has N*M rows of M values each.
+    // Cell i gets rows [i*M .. (i+1)*M - 1] (matching webglobe.js GetMeshData).
     
-    // Find the 2D array in the response: [[...], [...], ...]
+    const int meshN = config_.meshN;
+    const size_t totalRows = static_cast<size_t>(cellCount * meshN);
+    const size_t valuesPerRow = static_cast<size_t>(meshN);
+    
+    // Parse all rows from the JSON 2D array
+    std::vector<std::vector<double>> rows;
+    rows.reserve(totalRows);
+    
     const char* arrayStart = std::strstr(payload.c_str(), "[[");
     if (!arrayStart) {
         if (config_.debug) {
-            std::cerr << "[DEM] Parse error: No 2D array found" << std::endl;
+            std::cerr << "[DEM] Parse error: No 2D array found in batch response" << std::endl;
         }
         return false;
     }
     
-    // Parse numbers from the JSON array
-    const char* p = arrayStart;
+    // Parse row by row: find each [...] sub-array
+    const char* p = arrayStart + 1;  // Skip outer '['
     while (*p) {
-        // Skip non-numeric characters
-        while (*p && !std::isdigit(*p) && *p != '-' && *p != '.') {
-            if (*p == ']' && *(p+1) == ']') break;  // End of array
+        // Find start of next row '['
+        while (*p && *p != '[') {
+            if (*p == ']' && (*(p+1) == '\0' || *(p+1) == '\n' || *(p+1) == '\r')) break;
             p++;
         }
+        if (*p != '[') break;
+        p++;  // Skip '['
         
-        if (*p == ']' && *(p+1) == ']') break;
-        if (!*p) break;
+        // Parse values until ']'
+        std::vector<double> row;
+        row.reserve(valuesPerRow);
+        while (*p && *p != ']') {
+            // Skip whitespace and commas
+            while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+            if (*p == ']') break;
+            
+            char* end;
+            double val = std::strtod(p, &end);
+            if (end > p) {
+                row.push_back(val);
+                p = end;
+            } else {
+                p++;
+            }
+        }
+        if (*p == ']') p++;  // Skip ']'
         
-        // Parse number
-        char* end;
-        double val = std::strtod(p, &end);
-        if (end > p) {
-            outData.heights.push_back(val);
-            outData.minHeight = std::min(outData.minHeight, val);
-            outData.maxHeight = std::max(outData.maxHeight, val);
-            p = end;
-        } else {
-            p++;
+        if (!row.empty()) {
+            rows.push_back(std::move(row));
         }
     }
-    
-    size_t expected = static_cast<size_t>(config_.meshN * config_.meshN);
-    outData.valid = outData.heights.size() >= expected;
-    // fetchTime will be set by WorkerLoop when caching
     
     if (config_.debug) {
-        std::cerr << "[DEM] Parsed " << outData.heights.size() << " values"
-                  << " (expected " << expected << ")"
-                  << " min=" << outData.minHeight << " max=" << outData.maxHeight << std::endl;
+        std::cerr << "[DEM] Parsed " << rows.size() << " rows"
+                  << " (expected " << totalRows << " for " << cellCount << " cells)" << std::endl;
     }
     
-    return outData.valid;
+    if (rows.size() < totalRows) {
+        if (config_.debug) {
+            std::cerr << "[DEM] Parse error: insufficient rows (" << rows.size() 
+                      << " < " << totalRows << ")" << std::endl;
+        }
+        return false;
+    }
+    
+    // Slice rows into per-cell DemGridData
+    // webglobe.js: result[cellIdx][rowIdx] = response[cellIdx * meshN + rowIdx]
+    outDataVec.resize(cellCount);
+    for (int c = 0; c < cellCount; ++c) {
+        DemGridData& data = outDataVec[c];
+        data.meshN = meshN;
+        data.minHeight = std::numeric_limits<double>::max();
+        data.maxHeight = std::numeric_limits<double>::lowest();
+        data.heights.clear();
+        data.heights.reserve(static_cast<size_t>(meshN * meshN));
+        
+        for (int r = 0; r < meshN; ++r) {
+            const std::vector<double>& row = rows[static_cast<size_t>(c * meshN + r)];
+            for (size_t col = 0; col < std::min(row.size(), valuesPerRow); ++col) {
+                double val = row[col];
+                data.heights.push_back(val);
+                data.minHeight = std::min(data.minHeight, val);
+                data.maxHeight = std::max(data.maxHeight, val);
+            }
+            // Pad with zeros if row is short
+            for (size_t col = row.size(); col < valuesPerRow; ++col) {
+                data.heights.push_back(0.0);
+            }
+        }
+        
+        data.valid = (data.heights.size() == static_cast<size_t>(meshN * meshN));
+    }
+    
+    return true;
 }
 
 double DemManager::SampleBilinear(const DemGridData& data, double u, double v) const {

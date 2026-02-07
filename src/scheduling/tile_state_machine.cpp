@@ -14,13 +14,15 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
             break;
             
         case Event::FetchStart:
-            if (currentState == TileState::Scheduled) {
+            if (currentState == TileState::Scheduled || currentState == TileState::Fetching) {
                 newState = TileState::Fetching;
             }
             break;
             
         case Event::FetchOk:
-            if (currentState == TileState::Fetching || currentState == TileState::Scheduled) {
+            if (currentState == TileState::Fetching ||
+                currentState == TileState::Scheduled ||
+                currentState == TileState::Decoding) {
                 newState = TileState::Decoding;
             }
             break;
@@ -36,8 +38,10 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
             break;
             
         case Event::DecodeStart:
-            // Usually handled by FetchOk, but explicit if needed
-            if (currentState == TileState::Fetching) {
+            // Explicit decode-start signal (allows deterministic lifecycle instrumentation)
+            if (currentState == TileState::Fetching ||
+                currentState == TileState::Scheduled ||
+                currentState == TileState::Decoding) {
                 newState = TileState::Decoding;
             }
             break;
@@ -61,7 +65,7 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
             break;
             
         case Event::UploadStart:
-            if (currentState == TileState::Decoding) {
+            if (currentState == TileState::Decoding || currentState == TileState::Uploading) {
                 newState = TileState::Uploading;
             }
             break;
@@ -136,19 +140,19 @@ bool TileStateMachine::IsValidTransition(TileState from, Event event) {
         case Event::Schedule:
             return from == TileState::Unloaded || from == TileState::Failed;
         case Event::FetchStart:
-            return from == TileState::Scheduled;
+            return from == TileState::Scheduled || from == TileState::Fetching;
         case Event::FetchOk:
-            return from == TileState::Fetching || from == TileState::Scheduled;
+            return from == TileState::Fetching || from == TileState::Scheduled || from == TileState::Decoding;
         case Event::FetchFail:
             return from == TileState::Fetching || from == TileState::Scheduled;
         case Event::DecodeStart:
-            return from == TileState::Fetching;
+            return from == TileState::Fetching || from == TileState::Scheduled || from == TileState::Decoding;
         case Event::DecodeOk:
             return from == TileState::Decoding || from == TileState::Scheduled;
         case Event::DecodeFail:
             return from == TileState::Decoding || from == TileState::Scheduled;
         case Event::UploadStart:
-            return from == TileState::Decoding;
+            return from == TileState::Decoding || from == TileState::Uploading;
         case Event::UploadOk:
             return from == TileState::Uploading;
         case Event::Evict:

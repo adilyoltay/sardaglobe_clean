@@ -1,4 +1,5 @@
 #include "tile_decoder.h"
+#include "decoded_tile_blob.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -61,6 +62,10 @@ uint64_t TileDecoder::GetTotalDecodeTimeUs() const {
     return totalDecodeTimeUs_.load();
 }
 
+uint64_t TileDecoder::GetDecodedBlobHits() const {
+    return decodedBlobHits_.load();
+}
+
 void TileDecoder::WorkerLoop() {
     while (running_) {
         DecodeRequest request;
@@ -117,6 +122,12 @@ void TileDecoder::WorkerLoop() {
 bool TileDecoder::DoDecode(const DecodeRequest& request, DecodeResult& result) {
     if (request.data.empty()) {
         return false;
+    }
+
+    // Fast path: pre-decoded RGBA blob from memory cache (skip image codec cost).
+    if (decoded_blob::Unpack(request.data, result.width, result.height, result.pixels)) {
+        decodedBlobHits_.fetch_add(1);
+        return true;
     }
     
     int channels = 0;

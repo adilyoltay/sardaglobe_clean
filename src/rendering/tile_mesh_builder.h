@@ -13,16 +13,24 @@ class TileMeshBuilder {
 public:
     struct BuildResult {
         TileKey key;
-        std::vector<float> vertices;      // pos(3) + normal(3) + uv(2)
+        std::vector<float> vertices;      // pos(3) + normal(3) + uv(2) + heightKm(1)
         std::vector<unsigned int> indices;
         int segments = 0;
         uint32_t indexCount = 0;
+        uint32_t mainIndexCount = 0;
+        uint32_t skirtIndexCount = 0;
         bool useSharedEBO = false;
         bool demUsed = false;
         bool demPending = false;
         uint32_t meshRevision = 0;
         double minHeightKm = 0.0;         // For height-aware skirt depth
         double maxHeightKm = 0.0;
+        uint8_t demSourceLevelMin = 0;
+        uint8_t demSourceLevelMax = 0;
+        uint16_t demMissingSamples = 0;
+        uint8_t stitchMask = 0;
+        uint8_t skirtMask = 0;
+        uint8_t demEffectiveLevel = 0;
     };
     
     // Build mesh geometry for a tile
@@ -31,6 +39,9 @@ public:
         const TileKey& key,
         const Extent& extent,
         uint8_t edgeMask,
+        uint8_t stitchMask,
+        uint8_t skirtMask,
+        int demTargetLevel,
         DemManager* demManager,
         const Config& config,
         bool useSharedEBO
@@ -50,6 +61,8 @@ private:
         std::vector<unsigned int>* indices,
         int segments,
         int level,
+        uint8_t skirtMask,
+        const Config& config,
         double heightRange = 0.0
     );
 };

@@ -68,6 +68,10 @@ geo/render/mirth/
 │   ├── photoframehandler.cc
 │   ├── photomeshmanager.cc
 │   └── fader.cc
+├── net/                      ← VFS / zipasset hattı (string kanıtı)
+│   ├── VfsRequestHandler     ← "mirth-vfs://..."
+│   ├── ZipRequestHandler     ← "zipasset://..."
+│   └── ZipAssetManager       ← "__asset_manifest__.txt" + "PK"
 ├── solarsystem/
 │   ├── solarsystemframehandler.cc
 │   └── ...
@@ -760,6 +764,42 @@ Tile Decoder Threads
 // "Threading::IsMainThread()" — main thread kontrolü
 ```
 
+### 7.3. Closure / Job Scheduling (WASM String Ground-Truth)
+
+WASM string'leri, `JobDispatcher` tarafında sadece worker işleri değil, **frame-bound closure scheduling** olduğunu da gösteriyor:
+
+```text
+"AddClosure(job_type=%d, closure=%s)"
+"AddClosure(job_type=%d, closure=%s, delay_by_seconds=%f)"
+"AddClosureNextFrame(job_type=%d, closure=%s)"
+
+"AddJob(job_type=%d, apijob=%p)"
+"AddJobDelayedBy(job_type=%d, apijob=%p, delay_by_seconds=%f)"
+"AddJobNextFrame(job_type=%d, apijob=%p)"
+```
+
+Delayed scheduling tarafında ayrıca şu sinyal var:
+
+```text
+"JobDispatcher could not instantiate an Alarm."
+```
+
+Job örnekleri (string'lerde isim olarak görünen):
+
+```text
+"KmlManager::ProcessJob"
+"VfsRequestHandler::VfsJob"
+"ZipRequestHandler::ZipJob"
+"TextureAtlasManager::UpdateAtlasesJob"
+"StreetViewImpl::LoadPanoJob"
+"VideoJob"
+```
+
+**Yorum:** GE runtime'ı pratikte şu modele işaret ediyor:
+- `JobDispatcher` ana zamanlayıcı (next-frame + delayed)
+- `WorkerPoolJobRunner` heavy decode/merge işleri
+- Main thread: GPU upload + `...OnMainThread` proxy işleri
+
 ---
 
 ## 8. Cache Sistemi
@@ -814,6 +854,17 @@ Katman 4: Network (sunucu)
 // └── disablePersistAcrossAppLaunches — uygulama arası persist
 ```
 
+### 8.3. Loader Cancelation ve Memory Manager Sinyalleri
+
+WASM string'lerinde iki kritik cancellation/memory kontrol ipucu var:
+
+- Loader cancellation (touch-based): `Number of frames after which a Loader gets canceled if the Asset hasn't been touched.`
+- Dedicated memory manager toggle: `/mirth/mirthview/EarthMemoryManagerImpl/earth_memory_manager_enabled`
+
+**Yorum:**
+- Loader'lar "touch" (asset son frame'lerde kullanıldı) sinyaliyle yaşatılıyor; belirli frame sayısı boyunca dokunulmazsa iptal ediliyor.
+- Mode seviyesinde de fetch iptali var: `/mirth/mode/framework/MirthMode/cancel_old_fetches`.
+
 ---
 
 ## 9. Anahtar Sabitler ve Yapılandırma
@@ -857,6 +908,24 @@ uOffsetVec        — offset vector
 uNicScaleOffset   — NIC scale/offset
 ```
 
+### 9.3. Mirth Config Key'leri (String Ground-Truth)
+
+Tile/render/cache/threading davranışını etkileyen bazı config key'leri WASM'da string olarak görünüyor:
+
+```text
+/mirth/mode/framework/MirthMode/cancel_old_fetches
+/mirth/mode/framework/MirthMode/force_view_changed
+
+/mirth/mirthview/ApiLock/apilock_slow_acquire_lock_warning_ms
+/mirth/mirthview/ApiLock/apilock_slow_held_lock_warning_ms
+/mirth/mirthview/ApiLock/api_logging
+
+/mirth/earth/EarthFrameHandler/disable_drape_view_updates
+/mirth/earth/EarthFrameHandler/disable_drape_texture_updates
+
+/mirth/mirthview/EarthMemoryManagerImpl/earth_memory_manager_enabled
+```
+
 ---
 
 ## 10. SardaGlobe İçin Kritik Çıkarımlar
@@ -874,6 +943,8 @@ uNicScaleOffset   — NIC scale/offset
 | `Plane equations for depth` | Per-tile depth plane hesaplama | ★★ |
 | `DoFrame_thread` ayrı thread | Scene build'i render'dan ayır | ★★ |
 | `RequestNewFrame(reason)` | On-demand rendering (dirty flag yerine) | ★★ |
+| `mirth-vfs://` + `zipasset://` + `__asset_manifest__.txt` | Engine-internal asset pack/VFS (ikon, glsl lib, renderassets) | ★★ |
+| `cancel_old_fetches` + "Loader gets canceled if Asset hasn't been touched" | Fetch/loader cancel politikası (view-change + touch-based) | ★★ |
 
 ### 10.2. DEM Entegrasyon Stratejisi
 
@@ -985,6 +1056,33 @@ Exported WASM string pointer'ları:
 - `_kVersionStampBuildDateTimePstStr`
 - `_kVersionStampBuildToolStr`
 - `_kVersionStampBuildIdStr`
+
+### 11.7. VFS / ZipAsset Katmanı (mirth-vfs://, zipasset://)
+
+WASM string'leri, render runtime içinde bir **VFS (virtual filesystem)** ve **zip-asset** katmanı olduğuna işaret ediyor:
+
+```text
+"mirth-vfs"
+"mirth-vfs://focustarget/focustarget.png"
+"Server: mirth-vfs://"
+"GetVfs()"
+
+"zipasset://"
+"__asset_manifest__.txt"
+"__asset_manifest__.txtPK"   // ZIP magic (PK)
+
+"VfsRequestHandler::VfsJob"
+"ZipRequestHandler::ZipJob"
+"ZipAssetManager*"
+
+"N5mirth3net17VfsRequestHandlerE"
+"N5mirth3net17ZipRequestHandlerE"
+```
+
+**Yorum (çıkarım):**
+- Engine bazı asset'leri VFS üzerinden `mirth-vfs://...` ile resolve ediyor (örn. UI/ikon asset'leri).
+- Bazı asset'ler ayrıca zip paket içinde taşınıyor ve `zipasset://` ile resolve ediliyor (`__asset_manifest__.txt` + `PK`).
+- `VfsRequestHandler` / `ZipRequestHandler` job'ları, bu resolve/fetch hattının JobDispatcher üzerinden çalıştığını gösteriyor.
 
 ---
 

@@ -2,6 +2,7 @@
 
 #include "../core/tile.h"
 #include "../core/config.h"
+#include "texture_atlas_allocator.h"
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -27,6 +28,9 @@ public:
     
     // Delete a texture
     void DeleteTexture(uint32_t textureId);
+
+    // Release tile GPU resources (owned texture and/or atlas slot).
+    void ReleaseTileResources(Tile& tile);
     
     // Pin/Unpin API (GE-style cache policy)
     // Pinned tiles are protected from eviction
@@ -52,9 +56,22 @@ public:
     int GetTextureCount() const { return textureCount_; }
     int GetPendingUploads() const { return static_cast<int>(uploadQueue_.size()); }
     int GetLastEvictedCount() const { return lastEvictedCount_; }
+    bool IsAtlasEnabled() const { return atlasEnabled_; }
+    int GetAtlasPageCount() const { return atlasAllocator_.GetPageCount(); }
+    int GetAtlasUsedSlots() const { return atlasAllocator_.GetUsedSlots(); }
+    int GetAtlasCapacitySlots() const { return atlasAllocator_.GetTotalCapacity(); }
 
 private:
     uint32_t CreateTexture(const uint8_t* pixels, int width, int height);
+    uint32_t CreateAtlasPageTexture();
+    bool EnsureAtlasPageTexture(int pageIndex);
+    bool UploadToAtlas(Tile& tile);
+    void ReleaseAtlasAllocation(Tile& tile);
+    void TrimTrailingEmptyAtlasPages();
+    bool CopyAtlasRegion(uint32_t srcTextureId, int srcX, int srcY,
+                         uint32_t dstTextureId, int dstX, int dstY,
+                         int width, int height);
+    int CompactAtlas(std::unordered_map<TileKey, Tile>& tiles, int maxMoves, double budgetMs);
     
     const Config& config_;
     struct UploadJob {
@@ -78,6 +95,12 @@ private:
     uint64_t uploadSequence_ = 0;
     int textureCount_ = 0;
     uint32_t loadingTexture_ = 0;
+
+    // Shared texture atlas (P3.2 slice).
+    bool atlasEnabled_ = false;
+    bool atlasMipmaps_ = false;
+    TextureAtlasAllocator atlasAllocator_;
+    std::vector<uint32_t> atlasPageTextures_;
     
     // Pin/unpin support (GE-style cache policy)
     uint32_t pinEpoch_ = 1;

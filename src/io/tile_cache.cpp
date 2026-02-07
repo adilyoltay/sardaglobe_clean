@@ -33,7 +33,10 @@ bool TileCache::Read(const TileKey& key, const std::string& urlTemplate, std::ve
     
     auto path = GetPath(key, urlTemplate);
     std::ifstream file(path, std::ios::binary);
-    if (!file) return false;
+    if (!file) {
+        readMisses_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     
     file.seekg(0, std::ios::end);
     size_t size = file.tellg();
@@ -41,23 +44,46 @@ bool TileCache::Read(const TileKey& key, const std::string& urlTemplate, std::ve
     
     out.resize(size);
     file.read(reinterpret_cast<char*>(out.data()), size);
-    return static_cast<bool>(file);
+    if (static_cast<bool>(file)) {
+        readHits_.fetch_add(1, std::memory_order_relaxed);
+        bytesRead_.fetch_add(size, std::memory_order_relaxed);
+        return true;
+    }
+
+    readMisses_.fetch_add(1, std::memory_order_relaxed);
+    return false;
 }
 
 bool TileCache::Write(const TileKey& key, const std::string& urlTemplate, const std::vector<uint8_t>& data) {
-    if (!enabled_ || data.empty()) return false;
+    if (!enabled_ || data.empty()) {
+        writeFail_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     
     auto path = GetPath(key, urlTemplate);
     
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) return false;
+    if (ec) {
+        writeFail_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     
     std::ofstream file(path, std::ios::binary);
-    if (!file) return false;
+    if (!file) {
+        writeFail_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     
     file.write(reinterpret_cast<const char*>(data.data()), data.size());
-    return static_cast<bool>(file);
+    if (static_cast<bool>(file)) {
+        writeSuccess_.fetch_add(1, std::memory_order_relaxed);
+        bytesWritten_.fetch_add(data.size(), std::memory_order_relaxed);
+        return true;
+    }
+
+    writeFail_.fetch_add(1, std::memory_order_relaxed);
+    return false;
 }
 
 bool TileCache::Remove(const TileKey& key, const std::string& urlTemplate) {
@@ -81,6 +107,26 @@ size_t TileCache::GetSize() const {
         }
     }
     return total;
+}
+
+TileCache::Stats TileCache::GetStats() const {
+    Stats stats;
+    stats.readHits = readHits_.load(std::memory_order_relaxed);
+    stats.readMisses = readMisses_.load(std::memory_order_relaxed);
+    stats.writeSuccess = writeSuccess_.load(std::memory_order_relaxed);
+    stats.writeFail = writeFail_.load(std::memory_order_relaxed);
+    stats.bytesRead = bytesRead_.load(std::memory_order_relaxed);
+    stats.bytesWritten = bytesWritten_.load(std::memory_order_relaxed);
+    return stats;
+}
+
+void TileCache::ResetStats() {
+    readHits_.store(0, std::memory_order_relaxed);
+    readMisses_.store(0, std::memory_order_relaxed);
+    writeSuccess_.store(0, std::memory_order_relaxed);
+    writeFail_.store(0, std::memory_order_relaxed);
+    bytesRead_.store(0, std::memory_order_relaxed);
+    bytesWritten_.store(0, std::memory_order_relaxed);
 }
 
 } // namespace globe

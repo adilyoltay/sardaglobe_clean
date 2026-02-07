@@ -256,7 +256,7 @@ void TestLodSelection() {
         
         auto isReady = [](const TileKey&) { return true; };
         
-        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
+        LodSelection selection = selector.Select(cameraPos, glm::vec3(0.0f), mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
         
         bool hasLeaves = !selection.leaves.empty();
         bool hasRequired = !selection.required.empty();
@@ -279,7 +279,7 @@ void TestLodSelection() {
         
         auto isReady = [](const TileKey&) { return true; };
         
-        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
+        LodSelection selection = selector.Select(cameraPos, glm::vec3(0.0f), mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
         
         bool allInRequired = true;
         for (const auto& leaf : selection.leaves) {
@@ -709,7 +709,7 @@ void TestSystemIntegration() {
         // Simulate: only zoom 0-3 tiles are ready
         auto isReady = [](const TileKey& k) { return k.level <= 3; };
         
-        LodSelection selection = selector.Select(cameraPos, mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
+        LodSelection selection = selector.Select(cameraPos, glm::vec3(0.0f), mvp, 45.0f, 0.0f, 1920, 1080, isReady, settings);
         
         // Contract: when children are not ready, selector must keep at least one
         // ready fallback leaf and still request non-ready descendants.

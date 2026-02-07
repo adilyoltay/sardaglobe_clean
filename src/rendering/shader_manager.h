@@ -43,6 +43,14 @@ public:
     int GetTextureLocation() const { return texLoc_; }
     int GetFadeLocation() const { return fadeLoc_; }
     int GetLodLevelLocation() const { return lodLevelLoc_; }
+    int GetTexScaleOffsetMainLocation() const { return texScaleOffsetMainLoc_; }
+    int GetTextureUnpopLocation() const { return texUnpopLoc_; }
+    int GetUnpopBlendLocation() const { return unpopBlendLoc_; }
+    int GetTexScaleOffsetUnpopLocation() const { return texScaleOffsetUnpopLoc_; }
+    int GetRasterCrossfadeLocation() const { return rasterCrossfadeLoc_; }
+    int GetCornerLodsLocation() const { return cornerLodsLoc_; }
+    int GetUseLogDepthLocation() const { return useLogDepthLoc_; }
+    int GetLogDepthFarLocation() const { return logDepthFarLoc_; }
     
     // Terrain uniforms
     int GetHeightmapLocation() const { return heightmapLoc_; }
@@ -50,6 +58,7 @@ public:
     int GetHeightMinLocation() const { return heightMinLoc_; }
     int GetHeightMaxLocation() const { return heightMaxLoc_; }
     int GetHasHeightmapLocation() const { return hasHeightmapLoc_; }
+    int GetTerrainMorphLocation() const { return terrainMorphLoc_; }
     
     // Use tile shader (default or with flags)
     void UseTileShader();
@@ -75,6 +84,14 @@ private:
     int texLoc_ = -1;
     int fadeLoc_ = -1;
     int lodLevelLoc_ = -1;
+    int texScaleOffsetMainLoc_ = -1;
+    int texUnpopLoc_ = -1;
+    int unpopBlendLoc_ = -1;
+    int texScaleOffsetUnpopLoc_ = -1;
+    int rasterCrossfadeLoc_ = -1;
+    int cornerLodsLoc_ = -1;
+    int useLogDepthLoc_ = -1;
+    int logDepthFarLoc_ = -1;
     
     // Terrain uniforms
     int heightmapLoc_ = -1;
@@ -82,6 +99,7 @@ private:
     int heightMinLoc_ = -1;
     int heightMaxLoc_ = -1;
     int hasHeightmapLoc_ = -1;
+    int terrainMorphLoc_ = -1;
     
     ShaderFlags activeFlags_ = ShaderFlags::None;
 };
@@ -94,6 +112,7 @@ const char* const TILE_VERTEX = R"(
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
+layout(location = 3) in float aHeightKm;
 
 uniform mat4 uMVP;
 uniform sampler2D uHeightmap;
@@ -101,30 +120,40 @@ uniform float uHeightScale;
 uniform float uHeightMin;
 uniform float uHeightMax;
 uniform int uHasHeightmap;
+uniform vec4 uCornerLods;  // NW, NE, SE, SW corner LODs for bilinear interpolation
+uniform float uTerrainMorph;  // 0=flat, 1=full displacement
 
 out vec2 vTexCoord;
 out vec3 vNormal;
 out vec3 vWorldPos;
+out float vViewDepth;
 
 void main() {
     vec3 pos = aPos;
     vec3 normal = aNormal;
+    vec3 radialDir = normalize(aPos);
     
     if (uHasHeightmap == 1) {
+        // Bilinear LOD interpolation from tile corners.
+        // Top row: NW->NE, bottom row: SW->SE (UV has V-up after mesh V flip).
+        float lodTop = mix(uCornerLods.x, uCornerLods.y, aTexCoord.x);
+        float lodBottom = mix(uCornerLods.w, uCornerLods.z, aTexCoord.x);
+        float lodInterp = clamp(mix(lodBottom, lodTop, aTexCoord.y), 0.0, 6.0);
+
         // Sample heightmap (normalized [0,1])
-        float heightNorm = texture(uHeightmap, aTexCoord).r;
+        float heightNorm = textureLod(uHeightmap, aTexCoord, lodInterp).r;
         float heightKm = mix(uHeightMin, uHeightMax, heightNorm);
         
         // Displace vertex radially outward from Earth center
-        vec3 radialDir = normalize(aPos);
-        pos = aPos + radialDir * heightKm;
+        pos = aPos + radialDir * (heightKm * uTerrainMorph);
         
         // Recalculate normal from heightmap gradient (finite difference)
-        vec2 texelSize = 1.0 / vec2(textureSize(uHeightmap, 0));
-        float hL = texture(uHeightmap, aTexCoord - vec2(texelSize.x, 0)).r;
-        float hR = texture(uHeightmap, aTexCoord + vec2(texelSize.x, 0)).r;
-        float hD = texture(uHeightmap, aTexCoord - vec2(0, texelSize.y)).r;
-        float hU = texture(uHeightmap, aTexCoord + vec2(0, texelSize.y)).r;
+        float lodScale = exp2(lodInterp);
+        vec2 texelSize = lodScale / vec2(textureSize(uHeightmap, 0));
+        float hL = textureLod(uHeightmap, aTexCoord - vec2(texelSize.x, 0), lodInterp).r;
+        float hR = textureLod(uHeightmap, aTexCoord + vec2(texelSize.x, 0), lodInterp).r;
+        float hD = textureLod(uHeightmap, aTexCoord - vec2(0, texelSize.y), lodInterp).r;
+        float hU = textureLod(uHeightmap, aTexCoord + vec2(0, texelSize.y), lodInterp).r;
         
         // Gradient in tangent space
         float dHdx = (hR - hL) * (uHeightMax - uHeightMin) * 0.5;
@@ -133,20 +162,31 @@ void main() {
         // Perturb normal based on gradient
         // Scale factor for normal perturbation (larger = more visible slopes)
         float normalScale = 50.0;
-        vec3 perturbation = vec3(-dHdx * normalScale, -dHdy * normalScale, 1.0);
+        vec3 perturbation = vec3(-dHdx * normalScale * uTerrainMorph, -dHdy * normalScale * uTerrainMorph, 1.0);
         
         // Transform perturbation to world space (approximate - assumes radial up)
         vec3 tangentU = normalize(cross(vec3(0, 0, 1), radialDir));
         if (length(tangentU) < 0.1) tangentU = normalize(cross(vec3(1, 0, 0), radialDir));
         vec3 tangentV = cross(radialDir, tangentU);
         
-        normal = normalize(tangentU * perturbation.x + tangentV * perturbation.y + radialDir * perturbation.z);
+        vec3 displacedNormal = normalize(tangentU * perturbation.x + tangentV * perturbation.y + radialDir * perturbation.z);
+        normal = normalize(mix(radialDir, displacedNormal, uTerrainMorph));
+    } else {
+        // CPU mesh bake path: smoothly remove baked elevation during morph start.
+        // aHeightKm is vertex-local DEM height above/below the ellipsoid surface.
+        float morph = clamp(uTerrainMorph, 0.0, 1.0);
+        if (abs(aHeightKm) > 1e-6 && morph < 1.0) {
+            pos = aPos - radialDir * (aHeightKm * (1.0 - morph));
+            normal = normalize(mix(radialDir, aNormal, morph));
+        }
     }
     
     gl_Position = uMVP * vec4(pos, 1.0);
     vTexCoord = aTexCoord;
     vNormal = normal;
     vWorldPos = pos;
+    // In standard perspective projection, clip.w ~= view-space depth magnitude.
+    vViewDepth = max(1e-6, gl_Position.w);
 }
 )";
 

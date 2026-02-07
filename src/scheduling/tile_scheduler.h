@@ -5,6 +5,7 @@
 #include "../io/tile_fetcher.h"
 #include "../io/tile_decoder.h"
 #include "../io/tile_cache.h"
+#include "../io/memory_tile_cache.h"
 #include "../io/tile_url_template.h"
 #include "../core/bounded_queue.h"
 #include <unordered_map>
@@ -30,6 +31,28 @@ public:
         size_t decodeResultQueue = 0;
         size_t droppedFetchResults = 0;
         size_t droppedDecodeResults = 0;
+        size_t decodedCacheReadHits = 0;
+        size_t decodedCacheReadMisses = 0;
+        size_t decodedCacheWrites = 0;
+        size_t decodedCacheWriteRejects = 0;
+        size_t decodedCacheEvictions = 0;
+        size_t decodedCacheEntries = 0;
+        size_t decodedCacheBytesUsed = 0;
+        size_t decodeBypassHits = 0;
+        size_t memoryCacheReadHits = 0;
+        size_t memoryCacheReadMisses = 0;
+        size_t memoryCacheWrites = 0;
+        size_t memoryCacheWriteRejects = 0;
+        size_t memoryCacheEvictions = 0;
+        size_t memoryCacheEntries = 0;
+        size_t memoryCacheBytesUsed = 0;
+        // P3.1 cache telemetry (Disk layer + derived network usage)
+        size_t diskCacheReadHits = 0;
+        size_t diskCacheReadMisses = 0;
+        size_t diskCacheWrites = 0;
+        size_t diskCacheWriteFails = 0;
+        size_t totalFetchRequests = 0;
+        size_t networkFetches = 0;
         double avgFetchMs = 0.0;
         double avgDecodeMs = 0.0;
     };
@@ -77,6 +100,8 @@ private:
     
     std::unique_ptr<TileFetcher> fetcher_;
     std::unique_ptr<TileDecoder> decoder_;
+    std::unique_ptr<MemoryTileCache> decodedCache_;
+    std::unique_ptr<MemoryTileCache> memoryCache_;
     std::unique_ptr<TileCache> cache_;
     
     // Pending results (thread-safe queues)

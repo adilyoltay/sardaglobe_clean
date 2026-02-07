@@ -37,6 +37,13 @@ struct DemGridData {
     mutable double lastAccessTime = 0.0;  // LRU: updated on every access
 };
 
+struct DemSampleResult {
+    bool ok = false;
+    double heightMeters = 0.0;
+    int sourceLevel = -1;
+    bool usedAncestor = false;
+};
+
 // Height sampler callback type (for mesh builder)
 using HeightSampler = std::function<bool(double lonDeg, double latDeg, int level, double& heightMeters)>;
 
@@ -90,6 +97,7 @@ struct DemManagerConfig {
     double failRetryDelaySec = 30.0;  // Retry failed tiles after this delay
     int authBackoffThreshold = 3;     // Consecutive auth fails before backoff
     double authBackoffSec = 30.0;     // Backoff duration after auth failures
+    int maxBatchSize = 10;            // Max tiles per batch HTTP request (webglobe: 10)
 };
 
 // DEM Manager - handles elevation data fetching and caching
@@ -113,15 +121,34 @@ public:
     // Request DEM data for a tile
     // priority: 0=low, 1=normal, 2=urgent. score: higher = sooner.
     void Request(const TileKey& key, int priority = 1, double score = 0.0);
+
+    // True when tile is queued or currently being fetched by DEM workers.
+    bool HasPendingRequest(const TileKey& key);
     
     // Check if DEM data is available for a tile
     bool HasData(const TileKey& key) const;
+
+    // True when tile itself OR any ancestor tile has DEM data in cache.
+    // Used by mesh pipeline to decide whether parent fallback can be used immediately.
+    bool HasDataOrAncestor(const TileKey& key) const;
+
+    // Returns the best available cached DEM level for tile key (exact or ancestor).
+    // outLevel is set to the resolved level on success.
+    bool GetBestAvailableLevel(const TileKey& key, int& outLevel) const;
     
     // Get raw DEM grid data for heightmap upload (returns false if not cached)
     bool GetGridData(const TileKey& key, DemGridData& outData) const;
+
+    // Insert/replace DEM grid data in cache (used by tests and optional warm-start paths).
+    void PutGridData(const TileKey& key, const DemGridData& data);
+
+    // Pin visible DEM keys (and optional neighbors) against LRU eviction.
+    // Existing pin set is fully replaced by the incoming list.
+    void SetPinnedTiles(const std::vector<TileKey>& keys);
     
     // Get height at a specific lat/lon for a tile
     bool SampleHeight(double lonDeg, double latDeg, int level, double& heightMeters) const;
+    bool SampleHeightDetailed(double lonDeg, double latDeg, int level, DemSampleResult& out) const;
     
     // Get a height sampler callback for mesh building
     HeightSampler GetHeightSampler() const;
@@ -176,7 +203,11 @@ private:
     
     // Pending/in-flight dedupe + rank upgrades
     std::unordered_map<TileKey, PendingRank> pendingRanks_;
+    std::unordered_set<TileKey> inFlightKeys_;
     uint64_t requestSeq_ = 0;
+
+    // Visible DEM pin set. Entries in this set are skipped by eviction.
+    std::unordered_set<TileKey> pinnedKeys_;
     
     // Failed tile tracking with TTL (retry after timeout)
     std::unordered_map<TileKey, std::chrono::steady_clock::time_point> failedUntil_;  // TTL cache
@@ -193,10 +224,10 @@ private:
     
     // Helper functions
     void WorkerLoop();
-    bool FetchDem(const TileKey& key, DemGridData& outData);
-    std::string BuildDemUrl(const DemCell& cell) const;
+    bool FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGridData>& outDataVec);
+    std::string BuildBatchUrl(const std::vector<DemCell>& cells) const;
     DemCell BuildDemCell(const TileKey& key) const;
-    bool ParseDemGrid(const std::string& payload, DemGridData& outData) const;
+    bool ParseBatchResponse(const std::string& payload, int cellCount, std::vector<DemGridData>& outDataVec) const;
     double SampleBilinear(const DemGridData& data, double u, double v) const;
     
     // Tile bounds calculation (WGS84)

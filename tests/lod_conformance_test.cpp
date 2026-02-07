@@ -84,14 +84,17 @@ int main() {
     // Test with camera at different positions
     struct TestCase {
         glm::vec3 cameraPos;
+        float tiltDeg;
         const char* name;
     };
     
     TestCase testCases[] = {
-        {{0, 0, 7000}, "Above origin (7000km)"},
-        {{6371, 0, 0}, "At equator X (surface)"},
-        {{0, 6371, 0}, "At equator Y (surface)"},
-        {{4500, 4500, 0}, "Diagonal equator"},
+        {{0, 0, 7000}, 0.0f, "Above origin (7000km)"},
+        {{6371, 0, 0}, 0.0f, "At equator X (surface)"},
+        {{0, 6371, 0}, 0.0f, "At equator Y (surface)"},
+        {{4500, 4500, 0}, 0.0f, "Diagonal equator"},
+        {{6400, 0, 200}, 30.0f, "Near-surface oblique (tilt 30)"},
+        {{6200, 1200, 200}, 60.0f, "Near-surface oblique (tilt 60)"},
     };
     
     int passed = 0;
@@ -106,9 +109,9 @@ int main() {
         glm::mat4 mvp = proj * view;
         
         LodSelection selection = selector.Select(
-            tc.cameraPos, mvp,
+            tc.cameraPos, glm::vec3(0.0f), mvp,
             45.0f,  // FOV degrees
-            0.0f,   // Tilt degrees
+            tc.tiltDeg,
             1920, 1080,
             AlwaysReady,
             settings

@@ -8,8 +8,8 @@ Native C++/OpenGL globe engine with XYZ raster tiles, terrain-aware navigation, 
 
 ## Features (MVP)
 - OpenGL 3.3 core (Windows/Linux/macOS)
-- Globe mesh built from XYZ tiles (Web Mercator)
-- Raster tile download via libcurl (default: OpenStreetMap)
+- Globe mesh (wgs84))
+- Raster tile  
 - Mouse drag = orbit, scroll = zoom
 
 ## Build

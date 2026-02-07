@@ -2,6 +2,7 @@
 
 #include "constants.h"
 #include <string>
+#include <cstddef>
 
 namespace globe {
 
@@ -21,6 +22,12 @@ struct Config {
     // Cache
     std::string cacheDir = "tile_cache";
     bool useDiskCache = true;
+    bool useMemoryCache = true;
+    size_t memoryCacheMaxEntries = 2048;
+    size_t memoryCacheMaxBytes = 128 * 1024 * 1024; // 128 MB compressed tile bytes
+    bool useDecodedMemoryCache = true;
+    size_t decodedMemoryCacheMaxEntries = 1024;
+    size_t decodedMemoryCacheMaxBytes = 256 * 1024 * 1024; // 256 MB RGBA payload
     
     // Zoom limits
     int minZoom = MIN_ZOOM;
@@ -30,7 +37,7 @@ struct Config {
     int windowWidth = 1280;
     int windowHeight = 720;
     float fovDegrees = DEFAULT_FOV_DEG;
-    int meshSegments = 64;            // Mesh subdivision per tile (matches DEM grid)
+    int meshSegments = 64;            // Mesh subdivision per tile (independent of DEM grid)
     
     // LOD
     float sseThreshold = DEFAULT_SSE_THRESHOLD;
@@ -52,14 +59,32 @@ struct Config {
     bool vectorEnabled = false;
     bool wireframeMode = false;
     bool is2D = false;
+    bool logDepthEnabled = true;    // Log-depth precision path (P1.4)
+    bool reversedZEnabled = false;  // Reversed-Z precision path (P1.4 alternative)
+    bool requestDrivenFrame = true; // Event/dirty-driven frame loop (P2.2)
+    bool textureAtlasEnabled = false; // Shared color atlas path (P3.2) - disabled by default for stability
+    bool selectiveSkirts = true;    // Enable selective skirt generation per edge mask
+    bool edgeStitching = true;      // Enable stitch-mask aware mesh template variants
+    bool lodChildQuorum = true;     // Refine only when all children are render-ready
+    int textureAtlasSize = 4096;     // Atlas page resolution in pixels
+    int textureAtlasSlotSize = 256;  // Fixed tile slot resolution in pixels
+    int atlasGutterPx = 2;           // Per-slot gutter padding to prevent atlas seam bleed
+    bool atlasEdgeDilate = true;     // Dilate border texels into gutter on upload
+    bool textureAtlasMipmaps = false; // Optional atlas mip generation (costly per upload)
     
     // DEM/Terrain settings (PiriReis mesh service)
     std::string demBaseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
-    int demMeshN = 65;                // Grid resolution per tile (65x65 = 4225 samples)
+    int demMeshN = 5;                 // Grid resolution per tile (5x5 = 25 samples, webglobe parity)
     size_t demCacheSize = 512;        // Max cached DEM tiles
+    int demVisiblePinBudget = 1024;   // Max visible/neighbor DEM keys pinned against eviction
     double demHeightScale = 2.5;      // Height exaggeration (2.5x for visible terrain)
     bool demDebug = false;            // Enable DEM debug logging
     DisplacementMode terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;  // Single authority
+    float skirtDepthNearKm = 0.015f;  // Near-view skirt depth (km, ~15 m)
+    float skirtDepthFarKm = 0.10f;    // Far-view skirt depth (km, ~100 m)
+    float skirtDepthRatio = 0.003f;   // Relative skirt depth vs tile arc length
+    float skirtMinDepthKm = 0.05f;    // Minimum skirt depth (km)
+    float skirtMaxDepthKm = 0.4f;     // Maximum skirt depth (km)
     
     // Debug
     bool showDebugInfo = true;

@@ -72,6 +72,13 @@ void PerspectiveCamera::SetNearFar(double near_plane, double far_plane) {
     m_proj_dirty = true;
 }
 
+void PerspectiveCamera::SetReverseZEnabled(bool enabled) {
+    if (m_reverseZ != enabled) {
+        m_reverseZ = enabled;
+        m_proj_dirty = true;
+    }
+}
+
 void PerspectiveCamera::SetPositionECEF(const glm::dvec3& pos) {
     m_pos_ecef = pos;
     // Inverse conversion ECEF -> LatLon would go here if needed strictly
@@ -213,7 +220,22 @@ void PerspectiveCamera::UpdateMatrices() const {
     }
     
     if (m_proj_dirty) {
-        m_proj_matrix = glm::perspective(glm::radians(m_fov), m_aspect, m_near, m_far);
+        if (!m_reverseZ) {
+            m_proj_matrix = glm::perspective(glm::radians(m_fov), m_aspect, m_near, m_far);
+        } else {
+            // Reversed-Z projection for OpenGL NDC [-1, 1]:
+            // near -> +1, far -> -1. Depth test should use GL_GEQUAL with clear depth 0.
+            const double f = 1.0 / std::tan(glm::radians(m_fov) * 0.5);
+            const double n = m_near;
+            const double fa = m_far;
+
+            m_proj_matrix = glm::dmat4(0.0);
+            m_proj_matrix[0][0] = f / m_aspect;
+            m_proj_matrix[1][1] = f;
+            m_proj_matrix[2][2] = (n + fa) / (fa - n);
+            m_proj_matrix[2][3] = -1.0;
+            m_proj_matrix[3][2] = (2.0 * fa * n) / (fa - n);
+        }
         m_proj_dirty = false;
     }
 }
@@ -271,12 +293,15 @@ void PerspectiveCamera::GetRay(double screenX, double screenY, int screenW, int 
     glm::dmat4 invVP = glm::inverse(GetViewProjectionMatrix());
     
     // Ray Start (Near Plane)
-    glm::dvec4 rayStartClip(ndcX, ndcY, -1.0, 1.0);
+    double nearClipZ = m_reverseZ ? 1.0 : -1.0;
+    double farClipZ = m_reverseZ ? -1.0 : 1.0;
+
+    glm::dvec4 rayStartClip(ndcX, ndcY, nearClipZ, 1.0);
     glm::dvec4 rayStartWorld = invVP * rayStartClip;
     rayStartWorld /= rayStartWorld.w;
     
     // Ray End (Far Plane)
-    glm::dvec4 rayEndClip(ndcX, ndcY, 1.0, 1.0);
+    glm::dvec4 rayEndClip(ndcX, ndcY, farClipZ, 1.0);
     glm::dvec4 rayEndWorld = invVP * rayEndClip;
     rayEndWorld /= rayEndWorld.w;
     
