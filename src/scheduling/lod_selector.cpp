@@ -281,7 +281,8 @@ bool LodSelector::ShouldSubdivide(
     float sse = ComputeSSE(key, distanceMeters, viewportHeight, fovDegrees);
     
     // Apply tilt factor (reduce detail when tilted)
-    float adjustedThreshold = sseThreshold / std::max(0.1f, tiltFactor);
+    // Floor raised to 0.25 (max 4x inflation) to prevent LOD stall at extreme tilt
+    float adjustedThreshold = sseThreshold / std::max(0.25f, tiltFactor);
     
     return sse > adjustedThreshold;
 }

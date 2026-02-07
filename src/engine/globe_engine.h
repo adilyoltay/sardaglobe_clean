@@ -240,10 +240,21 @@ private:
         double seamGapMaxM = 0.0;
         int cliffEdgeCount = 0;
         double ancestorDemRatio = 0.0;
+        // Request-stall diagnostics
+        int maxLeafLevel = 0;
+        float sseEffectiveThreshold = 0.0f;
+        float tiltFactor = 0.0f;
+        int staleTileCount = 0;
+        uint64_t stallFrames = 0;
     };
     DebugStats debugStats_;
     bool showDebugPanel_ = true;
     double lastFetchFailResetTime_ = 0.0;
+    // Request-stall detection
+    int prevLeafCount_ = 0;
+    double prevAltitudeKm_ = 0.0;
+    uint64_t stallFrameCounter_ = 0;
+    int staleTileCount_ = 0;
 
     FrameTimings frameTimings_;
     FrameTimeTracker frameTimeTracker_;

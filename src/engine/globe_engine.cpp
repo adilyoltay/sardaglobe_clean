@@ -408,6 +408,19 @@ void GlobeEngine::Update(double dt, double currentTime) {
             TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
             TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
         }
+        else if (tile.IsLoading()) {
+            // Stale intermediate state recovery: if a tile is stuck in
+            // Scheduled/Fetching/Decoding/Uploading for >5s with no worker
+            // activity, reset it to Unloaded so it can be re-fetched.
+            constexpr double kStaleTimeoutSec = 5.0;
+            double age = glfwGetTime() - tile.lastAccessTime;
+            if (age > kStaleTimeoutSec) {
+                TileStateMachine::Advance(tile, TileStateMachine::Event::Evict);
+                scheduler_->Request(key, priority, ranked.score);
+                TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule);
+                TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart);
+            }
+        }
         else if (tile.state == TileState::Failed) {
             // Exponential backoff for failed tiles (prevents hammering failed servers)
             // Backoff: 1s, 2s, 4s, 8s, 16s, max 32s
@@ -653,6 +666,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
             effectiveDemLevel = std::clamp(effectiveDemLevel, 0, key.level);
         }
 
+        // P1: Seam→skirt feedback — if previous frame measured a significant
+        // seam gap on this tile, force skirt on all edges (the per-edge scan
+        // already populated edgeGapMaxM in the previous Render pass).
+        constexpr float kSeamSkirtThresholdM = 4.0f;
+        if (config_.selectiveSkirts && tile.edgeGapMaxM > kSeamSkirtThresholdM) {
+            newSkirtMask = Tile::EDGE_NORTH | Tile::EDGE_EAST |
+                           Tile::EDGE_SOUTH | Tile::EDGE_WEST;
+        }
+
         uint8_t stitchedMask = config_.edgeStitching ? newEdgeCoarserMask : 0;
         uint8_t resolvedSkirtMask = config_.selectiveSkirts
             ? newSkirtMask
@@ -859,6 +881,40 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
     }
 
+    // Step 2C: Detect LOD stall — if leaf count or altitude changed, keep rendering
+    // to allow progressive refinement even when no fetch/upload is in flight.
+    int currentLeafCount = static_cast<int>(selection.leafSet.size());
+    if (currentLeafCount != prevLeafCount_) {
+        hasBackgroundWork = true;
+    }
+    if (std::abs(altitudeKm - prevAltitudeKm_) > prevAltitudeKm_ * 0.02) {
+        hasBackgroundWork = true;  // >2% altitude change → keep refining
+    }
+    // Count tiles in required set that are still loading (not Ready)
+    int staleTiles = 0;
+    for (const TileKey& rkey : selection.required) {
+        auto rit = tiles_.find(rkey);
+        if (rit != tiles_.end() && rit->second.IsLoading()) {
+            ++staleTiles;
+        }
+        if (rit == tiles_.end()) {
+            hasBackgroundWork = true;  // Required tile not yet created
+        }
+    }
+    staleTileCount_ = staleTiles;
+    if (staleTiles > 0) {
+        hasBackgroundWork = true;
+    }
+    // Stall frame counter for telemetry
+    if (currentLeafCount == prevLeafCount_ && currentLeafCount < 20 &&
+        std::abs(altitudeKm - prevAltitudeKm_) > prevAltitudeKm_ * 0.05) {
+        ++stallFrameCounter_;
+    } else if (currentLeafCount != prevLeafCount_) {
+        stallFrameCounter_ = 0;
+    }
+    prevLeafCount_ = currentLeafCount;
+    prevAltitudeKm_ = altitudeKm;
+
     if (hasBackgroundWork) {
         frameRequested_ = true;
     }
@@ -929,12 +985,20 @@ void GlobeEngine::Render() {
         constexpr double kSeamWarnM = 4.0;
         constexpr double kCliffM = 15.0;
 
+        // Reset per-tile seam metric before scan
+        for (const TileKey& key : sceneSnapshot_.leafSet) {
+            auto resetIt = tiles_.find(key);
+            if (resetIt != tiles_.end()) {
+                resetIt->second.edgeGapMaxM = 0.0f;
+            }
+        }
+
         for (const TileKey& key : sceneSnapshot_.leafSet) {
             auto tileIt = tiles_.find(key);
             if (tileIt == tiles_.end()) {
                 continue;
             }
-            const Tile& tileA = tileIt->second;
+            Tile& tileA = tileIt->second;
 
             for (int dir = 0; dir < 2; ++dir) {
                 TileKey neighborKey = key.Neighbor(dx[dir], dy[dir]);
@@ -1013,6 +1077,9 @@ void GlobeEngine::Render() {
                 if (edgeMaxDeltaM > kCliffM) {
                     ++cliffEdgeCount;
                 }
+                // P0: Populate per-tile seam metric (max across all edges)
+                tileA.edgeGapMaxM = std::max(tileA.edgeGapMaxM,
+                    static_cast<float>(edgeMaxDeltaM));
             }
         }
 
@@ -1102,6 +1169,19 @@ void GlobeEngine::Render() {
     debugStats_.seamGapMaxM = seamGapMaxM;
     debugStats_.cliffEdgeCount = cliffEdgeCount;
     debugStats_.ancestorDemRatio = ancestorDemRatio;
+    // Request-stall diagnostics
+    {
+        int maxLvl = 0;
+        for (const TileKey& lk : sceneSnapshot_.leafSet) {
+            maxLvl = std::max(maxLvl, lk.level);
+        }
+        debugStats_.maxLeafLevel = maxLvl;
+    }
+    debugStats_.sseEffectiveThreshold = tilePyramid_.GetSettings().sseThreshold /
+        std::max(0.25f, tilePyramid_.GetSettings().tiltFactor);
+    debugStats_.tiltFactor = tilePyramid_.GetSettings().tiltFactor;
+    debugStats_.staleTileCount = staleTileCount_;
+    debugStats_.stallFrames = stallFrameCounter_;
     debugStats_.leafCount = tilePyramid_.GetLeafCount();
     debugStats_.requiredCount = tilePyramid_.GetRequiredCount();
     debugStats_.currentZoom = GetCurrentZoom();
@@ -1509,6 +1589,17 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Heading: %.1f", debugStats_.heading);
             ImGui::Text("Tilt: %.1f", debugStats_.tilt);
             ImGui::Text("Cam Speed: %.1f km/s", debugStats_.cameraSpeedKmPerSec);
+            ImGui::Text("Max Leaf Lvl: %d", debugStats_.maxLeafLevel);
+            ImGui::Text("SSE Eff.Thresh: %.3f", debugStats_.sseEffectiveThreshold);
+            ImGui::Text("Tilt Factor: %.3f", debugStats_.tiltFactor);
+            if (debugStats_.staleTileCount > 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f),
+                    "Stale Loading: %d", debugStats_.staleTileCount);
+            }
+            if (debugStats_.stallFrames > 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
+                    "STALL FRAMES: %llu", static_cast<unsigned long long>(debugStats_.stallFrames));
+            }
             
             ImGui::Spacing();
             
