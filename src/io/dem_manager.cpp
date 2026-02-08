@@ -267,6 +267,11 @@ bool DemManager::GetGridData(const TileKey& key, DemGridData& outData) const {
     if (it == cache_.end() || !it->second.valid) {
         return false;
     }
+    // Touch LRU so grid-based sampling paths don't evict actively-used tiles.
+    {
+        auto now = std::chrono::steady_clock::now();
+        it->second.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+    }
     outData = it->second;
     return true;
 }

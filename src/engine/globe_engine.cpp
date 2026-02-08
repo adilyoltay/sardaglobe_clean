@@ -597,23 +597,51 @@ void GlobeEngine::Update(double dt, double currentTime) {
             }
         };
 
+        auto keyAtLevel = [](TileKey k, int targetLevel) -> TileKey {
+            int lvl = std::clamp(targetLevel, 0, k.level);
+            while (k.level > lvl) {
+                k = k.Parent();
+            }
+            return k;
+        };
+
         // Always pin coarse base DEM tiles to guarantee global ancestor fallback.
         for (const TileKey& base : baseTileKeys_) {
             pushPinned(base);
         }
 
+        // Pin DEM keys actually used by visible leaf meshes first.
+        // NOTE: DEM requests are issued for the *imagery* required set, but mesh sampling can
+        // intentionally lock to ancestor keys (demTargetLevel / demEdgeLevelPack) for coherence.
+        // Pinning leaf keys alone is insufficient; the cache would evict the shared ancestors
+        // and reintroduce "each tile lifts independently" cliffs/cracks.
         for (const TileKey& leaf : selection.leafSet) {
-            pushPinned(leaf);
+            auto it = tiles_.find(leaf);
+            if (it == tiles_.end()) continue;
+            const Tile& tile = it->second;
+            int lvl = std::clamp(static_cast<int>(tile.demTargetLevel), 0, leaf.level);
+            pushPinned(keyAtLevel(leaf, lvl));
+        }
+
+        // Pin edge-coherent DEM keys (often coarser, shared across neighbors) if budget allows.
+        for (const TileKey& leaf : selection.leafSet) {
             if (static_cast<int>(demPinnedKeys.size()) >= config_.demVisiblePinBudget) {
                 break;
             }
-            static const int nDx[] = {0, 1, 0, -1};
-            static const int nDy[] = {-1, 0, 1, 0};
-            for (int i = 0; i < 4; ++i) {
-                TileKey n = leaf.Neighbor(nDx[i], nDy[i]);
-                if (n.IsValid()) {
-                    pushPinned(n);
-                }
+            auto it = tiles_.find(leaf);
+            if (it == tiles_.end()) continue;
+            const Tile& tile = it->second;
+
+            const uint32_t pack = tile.demEdgeLevelPack;
+            int edgeLvls[4] = {
+                static_cast<int>(pack & 0xFFu),
+                static_cast<int>((pack >> 8) & 0xFFu),
+                static_cast<int>((pack >> 16) & 0xFFu),
+                static_cast<int>((pack >> 24) & 0xFFu)
+            };
+            for (int dir = 0; dir < 4; ++dir) {
+                int lvl = std::clamp(edgeLvls[dir], 0, leaf.level);
+                pushPinned(keyAtLevel(leaf, lvl));
             }
         }
         demManager_->SetPinnedTiles(demPinnedKeys);

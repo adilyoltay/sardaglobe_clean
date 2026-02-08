@@ -11,6 +11,104 @@ namespace globe {
 namespace {
 
 constexpr int kVertexStrideFloats = 9;  // pos(3), normal(3), uv(2), heightKm(1)
+constexpr double kMaxMercatorLatDeg = 85.05112878;
+
+double WrapLonDeg(double lonDeg) {
+    while (lonDeg < -180.0) lonDeg += 360.0;
+    while (lonDeg > 180.0) lonDeg -= 360.0;
+    return lonDeg;
+}
+
+double SampleBilinear(const DemGridData& data, double u, double v) {
+    if (!data.valid || data.heights.empty() || data.meshN <= 1) return 0.0;
+
+    const int meshN = data.meshN;
+    double gx = std::clamp(u, 0.0, 1.0) * static_cast<double>(meshN - 1);
+    double gy = std::clamp(v, 0.0, 1.0) * static_cast<double>(meshN - 1);
+
+    int x0 = static_cast<int>(std::floor(gx));
+    int y0 = static_cast<int>(std::floor(gy));
+    int x1 = std::min(x0 + 1, meshN - 1);
+    int y1 = std::min(y0 + 1, meshN - 1);
+
+    x0 = std::clamp(x0, 0, meshN - 1);
+    y0 = std::clamp(y0, 0, meshN - 1);
+
+    const double fx = gx - static_cast<double>(x0);
+    const double fy = gy - static_cast<double>(y0);
+
+    const double h00 = data.heights[static_cast<std::size_t>(y0 * meshN + x0)];
+    const double h10 = data.heights[static_cast<std::size_t>(y0 * meshN + x1)];
+    const double h01 = data.heights[static_cast<std::size_t>(y1 * meshN + x0)];
+    const double h11 = data.heights[static_cast<std::size_t>(y1 * meshN + x1)];
+
+    const double h0 = h00 + fx * (h10 - h00);
+    const double h1 = h01 + fx * (h11 - h01);
+    return h0 + fy * (h1 - h0);
+}
+
+struct DemTileSampler {
+    TileKey key;
+    Extent extent;
+    DemGridData data;
+    bool valid = false;
+};
+
+TileKey KeyAtLevel(TileKey k, int targetLevel) {
+    int lvl = std::clamp(targetLevel, 0, k.level);
+    while (k.level > lvl) {
+        k = k.Parent();
+    }
+    return k;
+}
+
+bool ResolveDemSampler(const TileKey& desiredKey, DemManager* demManager, DemTileSampler& out) {
+    out = DemTileSampler{};
+    if (!demManager) return false;
+
+    TileKey probe = desiredKey;
+    while (probe.level >= 0) {
+        DemGridData grid;
+        if (demManager->GetGridData(probe, grid) && grid.valid && grid.meshN > 1 && !grid.heights.empty()) {
+            out.key = probe;
+            out.extent = Extent::FromTileWGS84(probe.x, probe.y, probe.level);
+            out.data = std::move(grid);
+            out.valid = true;
+            return true;
+        }
+        if (probe.level == 0) {
+            break;
+        }
+        probe = probe.Parent();
+    }
+    return false;
+}
+
+bool SampleDemMeters(const DemTileSampler& sampler, double lonDeg, double latDeg, double& outMeters) {
+    if (!sampler.valid) return false;
+
+    const double lon = WrapLonDeg(lonDeg);
+    const double latClamped = std::clamp(latDeg, -kMaxMercatorLatDeg, kMaxMercatorLatDeg);
+
+    const double lonLeft = sampler.extent.West();
+    const double lonRight = sampler.extent.East();
+    const double latTop = sampler.extent.North();
+    const double latBottom = sampler.extent.South();
+    const double denomLon = lonRight - lonLeft;
+    const double denomLat = latTop - latBottom;
+    if (!std::isfinite(denomLon) || !std::isfinite(denomLat) || std::fabs(denomLon) < 1e-12 || std::fabs(denomLat) < 1e-12) {
+        return false;
+    }
+
+    double u = (lon - lonLeft) / denomLon;
+    // Service row order is south->north (bottom->top). So v=0 must map to latBottom.
+    double v = (latClamped - latBottom) / denomLat;
+    u = std::clamp(u, 0.0, 1.0);
+    v = std::clamp(v, 0.0, 1.0);
+
+    outMeters = SampleBilinear(sampler.data, u, v);
+    return true;
+}
 
 } // namespace
 
@@ -70,40 +168,24 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     double mercatorYBottom = std::log(std::tan(M_PI / 4.0 + latBottomRad / 2.0));
     
     // DEM sampling for CPU-mesh displacement mode.
+    //
+    // IMPORTANT: Avoid per-vertex DemManager::SampleHeightDetailed() calls (mutex + parent walk).
+    // Resolve a small set of DEM grid tiles once, then sample bilinear in the mesh worker.
     bool demSamplingEnabled = false;
     bool hasExactDemTile = false;
-    int authoritativeLevel = -1;
+    int authoritativeLevel = key.level;
+    DemTileSampler demInterior;
+    DemTileSampler demEdge[4];  // N,E,S,W (resolved on self's ancestor chain for determinism)
+
+    int clampedTargetLevel = std::clamp(demTargetLevel >= 0 ? demTargetLevel : key.level, 0, key.level);
     if (demManager && config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
         hasExactDemTile = demManager->HasData(key);
-        if (demTargetLevel >= 0) {
-            int clampedTargetLevel = std::clamp(demTargetLevel, 0, key.level);
-            TileKey targetKey = key;
-            while (targetKey.level > clampedTargetLevel) {
-                targetKey = targetKey.Parent();
-            }
-            if (demManager->HasData(targetKey)) {
-                authoritativeLevel = targetKey.level;
-                demSamplingEnabled = true;
-            }
-        }
 
-        if (!demSamplingEnabled) {
-            TileKey probe = key;
-            while (probe.level >= 0) {
-                if (demManager->HasData(probe)) {
-                    authoritativeLevel = probe.level;
-                    demSamplingEnabled = true;
-                    break;
-                }
-                if (probe.level == 0) {
-                    break;
-                }
-                probe = probe.Parent();
-            }
+        const TileKey desiredInteriorKey = KeyAtLevel(key, clampedTargetLevel);
+        if (ResolveDemSampler(desiredInteriorKey, demManager, demInterior)) {
+            demSamplingEnabled = true;
+            authoritativeLevel = demInterior.key.level;
         }
-    }
-    if (authoritativeLevel < 0) {
-        authoritativeLevel = key.level;
     }
     result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(authoritativeLevel, 0, 255));
     
@@ -129,8 +211,6 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     int demSourceLevelMin = std::numeric_limits<int>::max();
     int demSourceLevelMax = std::numeric_limits<int>::min();
     int demMissingSamples = 0;
-    int interiorMissingSamples = 0;
-    bool sawUnexpectedInteriorAncestorSample = false;
 
     // DEM edge-coherence levels (packed 4x u8): N,E,S,W.
     // These levels are computed by the engine as the common ancestor of adjacent DEM keys.
@@ -147,6 +227,25 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     }
     int edgeBlendBand = std::max(0, config.demEdgeBlendSegments);
     edgeBlendBand = std::min(edgeBlendBand, segments);
+
+    // Resolve edge-coherent samplers (fixed keyAtLevel chain, not "tile containing coordinate").
+    if (demSamplingEnabled && demManager) {
+        for (int dir = 0; dir < 4; ++dir) {
+            const TileKey desiredEdgeKey = KeyAtLevel(key, demEdgeLevels[dir]);
+            ResolveDemSampler(desiredEdgeKey, demManager, demEdge[dir]);
+        }
+    }
+
+    auto sampleKmFrom = [&](const DemTileSampler& sampler, double lonDeg, double latDeg,
+                            float& outHeightKm, int& outSourceLevel) -> bool {
+        double meters = 0.0;
+        if (!SampleDemMeters(sampler, lonDeg, latDeg, meters)) {
+            return false;
+        }
+        outHeightKm = static_cast<float>(meters * 0.001 * config.demHeightScale);
+        outSourceLevel = sampler.key.level;
+        return true;
+    };
     
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
@@ -198,29 +297,26 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                 float influence = std::max(std::max(infN, infS), std::max(infE, infW));
                 influence = std::clamp(influence, 0.0f, 1.0f);
 
-                const int interiorLevel = authoritativeLevel;
-                int edgeLevel = interiorLevel;
+                const DemTileSampler* edgeSampler = &demInterior;
+                // Choose the coarsest resolved edge sampler among influenced borders.
                 if (influence > 0.0f) {
-                    edgeLevel = key.level;
-                    if (infN > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[0]);
-                    if (infE > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[1]);
-                    if (infS > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[2]);
-                    if (infW > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[3]);
-                    edgeLevel = std::clamp(edgeLevel, 0, key.level);
-                }
-
-                auto sampleKmAtLevel = [&](int level, float& outHeightKm, int& outSourceLevel) -> bool {
-                    DemSampleResult sample;
-                    if (demManager->SampleHeightDetailed(lon, lat, level, sample) && sample.ok) {
-                        outHeightKm = static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
-                        outSourceLevel = sample.sourceLevel;
-                        result.demUsed = true;
-                        demSourceLevelMin = std::min(demSourceLevelMin, sample.sourceLevel);
-                        demSourceLevelMax = std::max(demSourceLevelMax, sample.sourceLevel);
-                        return true;
+                    if (infN > 0.0f && demEdge[0].valid &&
+                        (!edgeSampler->valid || demEdge[0].key.level < edgeSampler->key.level)) {
+                        edgeSampler = &demEdge[0];
                     }
-                    return false;
-                };
+                    if (infE > 0.0f && demEdge[1].valid &&
+                        (!edgeSampler->valid || demEdge[1].key.level < edgeSampler->key.level)) {
+                        edgeSampler = &demEdge[1];
+                    }
+                    if (infS > 0.0f && demEdge[2].valid &&
+                        (!edgeSampler->valid || demEdge[2].key.level < edgeSampler->key.level)) {
+                        edgeSampler = &demEdge[2];
+                    }
+                    if (infW > 0.0f && demEdge[3].valid &&
+                        (!edgeSampler->valid || demEdge[3].key.level < edgeSampler->key.level)) {
+                        edgeSampler = &demEdge[3];
+                    }
+                }
 
                 float hInterior = 0.0f;
                 float hEdge = 0.0f;
@@ -229,10 +325,10 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
 
                 const bool isInteriorVertex = (influence == 0.0f);
 
-                bool okInterior = sampleKmAtLevel(interiorLevel, hInterior, srcInterior);
+                bool okInterior = sampleKmFrom(demInterior, lon, lat, hInterior, srcInterior);
                 bool okEdge = okInterior;
-                if (influence > 0.0f && edgeLevel != interiorLevel) {
-                    okEdge = sampleKmAtLevel(edgeLevel, hEdge, srcEdge);
+                if (influence > 0.0f && edgeSampler != &demInterior) {
+                    okEdge = sampleKmFrom(*edgeSampler, lon, lat, hEdge, srcEdge);
                 } else {
                     hEdge = hInterior;
                     srcEdge = srcInterior;
@@ -248,58 +344,23 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                 } else {
                     // No DEM data at either interior or edge-coherent level.
                     ++demMissingSamples;
-                    if (isInteriorVertex) {
-                        ++interiorMissingSamples;
-                    }
                     result.demPending = true;
                     finalH = 0.0f;
                 }
                 heightsKm[vertexIndex] = finalH;
 
-                // Only treat unexpected ancestor fallback as a problem when it happens in the interior
-                // (edge band sampling is intentionally allowed to use coarser/common-ancestor levels).
-                if (isInteriorVertex && okInterior && srcInterior >= 0 && srcInterior < interiorLevel) {
-                    sawUnexpectedInteriorAncestorSample = true;
-                }
-            }
-        }
-    }
-
-    // Parent-only fallback rule for partial availability:
-    // Only trigger when data is incomplete (missing samples or deeper fallback than requested).
-    // Mixed levels from intentional border equalization should not force full-tile downgrade.
-    if (demSamplingEnabled &&
-        (interiorMissingSamples > 0 ||
-         sawUnexpectedInteriorAncestorSample)) {
-        int uniformLevel = demSourceLevelMin;
-        if (uniformLevel == std::numeric_limits<int>::max()) {
-            uniformLevel = std::max(0, authoritativeLevel - 1);
-        }
-
-        const std::vector<float> previousHeightsKm = heightsKm;
-        demSourceLevelMin = std::numeric_limits<int>::max();
-        demSourceLevelMax = std::numeric_limits<int>::min();
-        demMissingSamples = 0;
-        result.demUsed = false;
-
-        for (size_t i = 0; i < heightsKm.size(); ++i) {
-            DemSampleResult sample;
-            if (demManager->SampleHeightDetailed(sampleLonDeg[i], sampleLatDeg[i], uniformLevel, sample) && sample.ok) {
-                heightsKm[i] = static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
-                result.demUsed = true;
-                demSourceLevelMin = std::min(demSourceLevelMin, sample.sourceLevel);
-                demSourceLevelMax = std::max(demSourceLevelMax, sample.sourceLevel);
-            } else {
-                // Preserve the first-pass value instead of forcing sea-level zero.
-                // Zero-injection creates visible cliffs at tile boundaries.
-                heightsKm[i] = previousHeightsKm[i];
-                ++demMissingSamples;
-                if (std::fabs(heightsKm[i]) > 1e-6f) {
+                if (okInterior && srcInterior >= 0) {
                     result.demUsed = true;
+                    demSourceLevelMin = std::min(demSourceLevelMin, srcInterior);
+                    demSourceLevelMax = std::max(demSourceLevelMax, srcInterior);
+                }
+                if (okEdge && srcEdge >= 0 && edgeSampler != &demInterior) {
+                    result.demUsed = true;
+                    demSourceLevelMin = std::min(demSourceLevelMin, srcEdge);
+                    demSourceLevelMax = std::max(demSourceLevelMax, srcEdge);
                 }
             }
         }
-        result.demPending = !hasExactDemTile || demMissingSamples > 0;
     }
 
     // Build cartesian positions from final sampled heights.
