@@ -87,6 +87,7 @@ void TileMeshScheduler::WorkerLoop() {
             request.stitchMask,
             request.skirtMask,
             request.demTargetLevel,
+            request.demEdgeLevelPack,
             demManager_,
             config_,
             true

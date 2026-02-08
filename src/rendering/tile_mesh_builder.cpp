@@ -21,6 +21,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     uint8_t stitchMask,
     uint8_t skirtMask,
     int demTargetLevel,
+    uint32_t demEdgeLevelPack,
     DemManager* demManager,
     const Config& config,
     bool useSharedEBO
@@ -31,6 +32,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     result.stitchMask = stitchMask;
     result.skirtMask = skirtMask;
     result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(demTargetLevel, 0, 255));
+    (void)edgeMask;  // Edge equalization is now driven by demEdgeLevelPack + blend band.
     
     // Use more segments for terrain mesh when DEM is enabled
     // Match segments to DEM grid: demMeshN points = demMeshN-1 segments
@@ -127,7 +129,24 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     int demSourceLevelMin = std::numeric_limits<int>::max();
     int demSourceLevelMax = std::numeric_limits<int>::min();
     int demMissingSamples = 0;
-    bool sawUnexpectedAncestorSample = false;
+    int interiorMissingSamples = 0;
+    bool sawUnexpectedInteriorAncestorSample = false;
+
+    // DEM edge-coherence levels (packed 4x u8): N,E,S,W.
+    // These levels are computed by the engine as the common ancestor of adjacent DEM keys.
+    // Sampling border vertices at these levels avoids "same-coordinate chooses different DEM tile"
+    // ambiguity on tile borders, which is the root cause of residual cracks/cliffs.
+    int demEdgeLevels[4] = {
+        static_cast<int>(demEdgeLevelPack & 0xFFu),
+        static_cast<int>((demEdgeLevelPack >> 8) & 0xFFu),
+        static_cast<int>((demEdgeLevelPack >> 16) & 0xFFu),
+        static_cast<int>((demEdgeLevelPack >> 24) & 0xFFu)
+    };
+    for (int i = 0; i < 4; ++i) {
+        demEdgeLevels[i] = std::clamp(demEdgeLevels[i], 0, key.level);
+    }
+    int edgeBlendBand = std::max(0, config.demEdgeBlendSegments);
+    edgeBlendBand = std::min(edgeBlendBand, segments);
     
     for (int iy = 0; iy <= segments; ++iy) {
         float v = static_cast<float>(iy) / segments;
@@ -155,41 +174,92 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             sampleLatDeg.push_back(lat);
 
             if (demSamplingEnabled) {
-                int sampleLevel = authoritativeLevel;
-                bool useCoarserEdgeLevel = false;
-                // Edge equalization should only be applied when sampling exact child DEM.
-                if (sampleLevel == key.level && sampleLevel > 0) {
-                    if (isNorthBorder && (edgeMask & Tile::EDGE_NORTH)) useCoarserEdgeLevel = true;
-                    if (isEastBorder && (edgeMask & Tile::EDGE_EAST)) useCoarserEdgeLevel = true;
-                    if (isSouthBorder && (edgeMask & Tile::EDGE_SOUTH)) useCoarserEdgeLevel = true;
-                    if (isWestBorder && (edgeMask & Tile::EDGE_WEST)) useCoarserEdgeLevel = true;
-                    if (useCoarserEdgeLevel) {
-                        sampleLevel = std::max(0, sampleLevel - 1);
+                float infN = 0.0f, infE = 0.0f, infS = 0.0f, infW = 0.0f;
+                if (edgeBlendBand > 0) {
+                    if (iy < edgeBlendBand) {
+                        infN = static_cast<float>(edgeBlendBand - iy) / static_cast<float>(edgeBlendBand);
                     }
-                }
-
-                DemSampleResult sample;
-                if (demManager->SampleHeightDetailed(lon, lat, sampleLevel, sample) && sample.ok) {
-                    heightsKm[vertexIndex] =
-                        static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
-                    result.demUsed = true;
-                    demSourceLevelMin = std::min(demSourceLevelMin, sample.sourceLevel);
-                    demSourceLevelMax = std::max(demSourceLevelMax, sample.sourceLevel);
-                    if (sample.sourceLevel < sampleLevel) {
-                        int fallbackDelta = sampleLevel - sample.sourceLevel;
-                        bool isBorderVertex = isNorthBorder || isEastBorder || isSouthBorder || isWestBorder;
-                        bool toleratedBorderFallback = isBorderVertex && fallbackDelta <= 1;
-                        // Expected mixed source levels can happen on border vertices:
-                        // - explicit edge equalization (requested one level coarser)
-                        // - coordinate quantization exactly on tile boundaries
-                        // Interior fallbacks still indicate partial DEM availability.
-                        if (!toleratedBorderFallback) {
-                            sawUnexpectedAncestorSample = true;
-                        }
+                    if (iy > segments - edgeBlendBand) {
+                        infS = static_cast<float>(iy - (segments - edgeBlendBand)) / static_cast<float>(edgeBlendBand);
+                    }
+                    if (ix < edgeBlendBand) {
+                        infW = static_cast<float>(edgeBlendBand - ix) / static_cast<float>(edgeBlendBand);
+                    }
+                    if (ix > segments - edgeBlendBand) {
+                        infE = static_cast<float>(ix - (segments - edgeBlendBand)) / static_cast<float>(edgeBlendBand);
                     }
                 } else {
+                    if (isNorthBorder) infN = 1.0f;
+                    if (isEastBorder) infE = 1.0f;
+                    if (isSouthBorder) infS = 1.0f;
+                    if (isWestBorder) infW = 1.0f;
+                }
+
+                float influence = std::max(std::max(infN, infS), std::max(infE, infW));
+                influence = std::clamp(influence, 0.0f, 1.0f);
+
+                const int interiorLevel = authoritativeLevel;
+                int edgeLevel = interiorLevel;
+                if (influence > 0.0f) {
+                    edgeLevel = key.level;
+                    if (infN > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[0]);
+                    if (infE > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[1]);
+                    if (infS > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[2]);
+                    if (infW > 0.0f) edgeLevel = std::min(edgeLevel, demEdgeLevels[3]);
+                    edgeLevel = std::clamp(edgeLevel, 0, key.level);
+                }
+
+                auto sampleKmAtLevel = [&](int level, float& outHeightKm, int& outSourceLevel) -> bool {
+                    DemSampleResult sample;
+                    if (demManager->SampleHeightDetailed(lon, lat, level, sample) && sample.ok) {
+                        outHeightKm = static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
+                        outSourceLevel = sample.sourceLevel;
+                        result.demUsed = true;
+                        demSourceLevelMin = std::min(demSourceLevelMin, sample.sourceLevel);
+                        demSourceLevelMax = std::max(demSourceLevelMax, sample.sourceLevel);
+                        return true;
+                    }
+                    return false;
+                };
+
+                float hInterior = 0.0f;
+                float hEdge = 0.0f;
+                int srcInterior = -1;
+                int srcEdge = -1;
+
+                const bool isInteriorVertex = (influence == 0.0f);
+
+                bool okInterior = sampleKmAtLevel(interiorLevel, hInterior, srcInterior);
+                bool okEdge = okInterior;
+                if (influence > 0.0f && edgeLevel != interiorLevel) {
+                    okEdge = sampleKmAtLevel(edgeLevel, hEdge, srcEdge);
+                } else {
+                    hEdge = hInterior;
+                    srcEdge = srcInterior;
+                }
+
+                float finalH = 0.0f;
+                if (okInterior && okEdge) {
+                    finalH = hInterior + (hEdge - hInterior) * influence;
+                } else if (okEdge) {
+                    finalH = hEdge;
+                } else if (okInterior) {
+                    finalH = hInterior;
+                } else {
+                    // No DEM data at either interior or edge-coherent level.
                     ++demMissingSamples;
+                    if (isInteriorVertex) {
+                        ++interiorMissingSamples;
+                    }
                     result.demPending = true;
+                    finalH = 0.0f;
+                }
+                heightsKm[vertexIndex] = finalH;
+
+                // Only treat unexpected ancestor fallback as a problem when it happens in the interior
+                // (edge band sampling is intentionally allowed to use coarser/common-ancestor levels).
+                if (isInteriorVertex && okInterior && srcInterior >= 0 && srcInterior < interiorLevel) {
+                    sawUnexpectedInteriorAncestorSample = true;
                 }
             }
         }
@@ -199,8 +269,8 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     // Only trigger when data is incomplete (missing samples or deeper fallback than requested).
     // Mixed levels from intentional border equalization should not force full-tile downgrade.
     if (demSamplingEnabled &&
-        (demMissingSamples > 0 ||
-         sawUnexpectedAncestorSample)) {
+        (interiorMissingSamples > 0 ||
+         sawUnexpectedInteriorAncestorSample)) {
         int uniformLevel = demSourceLevelMin;
         if (uniformLevel == std::numeric_limits<int>::max()) {
             uniformLevel = std::max(0, authoritativeLevel - 1);
@@ -262,26 +332,25 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         return lonDeg;
     };
 
-    // Recompute the per-vertex DEM request level using the same edge-equalization rule used for heights.
-    // This is needed for border-normal sampling so both sides of an edge see consistent derivatives.
+    // Recompute the per-vertex DEM request level used for border-normal sampling.
+    // We sample one step outside the tile on border vertices so adjacent tiles compute compatible
+    // derivatives. Use the edge-coherent DEM level on borders to avoid "tile grid" lighting seams.
     auto computeVertexSampleLevel = [&](int ix, int iy) -> int {
-        int sampleLevel = authoritativeLevel;
-        if (sampleLevel == key.level && sampleLevel > 0) {
-            bool isNorthBorder = (iy == 0);
-            bool isSouthBorder = (iy == segments);
-            bool isWestBorder = (ix == 0);
-            bool isEastBorder = (ix == segments);
-            bool useCoarserEdgeLevel = false;
-            if (isNorthBorder && (edgeMask & Tile::EDGE_NORTH)) useCoarserEdgeLevel = true;
-            if (isEastBorder && (edgeMask & Tile::EDGE_EAST)) useCoarserEdgeLevel = true;
-            if (isSouthBorder && (edgeMask & Tile::EDGE_SOUTH)) useCoarserEdgeLevel = true;
-            if (isWestBorder && (edgeMask & Tile::EDGE_WEST)) useCoarserEdgeLevel = true;
-            if (useCoarserEdgeLevel) {
-                sampleLevel = std::max(0, sampleLevel - 1);
-            }
+        const bool onNorth = (iy == 0);
+        const bool onEast = (ix == segments);
+        const bool onSouth = (iy == segments);
+        const bool onWest = (ix == 0);
+        if (!(onNorth || onEast || onSouth || onWest)) {
+            return std::clamp(authoritativeLevel, 0, key.level);
         }
-        sampleLevel = std::clamp(sampleLevel, 0, key.level);
-        return sampleLevel;
+
+        int edgeLevel = key.level;
+        if (onNorth) edgeLevel = std::min(edgeLevel, demEdgeLevels[0]);
+        if (onEast) edgeLevel = std::min(edgeLevel, demEdgeLevels[1]);
+        if (onSouth) edgeLevel = std::min(edgeLevel, demEdgeLevels[2]);
+        if (onWest) edgeLevel = std::min(edgeLevel, demEdgeLevels[3]);
+        edgeLevel = std::clamp(edgeLevel, 0, key.level);
+        return edgeLevel;
     };
 
     auto sampleOutsidePosition = [&](double lonDeg, double latDeg, int sampleLevel, glm::dvec3& outPos) -> bool {

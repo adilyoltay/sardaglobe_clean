@@ -57,6 +57,7 @@ int main() {
         0,                 // stitchMask
         eastOnly,          // skirtMask
         key.level,         // dem target
+        0,                 // demEdgeLevelPack
         nullptr,           // dem manager
         config,
         false              // shared ebo
@@ -78,6 +79,7 @@ int main() {
         0,
         fullMask,
         key.level,
+        0,
         nullptr,
         config,
         false

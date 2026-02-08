@@ -432,6 +432,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
             tile.angularRadius = TileAngularRadius(key);
             tile.demTargetLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
             tile.demEffectiveLevel = tile.demTargetLevel;
+            {
+                const uint32_t lvl = static_cast<uint32_t>(tile.demTargetLevel);
+                tile.demEdgeLevelPack = lvl | (lvl << 8) | (lvl << 16) | (lvl << 24);
+            }
             tiles_.emplace(key, std::move(tile));
             it = tiles_.find(key);
         }
@@ -533,6 +537,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
             tile.angularRadius = TileAngularRadius(key);
             tile.demTargetLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
             tile.demEffectiveLevel = tile.demTargetLevel;
+            {
+                const uint32_t lvl = static_cast<uint32_t>(tile.demTargetLevel);
+                tile.demEdgeLevelPack = lvl | (lvl << 8) | (lvl << 16) | (lvl << 24);
+            }
             tiles_.emplace(key, std::move(tile));
             it = tiles_.find(key);
         }
@@ -876,6 +884,124 @@ void GlobeEngine::Update(double dt, double currentTime) {
         
         if (revisionChanged) {
             ++tile.meshRevision;
+        }
+    }
+
+    // DEM edge-coherence levels (P3): compute a per-edge "common ancestor" DEM level so
+    // both sides of a tile border sample heights from the same DEM tile key. Without this,
+    // the same geographic border coordinate can quantize to different DEM tiles (and return
+    // different heights), producing residual cracks/cliffs even when LOD stitching is enabled.
+    if (demManager_ && config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
+        auto packEdgeLevels = [](int north, int east, int south, int west) -> uint32_t {
+            uint32_t n = static_cast<uint32_t>(std::clamp(north, 0, 255));
+            uint32_t e = static_cast<uint32_t>(std::clamp(east, 0, 255));
+            uint32_t s = static_cast<uint32_t>(std::clamp(south, 0, 255));
+            uint32_t w = static_cast<uint32_t>(std::clamp(west, 0, 255));
+            return n | (e << 8) | (s << 16) | (w << 24);
+        };
+
+        auto keyAtLevel = [](TileKey k, int targetLevel) -> TileKey {
+            int lvl = std::clamp(targetLevel, 0, k.level);
+            while (k.level > lvl) {
+                k = k.Parent();
+            }
+            return k;
+        };
+
+        auto commonAncestorLevel = [&](TileKey a, TileKey b) -> int {
+            while (a.level > b.level) a = a.Parent();
+            while (b.level > a.level) b = b.Parent();
+            while (!(a == b)) {
+                if (a.level == 0) break;
+                a = a.Parent();
+                b = b.Parent();
+            }
+            return a.level;
+        };
+
+        static const int dx[] = {0, 1, 0, -1};
+        static const int dy[] = {-1, 0, 1, 0};
+        static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
+                                           Tile::EDGE_SOUTH, Tile::EDGE_WEST};
+
+        for (const TileKey& key : selection.leaves) {
+            auto it = tiles_.find(key);
+            if (it == tiles_.end()) continue;
+            Tile& tile = it->second;
+
+            int selfDemLevel = std::clamp(static_cast<int>(tile.demTargetLevel), 0, key.level);
+            TileKey selfDemKey = keyAtLevel(key, selfDemLevel);
+
+            int edgeLevels[4] = {selfDemLevel, selfDemLevel, selfDemLevel, selfDemLevel};
+
+            for (int dir = 0; dir < 4; ++dir) {
+                TileKey neighborSame = key.Neighbor(dx[dir], dy[dir]);
+                if (!neighborSame.IsValid()) {
+                    continue;
+                }
+
+                std::vector<TileKey> neighborLeaves;
+                neighborLeaves.reserve(2);
+                if (selection.leafSet.count(neighborSame) > 0) {
+                    neighborLeaves.push_back(neighborSame);
+                } else if (neighborSame.level > 0 && selection.leafSet.count(neighborSame.Parent()) > 0) {
+                    neighborLeaves.push_back(neighborSame.Parent());
+                } else {
+                    auto children = neighborSame.Children();
+                    int a = -1, b = -1;
+                    // Children order: 0=NW,1=NE,2=SW,3=SE.
+                    if (edgeBits[dir] == Tile::EDGE_NORTH) { a = 2; b = 3; }
+                    else if (edgeBits[dir] == Tile::EDGE_EAST) { a = 0; b = 2; }
+                    else if (edgeBits[dir] == Tile::EDGE_SOUTH) { a = 0; b = 1; }
+                    else if (edgeBits[dir] == Tile::EDGE_WEST) { a = 1; b = 3; }
+                    if (a >= 0) {
+                        if (selection.leafSet.count(children[static_cast<std::size_t>(a)]) > 0) {
+                            neighborLeaves.push_back(children[static_cast<std::size_t>(a)]);
+                        }
+                        if (selection.leafSet.count(children[static_cast<std::size_t>(b)]) > 0) {
+                            neighborLeaves.push_back(children[static_cast<std::size_t>(b)]);
+                        }
+                    }
+                }
+
+                if (neighborLeaves.empty()) {
+                    continue;
+                }
+
+                int chosenLevel = selfDemLevel;
+                bool chosenInit = false;
+                for (const TileKey& neighborLeaf : neighborLeaves) {
+                    int neighborDemLevel = neighborLeaf.level;
+                    auto nit = tiles_.find(neighborLeaf);
+                    if (nit != tiles_.end()) {
+                        neighborDemLevel = std::clamp(static_cast<int>(nit->second.demTargetLevel), 0, neighborLeaf.level);
+                    } else {
+                        neighborDemLevel = resolveBestAvailableDemLevel(neighborLeaf);
+                    }
+                    TileKey neighborDemKey = keyAtLevel(neighborLeaf, neighborDemLevel);
+                    int lcaLevel = commonAncestorLevel(selfDemKey, neighborDemKey);
+                    if (!chosenInit) {
+                        chosenLevel = lcaLevel;
+                        chosenInit = true;
+                    } else {
+                        chosenLevel = std::min(chosenLevel, lcaLevel);  // coarsest across split neighbors
+                    }
+                }
+
+                // Seam feedback: if we still measure a significant gap on this edge, bias one level
+                // coarser for the border band (often eliminates residual cracks on DEM tile borders).
+                if (tile.seamGapMask & edgeBits[dir]) {
+                    chosenLevel = std::max(0, chosenLevel - 1);
+                }
+
+                edgeLevels[dir] = std::clamp(chosenLevel, 0, selfDemLevel);
+            }
+
+            uint32_t packed = packEdgeLevels(edgeLevels[0], edgeLevels[1], edgeLevels[2], edgeLevels[3]);
+            if (tile.demEdgeLevelPack != packed) {
+                tile.demEdgeLevelPack = packed;
+                ++tile.meshRevision;
+            }
         }
     }
     
@@ -1456,6 +1582,7 @@ void GlobeEngine::BuildTileMesh(Tile& tile) {
                                          tile.stitchMask,
                                          tile.skirtMask,
                                          static_cast<int>(tile.demTargetLevel),
+                                         tile.demEdgeLevelPack,
                                          demManager_.get(), config_, true);
     result.meshRevision = tile.meshRevision;
     TileMeshBuilder::UploadToGPU(tile, result);
@@ -2149,6 +2276,7 @@ void GlobeEngine::QueueMeshBuild(const TileKey& key, bool isVisible) {
     request.stitchMask = tile.stitchMask;
     request.skirtMask = tile.skirtMask;
     request.demTargetLevel = static_cast<int>(tile.demTargetLevel);
+    request.demEdgeLevelPack = tile.demEdgeLevelPack;
     request.meshRevision = tile.meshRevision;
     request.priority = isVisible ? Priority::Urgent : Priority::Normal;
     request.score = tile.importance;
@@ -2222,6 +2350,10 @@ void GlobeEngine::PreloadBaseTiles() {
                 Tile& tile = it->second;
                 tile.demTargetLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
                 tile.demEffectiveLevel = tile.demTargetLevel;
+                {
+                    const uint32_t lvl = static_cast<uint32_t>(tile.demTargetLevel);
+                    tile.demEdgeLevelPack = lvl | (lvl << 8) | (lvl << 16) | (lvl << 24);
+                }
                 tile.stitchMask = 0;
                 tile.skirtMask = config_.selectiveSkirts
                     ? static_cast<uint8_t>(Tile::EDGE_NORTH | Tile::EDGE_EAST | Tile::EDGE_SOUTH | Tile::EDGE_WEST)

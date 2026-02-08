@@ -42,6 +42,7 @@ public:
         uint8_t stitchMask,
         uint8_t skirtMask,
         int demTargetLevel,
+        uint32_t demEdgeLevelPack,
         DemManager* demManager,
         const Config& config,
         bool useSharedEBO

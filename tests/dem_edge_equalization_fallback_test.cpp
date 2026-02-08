@@ -93,13 +93,21 @@ int main() {
     }
     demManager.PutGridData(child, MakeEdgeMatchedGrid(demConfig.meshN, 100.0, 220.0));
 
+    // demEdgeLevelPack bytes: N,E,S,W. Force east edge to sample from parent level.
+    const uint32_t demEdgeLevelPack =
+        static_cast<uint32_t>(child.level) |
+        (static_cast<uint32_t>(child.level - 1) << 8) |
+        (static_cast<uint32_t>(child.level) << 16) |
+        (static_cast<uint32_t>(child.level) << 24);
+
     auto result = TileMeshBuilder::Build(
         child,
         extent,
-        Tile::EDGE_EAST,  // Intentional border equalization against coarser edge.
+        0,
         0,
         Tile::EDGE_EAST,
         child.level,
+        demEdgeLevelPack,
         &demManager,
         config,
         false

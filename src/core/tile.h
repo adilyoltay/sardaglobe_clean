@@ -85,6 +85,9 @@ struct Tile {
     uint8_t demTargetLevel = 0;
     // DEM level effectively used by the mesh builder (authoritative level chosen from cache/ancestors).
     uint8_t demEffectiveLevel = 0;
+    // DEM edge-coherence sampling levels (packed 4x uint8, bytes: N,E,S,W).
+    // When non-zero, mesh builder blends border vertices toward these levels to reduce cracks/cliffs.
+    uint32_t demEdgeLevelPack = 0;
     float edgeGapMaxM = 0.0f;
     // Per-edge seam gap (meters), populated by engine seam scan.
     // Order: North, East, South, West.

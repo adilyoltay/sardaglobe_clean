@@ -78,6 +78,7 @@ struct Config {
     size_t demCacheSize = 512;        // Max cached DEM tiles
     int demVisiblePinBudget = 1024;   // Max visible/neighbor DEM keys pinned against eviction
     double demHeightScale = 2.5;      // Height exaggeration (2.5x for visible terrain)
+    int demEdgeBlendSegments = 1;     // Edge coherence blend band (in vertex rings). 0 disables blending.
     bool demDebug = false;            // Enable DEM debug logging
     DisplacementMode terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;  // Single authority
     float skirtDepthNearKm = 0.015f;  // Near-view skirt depth (km, ~15 m)
