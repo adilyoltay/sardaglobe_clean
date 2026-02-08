@@ -705,6 +705,14 @@ void GlobeEngine::Update(double dt, double currentTime) {
         return false;
     };
 
+    auto keyAtLevel = [](TileKey k, int targetLevel) -> TileKey {
+        int lvl = std::clamp(targetLevel, 0, k.level);
+        while (k.level > lvl) {
+            k = k.Parent();
+        }
+        return k;
+    };
+
     for (const TileKey& key : selection.leaves) {
         auto it = tiles_.find(key);
         if (it == tiles_.end()) continue;
@@ -903,6 +911,29 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 revisionChanged = true;
                 tile.demPending = false;
                 ++demTriggeredMeshRebuilds_;
+            }
+        }
+
+        // If DEM coherence policy locked this tile to an ancestor level (demTargetLevel),
+        // make sure that ancestor DEM tile is actually requested and rebuild once it arrives.
+        //
+        // Without this, the mesh builder may fall back to "whatever is cached" (including an
+        // exact child tile) and adjacent leaves can lift independently, creating large cracks.
+        if (demManager_ && config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
+            TileKey targetDemKey = keyAtLevel(key, static_cast<int>(tile.demTargetLevel));
+            const bool targetIsAncestor = !(targetDemKey == key);
+            if (targetIsAncestor) {
+                demManager_->Request(targetDemKey, /*priority=*/2, /*score=*/tile.importance);
+
+                // Converge: if the coherent target DEM is now cached but the mesh was built using
+                // a different level, schedule a rebuild.
+                if (tile.demUsed &&
+                    tile.demEffectiveLevel != tile.demTargetLevel &&
+                    demManager_->HasData(targetDemKey) &&
+                    !tile.meshPending) {
+                    revisionChanged = true;
+                    ++demTriggeredMeshRebuilds_;
+                }
             }
         }
         

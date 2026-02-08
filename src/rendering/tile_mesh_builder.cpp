@@ -178,13 +178,24 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     DemTileSampler demEdge[4];  // N,E,S,W (resolved on self's ancestor chain for determinism)
 
     int clampedTargetLevel = std::clamp(demTargetLevel >= 0 ? demTargetLevel : key.level, 0, key.level);
+    TileKey desiredInteriorKey = KeyAtLevel(key, clampedTargetLevel);
     if (demManager && config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
         hasExactDemTile = demManager->HasData(key);
 
-        const TileKey desiredInteriorKey = KeyAtLevel(key, clampedTargetLevel);
         if (ResolveDemSampler(desiredInteriorKey, demManager, demInterior)) {
             demSamplingEnabled = true;
             authoritativeLevel = demInterior.key.level;
+        } else {
+            // Coherence target (demTargetLevel) may be an ancestor key that isn't cached yet,
+            // even when we already have exact child DEM. Never bake "flat" in that case:
+            // fall back to best-available (exact-or-ancestor) on self's chain.
+            //
+            // Engine-side policy will request the coherent ancestor keys and trigger rebuilds
+            // once they arrive.
+            if (ResolveDemSampler(key, demManager, demInterior)) {
+                demSamplingEnabled = true;
+                authoritativeLevel = demInterior.key.level;
+            }
         }
     }
     result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(authoritativeLevel, 0, 255));
