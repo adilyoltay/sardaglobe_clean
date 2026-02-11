@@ -350,6 +350,7 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
     // Default: no heightmap (terrain displacement disabled)
     glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
     glUniform1i(shaderManager_.GetHeightmapLocation(), 1);  // Heightmap on texture unit 1
+    glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
     
     // Wireframe mode
     if (wireframeMode_) {
@@ -406,6 +407,7 @@ void TileRenderer::RenderTileWithTexture(const Tile& tile, uint32_t textureId, f
 
 void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapId,
                                             float heightMin, float heightMax,
+                                            const glm::vec4& heightmapUvTransform,
                                             float terrainMorph) {
     if (!batchActive_) return;
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
@@ -422,9 +424,15 @@ void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapI
         glUniform1i(shaderManager_.GetHasHeightmapLocation(), 1);
         glUniform1f(shaderManager_.GetHeightMinLocation(), heightMin);
         glUniform1f(shaderManager_.GetHeightMaxLocation(), heightMax);
+        glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(),
+                    heightmapUvTransform.x,
+                    heightmapUvTransform.y,
+                    heightmapUvTransform.z,
+                    heightmapUvTransform.w);
         glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     } else {
         glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+        glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
         glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     }
     
@@ -435,6 +443,7 @@ void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapI
     
     // Reset heightmap state for next tile
     glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
     glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
     glActiveTexture(GL_TEXTURE0);  // Reset to default texture unit
     
@@ -451,12 +460,13 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
                                            uint32_t heightmapId,
                                            float heightMin,
                                            float heightMax,
+                                           const glm::vec4& heightmapUvTransform,
                                            float terrainMorph) {
     if (!batchActive_) return;
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
     if (unpopTextureId == 0) {
         if (heightmapId != 0) {
-            RenderTileWithHeightmap(tile, heightmapId, heightMin, heightMax, terrainMorph);
+            RenderTileWithHeightmap(tile, heightmapId, heightMin, heightMax, heightmapUvTransform, terrainMorph);
         } else {
             RenderTile(tile, terrainMorph);
         }
@@ -487,9 +497,15 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
         glUniform1i(shaderManager_.GetHasHeightmapLocation(), 1);
         glUniform1f(shaderManager_.GetHeightMinLocation(), heightMin);
         glUniform1f(shaderManager_.GetHeightMaxLocation(), heightMax);
+        glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(),
+                    heightmapUvTransform.x,
+                    heightmapUvTransform.y,
+                    heightmapUvTransform.z,
+                    heightmapUvTransform.w);
         glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     } else {
         glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+        glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
         glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
     }
 
@@ -499,6 +515,7 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
 
     // Restore defaults for subsequent single-texture draws
     glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
+    glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
     glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
     glUniform1i(shaderManager_.GetRasterCrossfadeLocation(), 0);
     glUniform1f(shaderManager_.GetUnpopBlendLocation(), 1.0f);

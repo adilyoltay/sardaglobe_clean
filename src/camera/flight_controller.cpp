@@ -318,53 +318,94 @@ void FlightController::OnMouseMove(double x, double y, double time) {
             glm::dvec3 origin, dir;
             ScreenToRay(x, y, origin, dir);
             
-            // Calculate target point on sphere at anchor's height
-            // This is where the cursor is pointing on a sphere at anchor height
-            double targetRadius = EARTH_RADIUS_KM + m_panAnchorHeight;
-            
-            // Ray-sphere intersection at anchor height
-            double a = glm::dot(dir, dir);
-            double b = 2.0 * glm::dot(origin, dir);
-            double c = glm::dot(origin, origin) - targetRadius * targetRadius;
-            double disc = b * b - 4.0 * a * c;
-            
+            // Prefer terrain-aware pick (Google Earth parity) when available.
+            // The constant-radius sphere approximation can feel "sticky/slow" at low altitude
+            // because the cursor ray intersects at a different lat/lon than the actual terrain surface.
             glm::dvec3 targetDir;
             bool hasTarget = false;
             
-            if (disc >= 0.0) {
-                double sqrtD = std::sqrt(disc);
-                double t = (-b - sqrtD) / (2.0 * a);
-                if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
-                if (t > 0.0) {
-                    glm::dvec3 targetPoint = origin + dir * t;
-                    targetDir = glm::normalize(targetPoint);
+            glm::dvec3 pickedHit;
+            if (m_pickCallback && m_pickCallback(x, y, pickedHit)) {
+                targetDir = glm::normalize(pickedHit);
+                hasTarget = true;
+            }
+            
+            if (!hasTarget) {
+                // Fallback: intersect a constant-radius sphere at the anchor's height.
+                double targetRadius = EARTH_RADIUS_KM + m_panAnchorHeight;
+                double a = glm::dot(dir, dir);
+                double b = 2.0 * glm::dot(origin, dir);
+                double c = glm::dot(origin, origin) - targetRadius * targetRadius;
+                double disc = b * b - 4.0 * a * c;
+
+                if (disc >= 0.0) {
+                    double sqrtD = std::sqrt(disc);
+                    double t = (-b - sqrtD) / (2.0 * a);
+                    if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
+                    if (t > 0.0) {
+                        glm::dvec3 targetPoint = origin + dir * t;
+                        targetDir = glm::normalize(targetPoint);
+                        hasTarget = true;
+                    }
+                }
+            }
+
+            if (!hasTarget) {
+                // Last resort: base globe intersection (sky drag will fall back elsewhere).
+                glm::dvec3 currentHit;
+                if (RayGlobeIntersect(origin, dir, currentHit)) {
+                    targetDir = glm::normalize(currentHit);
                     hasTarget = true;
                 }
             }
-            
-            // Fallback: use terrain pick or sphere intersection
+
             if (!hasTarget) {
-                glm::dvec3 currentHit;
-                if (m_pickCallback && m_pickCallback(x, y, currentHit)) {
-                    targetDir = glm::normalize(currentHit);
-                    hasTarget = true;
-                } else if (RayGlobeIntersect(origin, dir, currentHit)) {
-                    targetDir = glm::normalize(currentHit);
-                    hasTarget = true;
+                // Cursor ray is off-globe (sky drag). Switch to screen-space pan for the rest of
+                // this drag so navigation doesn't stall near the horizon.
+                m_hasPanAnchor = false;
+
+                // Use an altitude floor so close-to-ground sky-drag does not become unusably slow.
+                double altKm = std::max(GetAltitudeKm(), 1.0);
+                double sensitivity = 0.0002 * m_navSpeed * altKm;
+
+                glm::dvec3 camPos = m_camera.GetPositionECEF();
+                glm::dvec3 up = glm::normalize(camPos);
+                glm::dvec3 fwd, camUp, right;
+                m_camera.GetBasisVectors(fwd, camUp, right);
+
+                glm::dvec3 moveDir = -right * dx + camUp * dy;
+                moveDir = moveDir - up * glm::dot(moveDir, up);
+
+                if (glm::length(moveDir) > 1e-8) {
+                    glm::dvec3 axis = glm::normalize(glm::cross(camPos, moveDir));
+                    double angle = glm::length(moveDir) * sensitivity;
+                    RotateCameraGreatCircle(axis, angle);
+
+                    m_lastPanAxis = axis;
+                    m_lastPanAngle = angle;
+                    m_lastPanTime = time;
                 }
+
+                // Update screen position
+                m_panScreenX = x;
+                m_panScreenY = y;
+                return;
             }
             
             if (hasTarget) {
                 // Calculate rotation to move anchor to target position
-                double cosAngle = glm::dot(m_panAnchorDir, targetDir);
-                cosAngle = std::clamp(cosAngle, -1.0, 1.0);
+                // IMPORTANT: At low altitude, the great-circle angle between two nearby
+                // surface directions can be extremely small (<< 1e-6 rad). Using an
+                // over-aggressive dot() threshold causes pan to "stall" and feel slow.
+                //
+                // Use a stable atan2 formulation instead of acos(dot) with a coarse cutoff.
+                double cosAngle = std::clamp(glm::dot(m_panAnchorDir, targetDir), -1.0, 1.0);
+                glm::dvec3 axis = glm::cross(targetDir, m_panAnchorDir);
+                double axisLen = glm::length(axis);
                 
-                if (cosAngle < 0.9999999) {
-                    double angle = std::acos(cosAngle);
-                    glm::dvec3 axis = glm::cross(targetDir, m_panAnchorDir);
-                    
-                    if (glm::length(axis) > 1e-10) {
-                        axis = glm::normalize(axis);
+                if (axisLen > 1e-12) {
+                    axis /= axisLen;
+                    double angle = std::atan2(axisLen, cosAngle);
                         
                         // Apply rotation to camera
                         RotateCameraGreatCircle(axis, angle);
@@ -377,26 +418,30 @@ void FlightController::OnMouseMove(double x, double y, double time) {
                         // UPDATE ANCHOR DIRECTION after rotation
                         // The anchor should now be under the current cursor position
                         // Recalculate from current cursor to verify stability
-                        glm::dvec3 newOrigin, newDir;
-                        ScreenToRay(x, y, newOrigin, newDir);
-                        
-                        // Intersect at anchor height
-                        a = glm::dot(newDir, newDir);
-                        b = 2.0 * glm::dot(newOrigin, newDir);
-                        c = glm::dot(newOrigin, newOrigin) - targetRadius * targetRadius;
-                        disc = b * b - 4.0 * a * c;
-                        
-                        if (disc >= 0.0) {
-                            double sqrtD = std::sqrt(disc);
-                            double t = (-b - sqrtD) / (2.0 * a);
-                            if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
-                            if (t > 0.0) {
-                                glm::dvec3 newAnchor = newOrigin + newDir * t;
-                                m_panAnchorWorld = newAnchor;
-                                m_panAnchorDir = glm::normalize(newAnchor);
+                        glm::dvec3 newAnchorHit;
+                        if (m_pickCallback && m_pickCallback(x, y, newAnchorHit)) {
+                            m_panAnchorWorld = newAnchorHit;
+                            m_panAnchorDir = glm::normalize(newAnchorHit);
+                            m_panAnchorHeight = glm::length(newAnchorHit) - EARTH_RADIUS_KM;
+                        } else {
+                            glm::dvec3 newOrigin, newDir;
+                            ScreenToRay(x, y, newOrigin, newDir);
+                            double targetRadius = EARTH_RADIUS_KM + m_panAnchorHeight;
+                            double a = glm::dot(newDir, newDir);
+                            double b = 2.0 * glm::dot(newOrigin, newDir);
+                            double c = glm::dot(newOrigin, newOrigin) - targetRadius * targetRadius;
+                            double disc = b * b - 4.0 * a * c;
+                            if (disc >= 0.0) {
+                                double sqrtD = std::sqrt(disc);
+                                double t = (-b - sqrtD) / (2.0 * a);
+                                if (t < 0.0) t = (-b + sqrtD) / (2.0 * a);
+                                if (t > 0.0) {
+                                    glm::dvec3 newAnchor = newOrigin + newDir * t;
+                                    m_panAnchorWorld = newAnchor;
+                                    m_panAnchorDir = glm::normalize(newAnchor);
+                                }
                             }
                         }
-                    }
                 }
             }
             
@@ -406,7 +451,9 @@ void FlightController::OnMouseMove(double x, double y, double time) {
             
         } else {
             // Fallback: screen-space pan (for sky drag)
-            double sensitivity = 0.0002 * m_navSpeed * GetAltitudeKm();
+            // Use an altitude floor so close-to-ground sky-drag does not become unusably slow.
+            double altKm = std::max(GetAltitudeKm(), 1.0);
+            double sensitivity = 0.0002 * m_navSpeed * altKm;
             
             glm::dvec3 camPos = m_camera.GetPositionECEF();
             glm::dvec3 up = glm::normalize(camPos);

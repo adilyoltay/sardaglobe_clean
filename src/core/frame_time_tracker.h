@@ -12,9 +12,12 @@ struct FrameTimings {
     double requestLoopMs = 0.0;
     double schedulerUpdateMs = 0.0;
     double textureUploadMs = 0.0;
+    double demUpdateMs = 0.0;       // DEM pin + update + heightmap upload
+    double edgeMaskMs = 0.0;        // Edge mask + DEM coherence computation
     double meshBuildMs = 0.0;
     double renderMs = 0.0;
     double totalMs = 0.0;
+    int meshRebuildsQueued = 0;     // Mesh rebuilds queued this frame
 };
 
 class FrameTimeTracker {

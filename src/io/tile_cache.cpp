@@ -19,7 +19,7 @@ std::string TileCache::HashUrl(const std::string& url) const {
 
 std::filesystem::path TileCache::GetPath(const TileKey& key, const std::string& urlTemplate) const {
     std::string bucket = HashUrl(urlTemplate);
-    return cacheDir_ / bucket / std::to_string(key.level) / 
+    return cacheDir_ / bucket / std::to_string(key.level) /
            std::to_string(key.x) / (std::to_string(key.y) + ".tile");
 }
 

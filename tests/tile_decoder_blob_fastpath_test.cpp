@@ -70,6 +70,43 @@ int main() {
         failed += !Expect(result.success, "decode result should be successful");
         failed += !Expect(result.width == width && result.height == height, "decoded dimensions should match");
         failed += !Expect(result.pixels == rgba, "decoded pixels should match source");
+        failed += !Expect(!result.hasTransparency, "opaque source should not be flagged transparent");
+        failed += !Expect(!result.mostlyBlackOpaque, "color source should not be flagged mostly black opaque");
+    }
+
+    // Second decode: fully opaque black tile should trigger nodata-black heuristic.
+    done = false;
+    DecodeResult blackResult;
+    const int blackW = 32;
+    const int blackH = 32;
+    std::vector<uint8_t> blackRgba(static_cast<size_t>(blackW * blackH * 4), 0);
+    for (size_t i = 3; i < blackRgba.size(); i += 4) {
+        blackRgba[i] = 255;
+    }
+    std::vector<uint8_t> blackPacked;
+    failed += !Expect(decoded_blob::Pack(blackW, blackH, blackRgba, blackPacked),
+                      "black decoded blob pack should succeed");
+    DecodeRequest blackReq;
+    blackReq.key = TileKey(4, 4, 2);
+    blackReq.data = std::move(blackPacked);
+    blackReq.priority = Priority::Normal;
+    blackReq.score = 1.0;
+    decoder.SetResultCallback([&](DecodeResult r) {
+        std::lock_guard<std::mutex> lock(mutex);
+        blackResult = std::move(r);
+        done = true;
+        cv.notify_one();
+    });
+    decoder.Decode(std::move(blackReq));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        bool signaled = cv.wait_for(lock, std::chrono::seconds(2), [&]() { return done; });
+        failed += !Expect(signaled, "decoder callback should be signaled for black tile");
+    }
+    if (done) {
+        failed += !Expect(blackResult.success, "black decode result should be successful");
+        failed += !Expect(!blackResult.hasTransparency, "opaque black tile should not be flagged transparent");
+        failed += !Expect(blackResult.mostlyBlackOpaque, "opaque black tile should be flagged mostly black");
     }
 
     failed += !Expect(decoder.GetDecodedBlobHits() >= 1, "decoded blob fastpath counter should increment");

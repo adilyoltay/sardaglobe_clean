@@ -134,6 +134,23 @@ target_include_directories(native_globe PRIVATE
 
 target_compile_definitions(native_globe PRIVATE GLFW_INCLUDE_NONE)
 
+# Build info: embed git SHA for quick binary/version verification in the debug UI.
+find_package(Git QUIET)
+set(NATIVE_GLOBE_GIT_SHA "unknown")
+if (GIT_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_SHA_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if (GIT_SHA_OUTPUT)
+    set(NATIVE_GLOBE_GIT_SHA "${GIT_SHA_OUTPUT}")
+  endif()
+endif()
+target_compile_definitions(native_globe PRIVATE NATIVE_GLOBE_GIT_SHA="${NATIVE_GLOBE_GIT_SHA}")
+
 target_link_libraries(native_globe PRIVATE
   glad
   glfw
@@ -152,6 +169,10 @@ endif()
 
 # Tests (FAZ 1.2 + FAZ 6.1)
 enable_testing()
+option(NATIVE_GLOBE_ENABLE_NETWORK_TESTS
+  "Enable network-dependent diagnostics in ctest"
+  OFF
+)
 
 # LOD Conformance Test
 add_executable(lod_conformance_test
@@ -220,6 +241,16 @@ target_include_directories(corner_lod_test PRIVATE
 target_link_libraries(corner_lod_test PRIVATE glm::glm)
 add_test(NAME CornerLodTest COMMAND corner_lod_test)
 
+# Unpop/crossfade policy + UV transform test
+add_executable(unpop_crossfade_policy_test
+  tests/unpop_crossfade_policy_test.cpp
+)
+target_include_directories(unpop_crossfade_policy_test PRIVATE
+  src
+)
+target_link_libraries(unpop_crossfade_policy_test PRIVATE glm::glm)
+add_test(NAME UnpopCrossfadePolicyTest COMMAND unpop_crossfade_policy_test)
+
 # Tile terrain morph timing test
 add_executable(tile_terrain_morph_test
   tests/tile_terrain_morph_test.cpp
@@ -286,6 +317,18 @@ target_include_directories(tile_decoder_blob_fastpath_test PRIVATE
 )
 target_link_libraries(tile_decoder_blob_fastpath_test PRIVATE glm::glm)
 add_test(NAME TileDecoderBlobFastpathTest COMMAND tile_decoder_blob_fastpath_test)
+
+# TileFetcher cancel -> re-request regression test
+add_executable(tile_fetcher_cancel_rerequest_test
+  tests/tile_fetcher_cancel_rerequest_test.cpp
+  src/io/tile_fetcher.cpp
+  src/io/decoded_tile_blob.cpp
+)
+target_include_directories(tile_fetcher_cancel_rerequest_test PRIVATE
+  src
+)
+target_link_libraries(tile_fetcher_cancel_rerequest_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME TileFetcherCancelRerequestTest COMMAND tile_fetcher_cancel_rerequest_test)
 
 # Texture atlas allocator test
 add_executable(texture_atlas_allocator_test
@@ -407,6 +450,18 @@ target_include_directories(lod_child_quorum_test PRIVATE
 target_link_libraries(lod_child_quorum_test PRIVATE glm::glm)
 add_test(NAME LodChildQuorumTest COMMAND lod_child_quorum_test)
 
+# LOD refine budget policy test (progressive LOD transitions)
+add_executable(lod_refine_budget_test
+  tests/lod_refine_budget_test.cpp
+  src/scheduling/lod_selector.cpp
+)
+target_include_directories(lod_refine_budget_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(lod_refine_budget_test PRIVATE glm::glm)
+add_test(NAME LodRefineBudgetTest COMMAND lod_refine_budget_test)
+
 # TilePyramid child-ready policy test
 add_executable(tile_pyramid_child_ready_test
   tests/tile_pyramid_child_ready_test.cpp
@@ -453,6 +508,16 @@ target_include_directories(dem_grid_row_order_test PRIVATE
 target_link_libraries(dem_grid_row_order_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME DemGridRowOrderTest COMMAND dem_grid_row_order_test)
 
+# Adaptive mesh segments policy test
+add_executable(adaptive_mesh_segments_test
+  tests/adaptive_mesh_segments_test.cpp
+)
+target_include_directories(adaptive_mesh_segments_test PRIVATE
+  src
+)
+target_link_libraries(adaptive_mesh_segments_test PRIVATE glm::glm)
+add_test(NAME AdaptiveMeshSegmentsTest COMMAND adaptive_mesh_segments_test)
+
 # Seam metric truth test
 add_executable(seam_metric_truth_test
   tests/seam_metric_truth_test.cpp
@@ -463,6 +528,19 @@ target_include_directories(seam_metric_truth_test PRIVATE
 )
 target_link_libraries(seam_metric_truth_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME SeamMetricTruthTest COMMAND seam_metric_truth_test)
+
+# Tile server connectivity diagnostic test
+add_executable(tile_server_connectivity_test
+  tests/tile_server_connectivity_test.cpp
+)
+target_include_directories(tile_server_connectivity_test PRIVATE
+  src
+)
+target_link_libraries(tile_server_connectivity_test PRIVATE glm::glm CURL::libcurl)
+if (NATIVE_GLOBE_ENABLE_NETWORK_TESTS)
+  add_test(NAME TileServerConnectivityTest COMMAND tile_server_connectivity_test)
+  set_tests_properties(TileServerConnectivityTest PROPERTIES LABELS "network")
+endif()
 
 # Visual parity preset gate test
 add_executable(visual_parity_presets_test

@@ -171,6 +171,23 @@ bool LodSelector::TraverseTile(
         key, cameraPos, viewportHeight,
         fovDegrees_, settings.sseThreshold, settings.tiltFactor
     );
+
+    // Progressive refinement budget (GE-style smoothness):
+    // avoid large one-frame 4x leaf explosions by capping how many parent->child
+    // refinements are applied in one selection pass.
+    const bool refineBudgetEnabled = settings.maxRefinementsPerFrame > 0;
+    const bool refineBudgetReached =
+        refineBudgetEnabled && result.refinedCount >= settings.maxRefinementsPerFrame;
+    if (subdivide && refineBudgetReached) {
+        // Keep parent as leaf for this frame, but request children so data streams in.
+        result.leaves.push_back(key);
+        result.leafSet.insert(key);
+        auto children = key.Children();
+        for (const auto& child : children) {
+            result.required.insert(child);
+        }
+        return true;
+    }
     
     if (!subdivide) {
         // This is a leaf
@@ -219,6 +236,10 @@ bool LodSelector::TraverseTile(
     
     // Traverse children when ready, otherwise request for loading.
     if (childrenReady) {
+        // Count this split before descending so budget checks in descendants
+        // see an up-to-date refinement count in the same frame.
+        ++result.refinedCount;
+
         // NOTE: Do not require all 4 children to be "visible" before refining.
         // That stalls refinement at the horizon and can lock the engine at very
         // coarse LODs (visible in debug as Leaves: 1, Required: ~4 and no new
@@ -236,8 +257,8 @@ bool LodSelector::TraverseTile(
         if (!anyChildVisible) {
             result.leaves.push_back(key);
             result.leafSet.insert(key);
+            --result.refinedCount;
         }
-        result.refinedCount++;
     } else {
         // Child quorum requires *all* children to eventually become ready; otherwise,
         // refinement can deadlock when some children are culled and therefore never

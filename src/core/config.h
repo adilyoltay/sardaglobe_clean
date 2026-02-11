@@ -3,6 +3,7 @@
 #include "constants.h"
 #include <string>
 #include <cstddef>
+#include <algorithm>
 
 namespace globe {
 
@@ -12,12 +13,28 @@ enum class DisplacementMode {
     GPU_HEIGHTMAP_DISPLACE // Flat mesh + GPU vertex shader displacement
 };
 
+// Adaptive mesh segments based on tile zoom level.
+// Higher zoom tiles cover less geographic area → less spherical curvature → fewer segments needed.
+// DEM grid is small (e.g. 5×5), so excessive segments just oversample bilinear interpolation.
+// Formula: halve segments every 2 zoom levels beyond level 1, floor at max(demMeshN-1, 4).
+inline int AdaptiveMeshSegments(int level, int meshSegments, int demMeshN, bool hasDem) {
+    if (!hasDem) return meshSegments;
+    int shift = std::max(0, (level - 1) / 2);
+    int seg = std::max(meshSegments >> shift, std::max(demMeshN - 1, 4));
+    return seg;
+}
+
 // Globe engine configuration
 struct Config {
     // Tile sources
     std::string tileUrl;              // Base tile URL template ({z}/{x}/{y})
+    // Optional HTTP basic auth for raster tiles, format: "user:password".
+    // Prefer setting via env var (see main.cpp) to avoid shell history leaks.
+    std::string tileAuth;
     std::string vectorTileUrl;        // Vector tile URL (optional)
     std::string demUrl;               // Elevation/DEM URL (optional)
+    // Optional HTTP basic auth for DEM endpoint, format: "user:password".
+    std::string demAuth;
     
     // Cache
     std::string cacheDir = "tile_cache";
@@ -36,11 +53,14 @@ struct Config {
     // Rendering
     int windowWidth = 1280;
     int windowHeight = 720;
+    // Create a hidden GLFW window (still creates an OpenGL context). Useful for automated tests.
+    bool headless = false;
     float fovDegrees = DEFAULT_FOV_DEG;
     int meshSegments = 64;            // Mesh subdivision per tile (independent of DEM grid)
     
     // LOD
     float sseThreshold = DEFAULT_SSE_THRESHOLD;
+    int maxRefinementsPerFrame = 0;   // Progressive LOD smoothness budget (<=0 unlimited)
     
     // Resource limits
     int maxTiles = MAX_TILES_IN_MEMORY;

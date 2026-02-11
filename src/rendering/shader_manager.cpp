@@ -184,6 +184,7 @@ void ShaderManager::CacheUniformLocations(uint32_t program) {
     heightMinLoc_ = glGetUniformLocation(program, "uHeightMin");
     heightMaxLoc_ = glGetUniformLocation(program, "uHeightMax");
     hasHeightmapLoc_ = glGetUniformLocation(program, "uHasHeightmap");
+    heightmapUvTransformLoc_ = glGetUniformLocation(program, "uHeightmapUvTransform");
     terrainMorphLoc_ = glGetUniformLocation(program, "uTerrainMorph");
 }
 

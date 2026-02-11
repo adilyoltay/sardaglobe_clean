@@ -22,4 +22,22 @@ inline glm::vec4 CornerLodsFromEdgeMask(uint8_t edgeMask) {
     );
 }
 
+// Build per-corner LOD levels from edge LOD deltas.
+// Inputs are per-edge delta levels (N,E,S,W): tile.level - neighborCoverLevel, clamped >= 0.
+// Returns vec4(NW, NE, SE, SW). These values are fed to textureLod() via bilinear interpolation.
+inline glm::vec4 CornerLodsFromEdgeDeltas(float northDelta, float eastDelta,
+                                          float southDelta, float westDelta) {
+    northDelta = std::max(0.0f, northDelta);
+    eastDelta  = std::max(0.0f, eastDelta);
+    southDelta = std::max(0.0f, southDelta);
+    westDelta  = std::max(0.0f, westDelta);
+
+    return glm::vec4(
+        std::max(northDelta, westDelta),  // NW
+        std::max(northDelta, eastDelta),  // NE
+        std::max(southDelta, eastDelta),  // SE
+        std::max(southDelta, westDelta)   // SW
+    );
+}
+
 } // namespace globe

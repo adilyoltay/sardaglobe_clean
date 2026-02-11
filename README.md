@@ -57,3 +57,25 @@ cmake --build build --config Release
 - Visible tiles are culled using view direction + FOV margin to reduce overdraw.
 - A simple in-app UI (ImGui) provides live controls (zoom, tile radius, cache, vector toggle, camera).
 - Tile server usage policies apply. For production, use your own tile service.
+
+## Automated Test/Debug Modes
+
+### Visual LOD Screenshot Test (exits automatically)
+```bash
+./build/native_globe --headless --test --tile-url https://tile.openstreetmap.org/{z}/{x}/{y}.png --no-dem
+```
+
+### Smoke Test (zoom in/out + terrain pipeline, exits with pass/fail)
+Offline/deterministic (no network):
+```bash
+./build/native_globe --headless --smoke \
+  --tile-url 'ngrd://{z}/{x}/{y}' \
+  --dem-url 'synthetic://'
+```
+
+Latency-injected tiles (streaming stress):
+```bash
+./build/native_globe --headless --smoke \
+  --tile-url 'ngrd://delay=80/{z}/{x}/{y}' \
+  --dem-url 'synthetic://'
+```

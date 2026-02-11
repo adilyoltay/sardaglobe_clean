@@ -292,7 +292,9 @@ void PerspectiveCamera::GetRay(double screenX, double screenY, int screenW, int 
     // Inverse ViewProjection
     glm::dmat4 invVP = glm::inverse(GetViewProjectionMatrix());
     
-    // Ray Start (Near Plane)
+    // Ray Start (Near Plane) - used only to derive direction.
+    // IMPORTANT: Use the camera position as ray origin (not the near-plane point).
+    // Near-plane origin skews picking/pan at low altitude and breaks terrain-aware navigation parity.
     double nearClipZ = m_reverseZ ? 1.0 : -1.0;
     double farClipZ = m_reverseZ ? -1.0 : 1.0;
 
@@ -300,13 +302,19 @@ void PerspectiveCamera::GetRay(double screenX, double screenY, int screenW, int 
     glm::dvec4 rayStartWorld = invVP * rayStartClip;
     rayStartWorld /= rayStartWorld.w;
     
-    // Ray End (Far Plane)
-    glm::dvec4 rayEndClip(ndcX, ndcY, farClipZ, 1.0);
-    glm::dvec4 rayEndWorld = invVP * rayEndClip;
-    rayEndWorld /= rayEndWorld.w;
-    
-    origin = glm::dvec3(rayStartWorld);
-    direction = glm::normalize(glm::dvec3(rayEndWorld) - origin);
+    // Ray origin is the camera ECEF position (km units).
+    origin = LatLonAltToECEF(m_lat, m_lon, m_alt);
+    glm::dvec3 dir = glm::dvec3(rayStartWorld) - origin;
+    double len = glm::length(dir);
+    if (len > 1e-12 && std::isfinite(len)) {
+        direction = dir / len;
+    } else {
+        // Fallback: derive direction from far plane point.
+        glm::dvec4 rayEndClip(ndcX, ndcY, farClipZ, 1.0);
+        glm::dvec4 rayEndWorld = invVP * rayEndClip;
+        rayEndWorld /= rayEndWorld.w;
+        direction = glm::normalize(glm::dvec3(rayEndWorld) - origin);
+    }
 }
 
 bool PerspectiveCamera::ScreenToGeo(double screenX, double screenY, int screenW, int screenH, double& outLon, double& outLat) const {

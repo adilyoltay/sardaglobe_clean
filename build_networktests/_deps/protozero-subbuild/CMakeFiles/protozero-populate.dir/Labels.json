@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/CMakeFiles/protozero-populate"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/CMakeFiles/protozero-populate.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/CMakeFiles/protozero-populate-complete.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-build.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-configure.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-download.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-install.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-mkdir.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-patch.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-test.rule"
+		},
+		{
+			"file" : "/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/protozero-populate-prefix/src/protozero-populate-stamp/protozero-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"protozero-populate"
+		],
+		"name" : "protozero-populate"
+	}
+}

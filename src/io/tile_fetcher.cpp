@@ -1,4 +1,5 @@
 #include "tile_fetcher.h"
+#include "decoded_tile_blob.h"
 #include "../core/constants.h"
 #include "../debug/network_panel.h"
 #include <curl/curl.h>
@@ -6,6 +7,9 @@
 #include <optional>
 #include <cstring>
 #include <chrono>
+#include <algorithm>
+#include <cmath>
+#include <thread>
 
 namespace globe {
 
@@ -49,6 +53,91 @@ bool LooksLikeImage(const std::vector<uint8_t>& data) {
     return false;
 }
 
+bool StartsWith(const std::string& s, const char* prefix) {
+    if (!prefix) return false;
+    size_t n = std::strlen(prefix);
+    return s.size() >= n && s.compare(0, n, prefix) == 0;
+}
+
+// Parses the last 3 unsigned integers found in the URL (tolerates extra path/query segments).
+bool ParseLastZxy(const std::string& url, int& outZ, int& outX, int& outY) {
+    std::vector<int> nums;
+    nums.reserve(8);
+    const char* p = url.c_str();
+    while (*p) {
+        while (*p && (*p < '0' || *p > '9')) {
+            ++p;
+        }
+        if (!*p) break;
+        int v = 0;
+        while (*p && (*p >= '0' && *p <= '9')) {
+            int digit = (*p - '0');
+            if (v > 100000000) {  // avoid overflow; values are expected small anyway
+                return false;
+            }
+            v = v * 10 + digit;
+            ++p;
+        }
+        nums.push_back(v);
+    }
+    if (nums.size() < 3) {
+        return false;
+    }
+    outZ = nums[nums.size() - 3];
+    outX = nums[nums.size() - 2];
+    outY = nums[nums.size() - 1];
+    return true;
+}
+
+// Deterministic, continuous debug tiles. Returns a decoded-blob payload (TileDecoder fast path).
+bool GenerateNgrdTile(int z, int x, int y, std::vector<uint8_t>& outPacked) {
+    constexpr int kSize = 256;
+    constexpr double kMaxMercatorLatDeg = 85.05112878;
+    const double n = std::ldexp(1.0, std::clamp(z, 0, 30));  // 2^z (cap to keep math stable)
+
+    std::vector<uint8_t> rgba(static_cast<size_t>(kSize) * static_cast<size_t>(kSize) * 4u, 0);
+
+    auto clamp255 = [](double v) -> uint8_t {
+        v = std::clamp(v, 0.0, 255.0);
+        return static_cast<uint8_t>(std::lround(v));
+    };
+
+    // IMPORTANT: Match the engine's texture orientation assumptions:
+    // - Tile meshes use v=0 at South and v=1 at North (see TileMeshBuilder: push (u, 1-v)).
+    // - stb_image decoding flips vertically on load, so decoded pixel row0 corresponds to South.
+    // For decoded-blob tiles, we generate row0 as South to match.
+    for (int py = 0; py < kSize; ++py) {
+        // py=0 is bottom row (South)
+        double yTile = static_cast<double>(y) + 1.0 - (static_cast<double>(py) + 0.5) / kSize;
+        double yFrac = yTile / n;
+        double mercY = M_PI * (1.0 - 2.0 * yFrac);
+        double latRad = std::atan(std::sinh(mercY));
+        double latDeg = latRad * 180.0 / M_PI;
+        latDeg = std::clamp(latDeg, -kMaxMercatorLatDeg, kMaxMercatorLatDeg);
+        double lat01 = (latDeg + kMaxMercatorLatDeg) / (2.0 * kMaxMercatorLatDeg);
+
+        for (int px = 0; px < kSize; ++px) {
+            double xTile = static_cast<double>(x) + (static_cast<double>(px) + 0.5) / kSize;
+            double xFrac = xTile / n;
+            double lonDeg = xFrac * 360.0 - 180.0;
+            double lon01 = (lonDeg + 180.0) / 360.0;
+
+            // Smooth global gradient across tile boundaries (no seams).
+            uint8_t r = clamp255(lon01 * 255.0);
+            uint8_t g = clamp255(lat01 * 255.0);
+            uint8_t b = clamp255((static_cast<double>(z) / 22.0) * 255.0);
+
+            size_t idx = (static_cast<size_t>(py) * static_cast<size_t>(kSize) + static_cast<size_t>(px)) * 4u;
+            rgba[idx + 0] = r;
+            rgba[idx + 1] = g;
+            rgba[idx + 2] = b;
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    return decoded_blob::Pack(kSize, kSize, rgba, outPacked);
+}
+
 // Thread-local current key for cancel checks
 static thread_local std::optional<TileKey> tls_currentKey;
 static thread_local CURL* tls_curl = nullptr;
@@ -56,7 +145,8 @@ static thread_local struct curl_slist* tls_headers = nullptr;
 
 } // anonymous namespace
 
-TileFetcher::TileFetcher(int numWorkers) {
+TileFetcher::TileFetcher(int numWorkers, std::string basicAuthUserPwd)
+    : basicAuthUserPwd_(std::move(basicAuthUserPwd)) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     
     workers_.reserve(numWorkers);
@@ -76,16 +166,54 @@ void TileFetcher::SetResultCallback(ResultCallback callback) {
 }
 
 void TileFetcher::Fetch(FetchRequest request) {
+    bool enqueued = false;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        queue_.push(std::move(request));
+        auto betterThan = [](Priority aPri, double aScore, Priority bPri, double bScore) -> bool {
+            if (aPri != bPri) {
+                return static_cast<int>(aPri) > static_cast<int>(bPri);
+            }
+            return aScore > bScore;
+        };
+
+        auto it = bestRanks_.find(request.key);
+        bool better = false;
+        if (it == bestRanks_.end()) {
+            better = true;
+        } else if (betterThan(request.priority, request.score, it->second.priority, it->second.score)) {
+            better = true;
+        }
+
+        if (better) {
+            PendingRank rank;
+            rank.priority = request.priority;
+            rank.score = request.score;
+            rank.seq = ++enqueueSeq_;
+            bestRanks_[request.key] = rank;
+            request.seq = rank.seq;
+
+            // If the key is already being fetched by a worker, don't enqueue a duplicate.
+            // We still update bestRanks_ so the in-flight result can be attributed with the latest rank.
+            if (inFlight_.count(request.key) == 0) {
+                queue_.push(std::move(request));
+                enqueued = true;
+            }
+        }
     }
-    queueCv_.notify_one();
+    if (enqueued) {
+        queueCv_.notify_one();
+    }
 }
 
 void TileFetcher::Cancel(const TileKey& key) {
-    std::lock_guard<std::mutex> lock(cancelMutex_);
-    cancelled_.insert(key);
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        bestRanks_.erase(key);  // Prevent stale queued requests from ever running
+    }
+    {
+        std::lock_guard<std::mutex> lock(cancelMutex_);
+        cancelled_.insert(key);
+    }
 }
 
 void TileFetcher::Shutdown() {
@@ -139,6 +267,8 @@ static void CleanupThreadLocalCurl() {
 void TileFetcher::WorkerLoop() {
     while (running_) {
         FetchRequest request;
+        bool staleQueuedRequest = false;
+        bool duplicateInFlight = false;
         
         {
             std::unique_lock<std::mutex> lock(queueMutex_);
@@ -152,15 +282,49 @@ void TileFetcher::WorkerLoop() {
             // Copy then pop - avoids UB from const_cast + move on priority_queue::top()
             request = queue_.top();
             queue_.pop();
+
+            // Lazy stale-skip: if a newer (higher priority/score) request exists for the same key,
+            // drop this one without doing any work.
+            auto it = bestRanks_.find(request.key);
+            if (it == bestRanks_.end() || request.seq != it->second.seq) {
+                staleQueuedRequest = true;
+            } else if (inFlight_.count(request.key) != 0) {
+                duplicateInFlight = true;
+            } else {
+                // Mark in-flight under the same lock so Fetch() can avoid enqueuing duplicates.
+                inFlight_.insert(request.key);
+            }
+        }
+
+        if (staleQueuedRequest) {
+            // Cancel() clears bestRanks_ before queued requests are popped.
+            // Consume any stale cancel marker so a fresh re-request isn't aborted.
+            std::lock_guard<std::mutex> lock(cancelMutex_);
+            cancelled_.erase(request.key);
+            continue;
+        }
+
+        if (duplicateInFlight) {
+            continue;
         }
         
         // Check if cancelled
+        bool isCancelled = false;
         {
             std::lock_guard<std::mutex> lock(cancelMutex_);
-            if (cancelled_.count(request.key)) {
-                cancelled_.erase(request.key);
-                continue;
+            auto it = cancelled_.find(request.key);
+            if (it != cancelled_.end()) {
+                cancelled_.erase(it);
+                isCancelled = true;
             }
+        }
+
+        if (isCancelled) {
+            // Drop any pending best-rank and clear in-flight marker.
+            std::lock_guard<std::mutex> qlock(queueMutex_);
+            bestRanks_.erase(request.key);
+            inFlight_.erase(request.key);
+            continue;
         }
         
         ++activeCount_;
@@ -200,9 +364,22 @@ void TileFetcher::WorkerLoop() {
         // Network panel: record completion
         NetworkPanel::Instance().RecordComplete(
             request.key, RequestType::RasterTile, result.success,
-            result.httpStatus, result.data.size(), elapsedMs, cacheHit);
+            result.httpStatus, result.data.size(), elapsedMs, cacheHit, result.error);
 
         --activeCount_;
+
+        // Attribute completion with latest rank (in case we were upgraded while in-flight),
+        // and clear per-key bookkeeping.
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            auto it = bestRanks_.find(request.key);
+            if (it != bestRanks_.end()) {
+                result.priority = it->second.priority;
+                result.score = it->second.score;
+                bestRanks_.erase(it);
+            }
+            inFlight_.erase(request.key);
+        }
         
         // Invoke callback
         ResultCallback callbackCopy;
@@ -233,6 +410,45 @@ int TileFetcher::ProgressCallback(void* userp, curl_off_t, curl_off_t, curl_off_
 }
 
 bool TileFetcher::DoFetch(const FetchRequest& request, FetchResult& result) {
+    // Synthetic/debug tile source (offline): "ngrd://{z}/{x}/{y}"
+    // Generates a decoded-blob payload so TileDecoder can skip image codecs.
+    if (StartsWith(request.url, "ngrd://")) {
+        int z = 0, x = 0, y = 0;
+        if (!ParseLastZxy(request.url, z, x, y) || z < 0 || x < 0 || y < 0) {
+            result.httpStatus = 400;
+            result.error = "Invalid ngrd:// URL (expected .../{z}/{x}/{y})";
+            return false;
+        }
+
+        // Optional latency injection for stress-testing streaming (ms).
+        // Example: ngrd://delay=80/{z}/{x}/{y}
+        int delayMs = 0;
+        size_t dpos = request.url.find("delay=");
+        if (dpos != std::string::npos) {
+            dpos += 6;
+            int v = 0;
+            while (dpos < request.url.size() && request.url[dpos] >= '0' && request.url[dpos] <= '9') {
+                v = v * 10 + (request.url[dpos] - '0');
+                ++dpos;
+                if (v > 10000) break;
+            }
+            delayMs = std::clamp(v, 0, 10000);
+        }
+        if (delayMs > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
+
+        std::vector<uint8_t> packed;
+        if (!GenerateNgrdTile(z, x, y, packed)) {
+            result.httpStatus = 500;
+            result.error = "Failed to generate ngrd tile";
+            return false;
+        }
+        result.data = std::move(packed);
+        result.httpStatus = 200;
+        return true;
+    }
+
     CURL* curl = GetThreadLocalCurl();
     if (!curl) {
         result.error = "Failed to init curl";
@@ -260,6 +476,12 @@ bool TileFetcher::DoFetch(const FetchRequest& request, FetchResult& result) {
     // User agent
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36");
+
+    // Optional basic auth (tile endpoints in this project often require it).
+    if (!basicAuthUserPwd_.empty()) {
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERPWD, basicAuthUserPwd_.c_str());
+    }
 
     // Cancel hook
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -300,6 +522,7 @@ bool TileFetcher::DoFetch(const FetchRequest& request, FetchResult& result) {
     }
 
     if (result.httpStatus != 200) {
+        result.error = "HTTP " + std::to_string(result.httpStatus);
         return false;
     }
 

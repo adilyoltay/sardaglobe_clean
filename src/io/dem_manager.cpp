@@ -6,6 +6,7 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <limits>
 
 namespace globe {
@@ -19,6 +20,12 @@ std::string ExtractOrigin(const std::string& url) {
     size_t pathStart = url.find('/', hostStart);
     if (pathStart == std::string::npos) return url;
     return url.substr(0, pathStart);
+}
+
+bool StartsWith(const std::string& s, const char* prefix) {
+    if (!prefix) return false;
+    size_t n = std::strlen(prefix);
+    return s.size() >= n && s.compare(0, n, prefix) == 0;
 }
 
 } // namespace
@@ -381,7 +388,14 @@ void DemManager::WorkerLoop() {
             std::lock_guard<std::mutex> lock(cacheMutex_);
             for (size_t i = 0; i < batch.size() && i < results.size(); ++i) {
                 results[i].lastAccessTime = accessTime;
-                cache_[batch[i]] = std::move(results[i]);
+                // Only cache valid grids; invalid entries must not permanently block retries.
+                if (results[i].valid && !results[i].heights.empty() && results[i].meshN > 1) {
+                    cache_[batch[i]] = std::move(results[i]);
+                } else {
+                    auto failUntil = std::chrono::steady_clock::now() +
+                                     std::chrono::seconds(static_cast<int>(config_.failRetryDelaySec));
+                    failedUntil_[batch[i]] = failUntil;
+                }
             }
         } else {
             // Batch failed — add all tiles to fail TTL
@@ -459,6 +473,65 @@ bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGri
     if (config_.debug) {
         std::cerr << "[DEM] Batch fetch (" << keys.size() << " tiles): " << url << std::endl;
     }
+
+    // Synthetic/offline DEM source: "synthetic://"
+    // Generates a continuous heightfield based on lon/lat (meters) to exercise terrain pipeline.
+    if (StartsWith(config_.baseUrl, "synthetic://")) {
+        outDataVec.clear();
+        outDataVec.reserve(keys.size());
+
+        constexpr double kPi = 3.14159265358979323846;
+        constexpr double kMaxMercatorLatDeg = 85.05112878;
+        const int meshN = std::max(2, config_.meshN);
+
+        for (const TileKey& key : keys) {
+            DemCell cell = BuildDemCell(key);
+            DemGridData data;
+            data.meshN = meshN;
+            data.minHeight = std::numeric_limits<double>::max();
+            data.maxHeight = std::numeric_limits<double>::lowest();
+            data.heights.reserve(static_cast<size_t>(meshN * meshN));
+
+            // Row order must match service semantics (south->north).
+            for (int r = 0; r < meshN; ++r) {
+                double v = (meshN == 1) ? 0.0 : static_cast<double>(r) / static_cast<double>(meshN - 1);
+                double latDeg = cell.lly + (cell.ury - cell.lly) * v;
+                latDeg = std::clamp(latDeg, -kMaxMercatorLatDeg, kMaxMercatorLatDeg);
+                for (int c = 0; c < meshN; ++c) {
+                    double u = (meshN == 1) ? 0.0 : static_cast<double>(c) / static_cast<double>(meshN - 1);
+                    double lonDeg = cell.llx + (cell.urx - cell.llx) * u;
+
+                    // Smooth, low-frequency, longitude-periodic heightfield (meters).
+                    // This is intentionally "well-behaved" so seams/cliffs indicate
+                    // mapping/LOD bugs rather than synthetic data pathology.
+                    double lonRad = lonDeg * kPi / 180.0;
+                    double latRad = latDeg * kPi / 180.0;
+                    double h =
+                        60.0 * std::sin(lonRad) * std::cos(latRad) +
+                        30.0 * std::sin(latRad * 2.0);
+
+                    data.heights.push_back(h);
+                    data.minHeight = std::min(data.minHeight, h);
+                    data.maxHeight = std::max(data.maxHeight, h);
+                }
+            }
+
+            data.valid = (data.heights.size() == static_cast<size_t>(meshN * meshN));
+            outDataVec.push_back(std::move(data));
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+
+        stats_.fetchSuccess++;
+        stats_.parseSuccess++;
+        stats_.totalFetchMs.store(stats_.totalFetchMs.load() + elapsedMs);
+        healthStatus_.store(DemHealthStatus::Healthy);
+
+        NetworkPanel::Instance().RecordComplete(keys[0], RequestType::DemMesh, true, 200,
+                                               /*bytes=*/0, elapsedMs, false, "");
+        return true;
+    }
     
     CURL* curl = curl_easy_init();
     if (!curl) {
@@ -477,6 +550,11 @@ bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGri
     
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36");
+
+    if (!config_.basicAuthUserPwd.empty()) {
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERPWD, config_.basicAuthUserPwd.c_str());
+    }
     
     struct curl_slist* headers = nullptr;
     std::string origin = ExtractOrigin(url);
@@ -528,6 +606,12 @@ bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGri
                 std::cerr << "[DEM] Auth failed " << fails << " times, backoff " 
                           << config_.authBackoffSec << "s" << std::endl;
             }
+        } else {
+            // Only mark unreachable when we were never healthy. Once we have a valid DEM response,
+            // keep health stable so terrain gating does not flicker due to transient network issues.
+            if (healthStatus_.load() != DemHealthStatus::Healthy) {
+                healthStatus_.store(DemHealthStatus::Unreachable);
+            }
         }
         return false;
     }
@@ -538,8 +622,15 @@ bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGri
     bool parsed = ParseBatchResponse(response, static_cast<int>(keys.size()), outDataVec);
     if (parsed) {
         stats_.parseSuccess++;
+        // Recover from startup health-check failures once we have a valid parsed response.
+        // This is critical for terrain-gated rendering: we must not keep mixing flat+terrain
+        // leaves after DEM becomes available.
+        healthStatus_.store(DemHealthStatus::Healthy);
     } else {
         stats_.parseFail++;
+        if (healthStatus_.load() != DemHealthStatus::Healthy) {
+            healthStatus_.store(DemHealthStatus::BadResponse);
+        }
     }
     return parsed;
 }
@@ -566,7 +657,7 @@ DemHealthStatus DemManager::CheckHealth() {
                   << "min=" << cache_[probeKey].minHeight << "m, max=" << cache_[probeKey].maxHeight << "m)" << std::endl;
     } else if (stats_.fetchAuth.load() > 0) {
         status = DemHealthStatus::AuthFailed;
-        std::cerr << "[DEM] Health: AUTH FAILED (401/403) - check Origin/Referer headers" << std::endl;
+        std::cerr << "[DEM] Health: AUTH FAILED (401/403) - provide basic auth (--dem-auth or NATIVE_GLOBE_DEM_AUTH) and check Origin/Referer" << std::endl;
     } else if (stats_.fetchFail.load() > 0) {
         status = DemHealthStatus::Unreachable;
         std::cerr << "[DEM] Health: UNREACHABLE - network/DNS/timeout error" << std::endl;

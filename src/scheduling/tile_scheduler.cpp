@@ -9,7 +9,7 @@ TileScheduler::TileScheduler(const Config& config)
     : config_(config)
     , urlTemplate_(config.tileUrl) {
     
-    fetcher_ = std::make_unique<TileFetcher>(config.maxConcurrentFetches);
+    fetcher_ = std::make_unique<TileFetcher>(config.maxConcurrentFetches, config.tileAuth);
     decoder_ = std::make_unique<TileDecoder>(config.maxConcurrentDecodes);
     if (config.useDecodedMemoryCache) {
         decodedCache_ = std::make_unique<MemoryTileCache>(
@@ -48,17 +48,45 @@ std::string TileScheduler::BuildUrl(const TileKey& key) const {
 }
 
 bool TileScheduler::Request(const TileKey& key, Priority priority, float score) {
-    // Check if already pending
+    auto betterThan = [](Priority aPri, double aScore, Priority bPri, double bScore) -> bool {
+        if (aPri != bPri) {
+            return static_cast<int>(aPri) > static_cast<int>(bPri);
+        }
+        return aScore > bScore;
+    };
+
+    // Check if already pending / apply backpressure.
+    // NOTE: We allow *upgrading* a pending fetch (prefetch -> required/urgent) without clearing
+    // the pending marker. TileFetcher does lazy stale-skip based on per-key rank upgrades.
     {
         std::lock_guard<std::mutex> lock(trackingMutex_);
-        if (pendingFetches_.count(key) || pendingDecodes_.count(key)) {
-            return false;  // Already in progress
+        if (pendingDecodes_.count(key)) {
+            return false;  // Already decoding/uploading; fetch stage is done
         }
-        int inFlight = static_cast<int>(pendingFetches_.size()) + GetActiveFetches();
-        if (inFlight >= config_.maxInFlightFetches && priority != Priority::Urgent) {
-            return false;  // Backpressure for non-urgent requests
+
+        if (pendingFetches_.count(key)) {
+            // Upgrade path: allow bumping rank for keys already queued/fetching.
+            auto it = pendingFetchRanks_.find(key);
+            if (it != pendingFetchRanks_.end()) {
+                if (!betterThan(priority, score, it->second.priority, it->second.score)) {
+                    return false;  // No upgrade
+                }
+            }
+            PendingFetchRank rank;
+            rank.priority = priority;
+            rank.score = score;
+            pendingFetchRanks_[key] = rank;
+        } else {
+            int inFlight = static_cast<int>(pendingFetches_.size()) + GetActiveFetches();
+            if (inFlight >= config_.maxInFlightFetches && priority != Priority::Urgent) {
+                return false;  // Backpressure for non-urgent requests
+            }
+            pendingFetches_.insert(key);
+            PendingFetchRank rank;
+            rank.priority = priority;
+            rank.score = score;
+            pendingFetchRanks_[key] = rank;
         }
-        pendingFetches_.insert(key);
     }
 
     // Queue fetch
@@ -96,6 +124,7 @@ bool TileScheduler::Request(const TileKey& key, Priority priority, float score) 
     if (!fetcher_) {
         std::lock_guard<std::mutex> lock(trackingMutex_);
         pendingFetches_.erase(key);
+        pendingFetchRanks_.erase(key);
         return false;
     }
     fetcher_->Fetch(std::move(req));
@@ -107,6 +136,7 @@ void TileScheduler::Cancel(const TileKey& key) {
     
     std::lock_guard<std::mutex> lock(trackingMutex_);
     pendingFetches_.erase(key);
+    pendingFetchRanks_.erase(key);
 }
 
 void TileScheduler::Update(TileMap& tiles, double currentTime) {
@@ -116,6 +146,15 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
         while (!droppedKeys_.empty()) {
             TileKey key = droppedKeys_.front();
             droppedKeys_.pop();
+
+            // A dropped result means the worker finished, but we lost the completion message.
+            // Clear in-flight markers so the tile can be re-requested immediately (avoids multi-second stalls).
+            {
+                std::lock_guard<std::mutex> tlock(trackingMutex_);
+                pendingFetches_.erase(key);
+                pendingFetchRanks_.erase(key);
+                pendingDecodes_.erase(key);
+            }
             
             auto it = tiles.find(key);
             if (it != tiles.end()) {
@@ -132,9 +171,18 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
                 pendingFetches_.erase(result.key);
+                pendingFetchRanks_.erase(result.key);
             }
             
             if (!result.success) {
+                if (result.httpStatus == 401 || result.httpStatus == 403) {
+                    ++fetchAuthFails_;
+                } else if (result.httpStatus == 429) {
+                    ++fetchRateLimited_;
+                }
+                if (result.httpStatus != 0 && result.httpStatus != 200) {
+                    ++fetchHttpErrors_;
+                }
                 // Mark tile as failed via state machine
                 auto it = tiles.find(result.key);
                 if (it != tiles.end()) {
@@ -205,6 +253,8 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             it->second.pixels = std::move(result.pixels);
             it->second.pixelWidth = result.width;
             it->second.pixelHeight = result.height;
+            it->second.hasTransparentPixels = result.hasTransparency;
+            it->second.mostlyBlackOpaqueRaster = result.mostlyBlackOpaque;
             TileStateMachine::Advance(it->second, TileStateMachine::Event::DecodeOk, currentTime);
             
             // Notify for upload
@@ -313,6 +363,9 @@ TileScheduler::SchedulerStats TileScheduler::GetStats() const {
         stats.decodeBypassHits = static_cast<size_t>(decoder_->GetDecodedBlobHits());
         stats.avgDecodeMs = count > 0 ? (static_cast<double>(totalUs) / 1000.0) / count : 0.0;
     }
+    stats.fetchAuthFails = fetchAuthFails_.load();
+    stats.fetchRateLimited = fetchRateLimited_.load();
+    stats.fetchHttpErrors = fetchHttpErrors_.load();
     return stats;
 }
 

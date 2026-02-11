@@ -55,6 +55,10 @@ public:
         size_t networkFetches = 0;
         double avgFetchMs = 0.0;
         double avgDecodeMs = 0.0;
+        // HTTP failure breakdown (raster)
+        size_t fetchAuthFails = 0;     // 401/403
+        size_t fetchRateLimited = 0;   // 429
+        size_t fetchHttpErrors = 0;    // non-200 HTTP responses
     };
     
     // Queue limits to prevent unbounded memory growth
@@ -112,6 +116,11 @@ private:
     
     // Tracking
     std::unordered_set<TileKey> pendingFetches_;
+    struct PendingFetchRank {
+        Priority priority = Priority::Normal;
+        double score = 0.0;
+    };
+    std::unordered_map<TileKey, PendingFetchRank> pendingFetchRanks_;
     std::unordered_set<TileKey> pendingDecodes_;
     std::mutex trackingMutex_;
     
@@ -127,6 +136,11 @@ private:
     
     // Recent fetch fail counter (reset periodically)
     std::atomic<size_t> recentFetchFails_{0};
+
+    // Raster HTTP telemetry (cumulative)
+    std::atomic<size_t> fetchAuthFails_{0};
+    std::atomic<size_t> fetchRateLimited_{0};
+    std::atomic<size_t> fetchHttpErrors_{0};
 
     // URL template (regex-free)
     TileUrlTemplate urlTemplate_;

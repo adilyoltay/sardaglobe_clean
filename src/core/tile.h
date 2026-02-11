@@ -60,6 +60,8 @@ struct Tile {
     std::vector<uint8_t> pixels;
     int pixelWidth = 0;
     int pixelHeight = 0;
+    bool hasTransparentPixels = false;
+    bool mostlyBlackOpaqueRaster = false;
     
     // Mesh
     uint32_t vao = 0;

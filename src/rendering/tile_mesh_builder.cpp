@@ -3,6 +3,7 @@
 #include "../core/ellipsoid.h"
 #include <glad/glad.h>
 #include <cmath>
+#include <array>
 #include <algorithm>
 #include <limits>
 
@@ -132,9 +133,11 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(demTargetLevel, 0, 255));
     (void)edgeMask;  // Edge equalization is now driven by demEdgeLevelPack + blend band.
     
-    // Use more segments for terrain mesh when DEM is enabled
-    // Match segments to DEM grid: demMeshN points = demMeshN-1 segments
-    const int segments = demManager ? std::max(config.meshSegments, config.demMeshN - 1) : config.meshSegments;
+    // Adaptive mesh segments: scale tessellation with tile LOD level.
+    // Higher zoom tiles cover less area (less curvature) and DEM grid is small (e.g. 5×5),
+    // so fewer segments suffice. This prevents the "sudden extreme resolution" jump
+    // when zooming close to terrain (64 segments for every tile = 8K triangles each).
+    const int segments = AdaptiveMeshSegments(key.level, config.meshSegments, config.demMeshN, demManager != nullptr);
     const int vertexCount = (segments + 1) * (segments + 1);
     const int indexCount = segments * segments * 6;
     result.segments = segments;
@@ -425,15 +428,48 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         return edgeLevel;
     };
 
+    // Avoid DemManager::SampleHeightDetailed() per-vertex (mutex + parent-walk).
+    // Resolve a small set of DEM grid samplers per target level, then bilinear-sample locally.
+    struct NormalSamplerEntry {
+        int level = -1;
+        DemTileSampler sampler;
+    };
+    std::array<NormalSamplerEntry, 8> normalSamplers;
+    int normalSamplerCount = 0;
+
+    auto getNormalSampler = [&](int lvl) -> const DemTileSampler* {
+        lvl = std::clamp(lvl, 0, key.level);
+        for (int i = 0; i < normalSamplerCount; ++i) {
+            if (normalSamplers[i].level == lvl) {
+                return &normalSamplers[i].sampler;
+            }
+        }
+        if (normalSamplerCount >= static_cast<int>(normalSamplers.size())) {
+            return demInterior.valid ? &demInterior : nullptr;
+        }
+
+        NormalSamplerEntry entry;
+        entry.level = lvl;
+        const TileKey desiredKey = KeyAtLevel(key, lvl);
+        ResolveDemSampler(desiredKey, demManager, entry.sampler);
+        normalSamplers[normalSamplerCount] = std::move(entry);
+        ++normalSamplerCount;
+        return &normalSamplers[normalSamplerCount - 1].sampler;
+    };
+
     auto sampleOutsidePosition = [&](double lonDeg, double latDeg, int sampleLevel, glm::dvec3& outPos) -> bool {
         if (!demSamplingEnabled || demManager == nullptr) {
             return false;
         }
-        DemSampleResult sample;
-        if (!demManager->SampleHeightDetailed(lonDeg, latDeg, sampleLevel, sample) || !sample.ok) {
+        const DemTileSampler* sampler = getNormalSampler(sampleLevel);
+        if (!sampler || !sampler->valid) {
             return false;
         }
-        float hKm = static_cast<float>(sample.heightMeters * 0.001 * config.demHeightScale);
+        double meters = 0.0;
+        if (!SampleDemMeters(*sampler, lonDeg, latDeg, meters)) {
+            return false;
+        }
+        float hKm = static_cast<float>(meters * 0.001 * config.demHeightScale);
         outPos = ellipsoid.GeodeticToCartesian(lonDeg, latDeg, hKm);
         return true;
     };

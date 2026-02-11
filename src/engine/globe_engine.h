@@ -66,6 +66,12 @@ public:
     
     // Visual test mode
     void RunVisualLodTest();
+
+    // Smoke test: exercises zoom in/out + tile/DEM pipelines and exits with pass/fail.
+    bool RunSmokeTest();
+
+    // Profile pan at zoom 6-7: prints per-frame timing breakdown to identify bottlenecks.
+    void RunPanProfile();
     
 private:
     // Frame phases (Google Earth style game loop)
@@ -131,6 +137,7 @@ private:
     std::unordered_set<TileKey> currentLeafSet_;
     // Render leaf set with temporal hold (prevents gaps during fast pan/zoom)
     std::unordered_set<TileKey> renderLeafSet_;
+    std::unordered_set<TileKey> prevResetCornerLodKeys_;  // Previous frame's leaf keys for cornerLods cleanup
     std::unordered_map<TileKey, double> lastLeafSeenTime_;
     double leafHoldSeconds_ = 0.5;
     uint64_t leafUnderflowFrames_ = 0;
@@ -151,8 +158,9 @@ private:
     static constexpr int MAX_MESH_REBUILDS_PER_FRAME = 4;
     std::unordered_set<TileKey> rebuildPending_;  // Prevent duplicate queue entries
     
-    void QueueMeshBuild(const TileKey& key, bool isVisible);
-    void ProcessMeshResults();
+    bool QueueMeshBuild(const TileKey& key, bool isVisible);
+    // Returns number of mesh uploads applied this frame (for request-driven frame invalidation).
+    int ProcessMeshResults();
     
     // Frame timing
     double lastFrameTime_ = 0.0;
@@ -205,6 +213,9 @@ private:
         size_t diskCacheWriteFails = 0;
         size_t networkFetches = 0;
         size_t totalFetchRequests = 0;
+        size_t fetchAuthFails = 0;
+        size_t fetchRateLimited = 0;
+        size_t fetchHttpErrors = 0;
         int visibleTiles = 0;
         int currentZoom = 0;
         double altitude = 0.0;
@@ -220,6 +231,13 @@ private:
         int placeholderTiles = 0;   // Last-resort placeholder
         int leafNoMesh = 0;         // Leaves without mesh
         int leafNoTexture = 0;      // Leaves with mesh but no texture
+        int leafNoTerrain = 0;      // Leaves with mesh+texture but missing terrain data (DEM/heightmap)
+        // Render-time child quorum (post-selection): how often we had to collapse children to an ancestor
+        // due to missing render prerequisites (prevents mixed-LOD tearing/cliff walls at joins).
+        int renderQuorumDowngrades = 0;
+        int renderQuorumNoMesh = 0;
+        int renderQuorumNoTexture = 0;
+        int renderQuorumNoTerrain = 0;
         int missingTiles = 0;       // True gaps
         int drawCalls = 0;
         int trianglesRendered = 0;
@@ -238,6 +256,10 @@ private:
         int demFlatLeaves = 0;         // Visible leaves with no DEM baked (flat ellipsoid mesh)
         int demPendingLeaves = 0;      // Visible leaves still awaiting exact DEM rebuild
         int tilesUsingAncestorDem = 0;
+        // GPU heightmap terrain telemetry (only meaningful in GPU heightmap mode).
+        int heightmapCacheSize = 0;
+        int heightmapPendingUploads = 0;
+        int heightmapMissingLeaves = 0;  // Leaves with no exact/ancestor heightmap available.
         double seamGapP95M = 0.0;
         double seamGapMaxM = 0.0;
         int cliffEdgeCount = 0;
@@ -250,7 +272,14 @@ private:
         uint64_t stallFrames = 0;
     };
     DebugStats debugStats_;
+    DisplacementMode lastTerrainMode_ = DisplacementMode::CPU_MESH_BAKE;
     bool showDebugPanel_ = true;
+
+    // Render-time quorum counters (computed during Update; displayed in RenderDebugPanel).
+    int renderQuorumDowngrades_ = 0;
+    int renderQuorumNoMesh_ = 0;
+    int renderQuorumNoTexture_ = 0;
+    int renderQuorumNoTerrain_ = 0;
     double lastFetchFailResetTime_ = 0.0;
     // Request-stall detection
     int prevLeafCount_ = 0;
@@ -275,6 +304,11 @@ private:
     int pivotMvpLoc_ = -1;
     int pivotColorLoc_ = -1;
     int pivotVertexCount_ = 0;
+
+    // Lifecycle guards
+    bool shutdown_ = false;
+    bool glfwInitialized_ = false;
+    bool glReady_ = false;
 };
 
 } // namespace globe

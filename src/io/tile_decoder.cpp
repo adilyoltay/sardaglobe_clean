@@ -7,6 +7,47 @@
 
 namespace globe {
 
+namespace {
+
+bool HasAnyTransparency(const std::vector<uint8_t>& rgba) {
+    // Any non-opaque alpha indicates potential nodata/edge holes that may need ancestor underlay.
+    for (std::size_t i = 3; i < rgba.size(); i += 4) {
+        if (rgba[i] < 255) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsMostlyBlackOpaque(const std::vector<uint8_t>& rgba) {
+    // Detect provider-side opaque black nodata tiles.
+    // We intentionally use a strict threshold to avoid misclassifying dark real imagery.
+    if (rgba.empty()) {
+        return false;
+    }
+    std::size_t opaqueCount = 0;
+    std::size_t blackCount = 0;
+    for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        const uint8_t r = rgba[i + 0];
+        const uint8_t g = rgba[i + 1];
+        const uint8_t b = rgba[i + 2];
+        const uint8_t a = rgba[i + 3];
+        if (a >= 250) {
+            ++opaqueCount;
+            if (r <= 4 && g <= 4 && b <= 4) {
+                ++blackCount;
+            }
+        }
+    }
+    if (opaqueCount < 1024) {
+        return false;
+    }
+    const double ratio = static_cast<double>(blackCount) / static_cast<double>(opaqueCount);
+    return ratio >= 0.995;
+}
+
+} // namespace
+
 TileDecoder::TileDecoder(int numWorkers) {
     stbi_set_flip_vertically_on_load(true);
     
@@ -126,6 +167,8 @@ bool TileDecoder::DoDecode(const DecodeRequest& request, DecodeResult& result) {
 
     // Fast path: pre-decoded RGBA blob from memory cache (skip image codec cost).
     if (decoded_blob::Unpack(request.data, result.width, result.height, result.pixels)) {
+        result.hasTransparency = HasAnyTransparency(result.pixels);
+        result.mostlyBlackOpaque = IsMostlyBlackOpaque(result.pixels);
         decodedBlobHits_.fetch_add(1);
         return true;
     }
@@ -147,6 +190,8 @@ bool TileDecoder::DoDecode(const DecodeRequest& request, DecodeResult& result) {
     size_t size = static_cast<size_t>(result.width) * result.height * 4;
     result.pixels.assign(pixels, pixels + size);
     stbi_image_free(pixels);
+    result.hasTransparency = HasAnyTransparency(result.pixels);
+    result.mostlyBlackOpaque = IsMostlyBlackOpaque(result.pixels);
     
     return true;
 }

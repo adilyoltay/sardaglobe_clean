@@ -1,0 +1,3 @@
+/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/CMakeFiles/protozero-populate.dir
+/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/CMakeFiles/edit_cache.dir
+/Users/adilyoltay/Desktop/native_globe_clean/build_networktests/_deps/protozero-subbuild/CMakeFiles/rebuild_cache.dir

@@ -50,6 +50,12 @@ int main() {
         glm::vec4(1, 1, 1, 1),
         "all edges");
 
+    // Delta-aware corner LOD mapping (supports >1 level differences).
+    failed += !ExpectVec4(CornerLodsFromEdgeDeltas(0, 0, 0, 0), glm::vec4(0, 0, 0, 0), "delta none");
+    failed += !ExpectVec4(CornerLodsFromEdgeDeltas(2, 0, 0, 0), glm::vec4(2, 2, 0, 0), "delta north=2");
+    failed += !ExpectVec4(CornerLodsFromEdgeDeltas(0, 3, 0, 1), glm::vec4(1, 3, 3, 1), "delta east=3 west=1");
+    failed += !ExpectVec4(CornerLodsFromEdgeDeltas(-1, 2, -3, 0), glm::vec4(0, 2, 2, 0), "delta clamp negative");
+
     if (failed == 0) {
         std::cout << "CornerLodTest PASSED\n";
         return 0;

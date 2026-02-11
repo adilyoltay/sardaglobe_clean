@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/tile.h"
+#include "../io/dem_manager.h"
 #include "tile_renderer.h"
 #include "shader_manager.h"
 #include "heightmap_manager.h"
@@ -22,6 +23,7 @@ public:
         int placeholderTiles = 0;   // Last-resort placeholder tiles
         int leafNoMesh = 0;         // Leaves without mesh
         int leafNoTexture = 0;      // Leaves with mesh but no texture
+        int leafNoTerrain = 0;      // Leaves with mesh+texture but missing required terrain data
         int missing = 0;            // True gaps (no ancestor, no mesh)
     };
     
@@ -36,11 +38,13 @@ public:
         const glm::vec3& cameraPos,
         double currentTime,
         float cameraSpeedKmPerSec,
+        bool requireTerrainForLeaves,
         bool useLogDepth,
         float logDepthFarKm,
         bool wireframe,
         uint32_t loadingTexture,  // Placeholder texture ID
-        HeightmapManager* heightmapManager = nullptr  // Optional: GPU terrain displacement
+        HeightmapManager* heightmapManager = nullptr,  // Optional: GPU terrain displacement
+        DemManager* demManager = nullptr               // Optional: DEM coverage for terrain gating
     );
 
 private:

@@ -42,6 +42,7 @@ public:
     // Render a tile with heightmap for terrain displacement
     void RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapId, 
                                   float heightMin, float heightMax,
+                                  const glm::vec4& heightmapUvTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
                                   float terrainMorph = 1.0f);
 
     // Render child tile with shader-level parent/child crossfade (unpop)
@@ -52,6 +53,7 @@ public:
                                  uint32_t heightmapId = 0,
                                  float heightMin = 0.0f,
                                  float heightMax = 0.0f,
+                                 const glm::vec4& heightmapUvTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
                                  float terrainMorph = 1.0f);
 
     // Render flat (no-heightmap/no-crossfade) tiles as a single instanced draw.

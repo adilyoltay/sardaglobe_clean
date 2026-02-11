@@ -58,6 +58,7 @@ public:
     int GetHeightMinLocation() const { return heightMinLoc_; }
     int GetHeightMaxLocation() const { return heightMaxLoc_; }
     int GetHasHeightmapLocation() const { return hasHeightmapLoc_; }
+    int GetHeightmapUvTransformLocation() const { return heightmapUvTransformLoc_; }
     int GetTerrainMorphLocation() const { return terrainMorphLoc_; }
     
     // Use tile shader (default or with flags)
@@ -99,6 +100,7 @@ private:
     int heightMinLoc_ = -1;
     int heightMaxLoc_ = -1;
     int hasHeightmapLoc_ = -1;
+    int heightmapUvTransformLoc_ = -1;
     int terrainMorphLoc_ = -1;
     
     ShaderFlags activeFlags_ = ShaderFlags::None;
@@ -120,6 +122,7 @@ uniform float uHeightScale;
 uniform float uHeightMin;
 uniform float uHeightMax;
 uniform int uHasHeightmap;
+uniform vec4 uHeightmapUvTransform;  // Heightmap UV: uv * scale.xy + offset.zw
 uniform vec4 uCornerLods;  // NW, NE, SE, SW corner LODs for bilinear interpolation
 uniform float uTerrainMorph;  // 0=flat, 1=full displacement
 
@@ -140,8 +143,9 @@ void main() {
         float lodBottom = mix(uCornerLods.w, uCornerLods.z, aTexCoord.x);
         float lodInterp = clamp(mix(lodBottom, lodTop, aTexCoord.y), 0.0, 6.0);
 
+        vec2 hmUv = aTexCoord * uHeightmapUvTransform.xy + uHeightmapUvTransform.zw;
         // Sample heightmap (normalized [0,1])
-        float heightNorm = textureLod(uHeightmap, aTexCoord, lodInterp).r;
+        float heightNorm = textureLod(uHeightmap, hmUv, lodInterp).r;
         float heightKm = mix(uHeightMin, uHeightMax, heightNorm);
         
         // Displace vertex radially outward from Earth center
@@ -150,10 +154,10 @@ void main() {
         // Recalculate normal from heightmap gradient (finite difference)
         float lodScale = exp2(lodInterp);
         vec2 texelSize = lodScale / vec2(textureSize(uHeightmap, 0));
-        float hL = textureLod(uHeightmap, aTexCoord - vec2(texelSize.x, 0), lodInterp).r;
-        float hR = textureLod(uHeightmap, aTexCoord + vec2(texelSize.x, 0), lodInterp).r;
-        float hD = textureLod(uHeightmap, aTexCoord - vec2(0, texelSize.y), lodInterp).r;
-        float hU = textureLod(uHeightmap, aTexCoord + vec2(0, texelSize.y), lodInterp).r;
+        float hL = textureLod(uHeightmap, hmUv - vec2(texelSize.x, 0), lodInterp).r;
+        float hR = textureLod(uHeightmap, hmUv + vec2(texelSize.x, 0), lodInterp).r;
+        float hD = textureLod(uHeightmap, hmUv - vec2(0, texelSize.y), lodInterp).r;
+        float hU = textureLod(uHeightmap, hmUv + vec2(0, texelSize.y), lodInterp).r;
         
         // Gradient in tangent space
         float dHdx = (hR - hL) * (uHeightMax - uHeightMin) * 0.5;

@@ -85,6 +85,8 @@ struct DemStats {
 // DEM Manager configuration
 struct DemManagerConfig {
     std::string baseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
+    // Optional HTTP basic auth, format: "user:password"
+    std::string basicAuthUserPwd;
     int meshN = 5;                    // Grid resolution per tile
     size_t cacheSize = 256;           // Max cached tiles
     double heightScale = 0.001;       // Meters to world units (km)

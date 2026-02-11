@@ -1,74 +1,13 @@
 #include "render_frame.h"
+#include "unpop_crossfade.h"
 #include <glad/glad.h>
 #include <algorithm>
-#include <cmath>
-#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
 namespace globe {
 
 namespace {
-
-constexpr float kUnpopShortenStartKmPerSec = 120.0f;
-constexpr float kUnpopBypassKmPerSec = 900.0f;
-constexpr float kUnpopMinDurationSec = 0.08f;
-constexpr float kFadeCompleteEpsilon = 0.999f;
-
-float ComputeUnpopDurationSec(float cameraSpeedKmPerSec) {
-    float speed = std::max(0.0f, cameraSpeedKmPerSec);
-    if (!std::isfinite(speed)) {
-        speed = 0.0f;
-    }
-    if (speed <= kUnpopShortenStartKmPerSec) {
-        return Tile::FADE_DURATION;
-    }
-    if (speed >= kUnpopBypassKmPerSec) {
-        return kUnpopMinDurationSec;
-    }
-    float t = (speed - kUnpopShortenStartKmPerSec) /
-              (kUnpopBypassKmPerSec - kUnpopShortenStartKmPerSec);
-    return Tile::FADE_DURATION + t * (kUnpopMinDurationSec - Tile::FADE_DURATION);
-}
-
-bool ShouldBypassUnpop(float cameraSpeedKmPerSec) {
-    float speed = std::max(0.0f, cameraSpeedKmPerSec);
-    return std::isfinite(speed) && speed >= kUnpopBypassKmPerSec;
-}
-
-glm::vec4 ComputeUnpopUvTransform(const TileKey& leaf, const TileKey& ancestor) {
-    if (ancestor.level >= leaf.level) {
-        return glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
-    }
-
-    int delta = leaf.level - ancestor.level;
-    float scale = std::ldexp(1.0f, -delta);  // 1 / (2^delta)
-    std::int64_t factor = static_cast<std::int64_t>(1) << delta;
-    std::int64_t relX = static_cast<std::int64_t>(leaf.x) -
-                        static_cast<std::int64_t>(ancestor.x) * factor;
-    std::int64_t relY = static_cast<std::int64_t>(leaf.y) -
-                        static_cast<std::int64_t>(ancestor.y) * factor;
-    // IMPORTANT: Our tile UV convention is OpenGL-style with V=0 at the south (bottom)
-    // and V=1 at the north (top). TileKey.y, however, increases southward.
-    // Convert relY (north-origin) into a south-origin offset so parent→child mapping is correct.
-    std::int64_t relYFromSouth = (factor - 1) - relY;
-    return glm::vec4(scale, scale,
-                     static_cast<float>(relX) * scale,
-                     static_cast<float>(relYFromSouth) * scale);
-}
-
-glm::vec4 ComposeUvTransform(const glm::vec4& outerTransform, const glm::vec4& innerTransform) {
-    // Apply "inner" first, then "outer":
-    // uv1 = uv * inner.xy + inner.zw
-    // uv2 = uv1 * outer.xy + outer.zw
-    // -> uv2 = uv * (inner.xy * outer.xy) + (inner.zw * outer.xy + outer.zw)
-    return glm::vec4(
-        innerTransform.x * outerTransform.x,
-        innerTransform.y * outerTransform.y,
-        innerTransform.z * outerTransform.x + outerTransform.z,
-        innerTransform.w * outerTransform.y + outerTransform.w
-    );
-}
 
 } // namespace
 
@@ -111,11 +50,13 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     const glm::vec3& cameraPos,
     double currentTime,
     float cameraSpeedKmPerSec,
+    bool requireTerrainForLeaves,
     bool useLogDepth,
     float logDepthFarKm,
     bool wireframe,
     uint32_t loadingTexture,
-    HeightmapManager* heightmapManager
+    HeightmapManager* heightmapManager,
+    DemManager* demManager
 ) {
     TileDrawStats stats;
     const float fadeDurationSec = ComputeUnpopDurationSec(cameraSpeedKmPerSec);
@@ -138,12 +79,75 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     
     renderableLeaves.reserve(leafSet.size());
 
+    auto hasAnyHeightmap = [&](const TileKey& key) -> bool {
+        if (!heightmapManager) return false;
+        TileKey probe = key;
+        while (true) {
+            if (heightmapManager->HasTexture(probe)) {
+                return true;
+            }
+            if (probe.level == 0) break;
+            probe = probe.Parent();
+        }
+        return false;
+    };
+
+    auto hasAnyDemCoverage = [&](const TileKey& key) -> bool {
+        if (!demManager) return false;
+        return demManager->HasDataOrAncestor(key);
+    };
+
+    auto findTerrainAncestor = [&](const TileKey& key, bool allowPlaceholder) -> Tile* {
+        if (!requireTerrainForLeaves) {
+            return nullptr;
+        }
+
+        TileKey parentKey = key.Parent();
+        while (parentKey.level >= 0) {
+            auto it = tiles.find(parentKey);
+            if (it != tiles.end()) {
+                Tile& tile = it->second;
+                const bool hasTexture = tile.textureId != 0 &&
+                                        (allowPlaceholder || tile.textureId != loadingTexture);
+                if (tile.hasMesh && hasTexture) {
+                    bool hasTerrain = heightmapManager ? hasAnyHeightmap(parentKey) : tile.demUsed;
+                    if (!hasTerrain) {
+                        const bool terrainExpected = tile.demPending || hasAnyDemCoverage(parentKey);
+                        if (!terrainExpected) {
+                            // No DEM coverage for this region: allow flat ancestor rendering.
+                            hasTerrain = true;
+                        }
+                    }
+                    if (hasTerrain) {
+                        return &tile;
+                    }
+                }
+            }
+            if (parentKey.level == 0) {
+                break;
+            }
+            parentKey = parentKey.Parent();
+        }
+        return nullptr;
+    };
+
     auto addFallbackAncestor = [&](const TileKey& key) -> bool {
-        Tile* ancestor = FindRenderableAncestor(key, tiles, loadingTexture, false);
+        Tile* ancestor = nullptr;
+
+        // When terrain is required, prefer an ancestor that also has terrain data.
+        // Rendering a displaced child against a flat ancestor is the primary source of
+        // visible cliff/wall artifacts at joins.
+        ancestor = findTerrainAncestor(key, /*allowPlaceholder=*/false);
         if (!ancestor) {
-            // Keep coverage continuous while streaming: allow placeholder ancestors
-            // only when no real raster ancestor exists.
-            ancestor = FindRenderableAncestor(key, tiles, loadingTexture, true);
+            ancestor = findTerrainAncestor(key, /*allowPlaceholder=*/true);
+        }
+        if (!ancestor) {
+            ancestor = FindRenderableAncestor(key, tiles, loadingTexture, false);
+            if (!ancestor) {
+                // Keep coverage continuous while streaming: allow placeholder ancestors
+                // only when no real raster ancestor exists.
+                ancestor = FindRenderableAncestor(key, tiles, loadingTexture, true);
+            }
         }
         if (ancestor && fallbackSet.find(ancestor->key) == fallbackSet.end()) {
             fallbackSet.insert(ancestor->key);
@@ -166,8 +170,25 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         
         // Treat loading texture as placeholder-only content.
         // It should not participate in normal leaf rendering or ancestor fallback.
-        const bool hasRealTexture = tile.textureId != 0 && tile.textureId != loadingTexture;
-        bool isRenderable = tile.hasMesh && hasRealTexture;
+        const bool hasRealTexture = tile.textureId != 0 &&
+                                    tile.textureId != loadingTexture &&
+                                    !tile.mostlyBlackOpaqueRaster;
+        bool hasRequiredTerrain = true;
+        if (requireTerrainForLeaves) {
+            if (heightmapManager) {
+                hasRequiredTerrain = hasAnyHeightmap(tile.key);
+            } else {
+                hasRequiredTerrain = tile.demUsed;
+            }
+            if (!hasRequiredTerrain) {
+                const bool terrainExpected = tile.demPending || hasAnyDemCoverage(tile.key);
+                if (!terrainExpected) {
+                    // DEM unavailable for this tile/ancestors: don't block rendering.
+                    hasRequiredTerrain = true;
+                }
+            }
+        }
+        bool isRenderable = tile.hasMesh && hasRealTexture && hasRequiredTerrain;
         
         if (isRenderable) {
             // Leaf is renderable - render with fade
@@ -185,6 +206,13 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             RenderableLeaf leaf;
             leaf.tile = &tile;
             leaf.alpha = alpha;
+
+            // Some providers encode nodata with transparent texels (alpha < 1).
+            // Keep an ancestor underlay beneath such leaves so transparent regions
+            // reveal valid parent imagery instead of the clear color (black gaps/lines).
+            if (tile.hasTransparentPixels) {
+                addFallbackAncestor(key);
+            }
 
             if (alpha < kFadeCompleteEpsilon) {
                 Tile* ancestor = FindRenderableAncestor(key, tiles, loadingTexture, false);
@@ -216,8 +244,10 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             // Leaf not renderable - categorize and find fallback
             if (!tile.hasMesh) {
                 ++stats.leafNoMesh;
-            } else {
+            } else if (!hasRealTexture) {
                 ++stats.leafNoTexture;  // Has mesh but no real texture (or loading placeholder only)
+            } else if (requireTerrainForLeaves && !hasRequiredTerrain) {
+                ++stats.leafNoTerrain;
             }
             
             // GE-Style: Use parent tile until child is ready
@@ -238,6 +268,30 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     auto distanceSqToCamera = [&](const Tile* tile) {
         glm::vec3 delta = tile->center - cameraPos;
         return glm::dot(delta, delta);
+    };
+
+    auto resolveHeightmap = [&](const TileKey& tileKey,
+                                HeightmapTexture& outTex,
+                                glm::vec4& outUvTransform) -> bool {
+        if (!heightmapManager) {
+            return false;
+        }
+        TileKey probe = tileKey;
+        while (true) {
+            HeightmapTexture tex;
+            if (heightmapManager->GetTexture(probe, tex)) {
+                outTex = tex;
+                outUvTransform = (probe == tileKey)
+                    ? glm::vec4(1.0f, 1.0f, 0.0f, 0.0f)
+                    : ComputeUnpopUvTransform(tileKey, probe);
+                return true;
+            }
+            if (probe.level == 0) {
+                break;
+            }
+            probe = probe.Parent();
+        }
+        return false;
     };
 
     // GE P5.2 parity: fallback tiles sorted front-to-back by camera distance.
@@ -322,7 +376,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         glUniform1f(shaderManager_.GetFadeLocation(), 1.0f);
         // Try heightmap rendering if available
         HeightmapTexture hmTex;
-        bool hasHeightmap = heightmapManager && heightmapManager->GetTexture(tile->key, hmTex);
+        glm::vec4 hmUvTransform{1.0f, 1.0f, 0.0f, 0.0f};
+        bool hasHeightmap = resolveHeightmap(tile->key, hmTex, hmUvTransform);
         bool hasTerrainData = hasHeightmap || tile->demUsed;
         float terrainMorph = tile->UpdateTerrainMorph(currentTime, hasTerrainData);
         if (canBatchFlatTile(*tile, hasHeightmap, false)) {
@@ -331,7 +386,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             continue;
         }
         if (hasHeightmap) {
-            tileRenderer_.RenderTileWithHeightmap(*tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight, terrainMorph);
+            tileRenderer_.RenderTileWithHeightmap(*tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight,
+                                                  hmUvTransform, terrainMorph);
         } else {
             tileRenderer_.RenderTile(*tile, tile->demUsed ? terrainMorph : 1.0f);
         }
@@ -345,7 +401,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     InstancedBatchMap leafInstancedBatches;
     for (const RenderableLeaf& leaf : renderableLeaves) {
         HeightmapTexture hmTex;
-        bool hasHeightmap = heightmapManager && heightmapManager->GetTexture(leaf.tile->key, hmTex);
+        glm::vec4 hmUvTransform{1.0f, 1.0f, 0.0f, 0.0f};
+        bool hasHeightmap = resolveHeightmap(leaf.tile->key, hmTex, hmUvTransform);
         bool hasTerrainData = hasHeightmap || leaf.tile->demUsed;
         float terrainMorph = leaf.tile->UpdateTerrainMorph(currentTime, hasTerrainData);
 
@@ -359,6 +416,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 hasHeightmap ? hmTex.textureId : 0,
                 hasHeightmap ? hmTex.minHeight : 0.0f,
                 hasHeightmap ? hmTex.maxHeight : 0.0f,
+                hasHeightmap ? hmUvTransform : glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
                 terrainMorph
             );
         } else {
@@ -369,7 +427,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             }
             glUniform1f(shaderManager_.GetFadeLocation(), leaf.alpha);
             if (hasHeightmap) {
-                tileRenderer_.RenderTileWithHeightmap(*leaf.tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight, terrainMorph);
+                tileRenderer_.RenderTileWithHeightmap(*leaf.tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight,
+                                                      hmUvTransform, terrainMorph);
             } else {
                 tileRenderer_.RenderTile(*leaf.tile, leaf.tile->demUsed ? terrainMorph : 1.0f);
             }

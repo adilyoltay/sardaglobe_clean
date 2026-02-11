@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <cstdint>
 
 namespace globe {
 
@@ -23,6 +24,9 @@ struct FetchRequest {
     std::string url;
     Priority priority = Priority::Normal;
     double score = 0.0;  // SSE score for prioritization
+    // Monotonic sequence used internally for lazy stale-skip on upgrades.
+    // Filled by TileFetcher when enqueuing.
+    uint64_t seq = 0;
     FetchCompleteCallback onComplete;  // Optional per-request callback
     // Optional cache callbacks (executed in worker thread)
     std::function<bool(const TileKey&, std::vector<uint8_t>&)> tryReadCache;
@@ -37,7 +41,11 @@ struct FetchRequestCompare {
             return a.priority < b.priority;
         }
         // Secondary: score (higher score = more important, so reversed)
-        return a.score < b.score;
+        if (a.score != b.score) {
+            return a.score < b.score;
+        }
+        // Tertiary: FIFO for identical rank (lower seq first)
+        return a.seq > b.seq;
     }
 };
 
@@ -66,6 +74,8 @@ struct DecodeResult {
     std::vector<uint8_t> pixels;
     int width = 0;
     int height = 0;
+    bool hasTransparency = false;
+    bool mostlyBlackOpaque = false;
     bool success = false;
     std::string error;
 };

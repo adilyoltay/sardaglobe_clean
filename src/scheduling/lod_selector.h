@@ -31,6 +31,9 @@ public:
         int maxZoom = 22;
         float sseThreshold = 1.4f;
         float tiltFactor = 1.0f;  // 0-1, reduces detail when tilted
+        // Limits how many parent->children refinements can happen in one selection pass.
+        // <=0 means unlimited (legacy behavior).
+        int maxRefinementsPerFrame = 0;
         
         // Neighbor LOD conformance (FAZ 1.2)
         int maxNeighborDelta = 1;      // Max LOD difference between neighbors

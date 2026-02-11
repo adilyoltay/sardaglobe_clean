@@ -8,6 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
 
@@ -27,7 +28,8 @@ class TileFetcher : public ITileFetcher {
 public:
     using ResultCallback = std::function<void(FetchResult)>;
     
-    explicit TileFetcher(int numWorkers = 8);
+    // basicAuthUserPwd: optional HTTP basic auth, format "user:password".
+    explicit TileFetcher(int numWorkers = 8, std::string basicAuthUserPwd = {});
     ~TileFetcher() override;
     
     // Set callback for completed fetches
@@ -53,6 +55,17 @@ private:
     std::priority_queue<FetchRequest, std::vector<FetchRequest>, FetchRequestCompare> queue_;
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
+
+    struct PendingRank {
+        Priority priority = Priority::Normal;
+        double score = 0.0;
+        uint64_t seq = 0;
+    };
+    // Best-known rank per key (enables priority/score upgrades without queue surgery).
+    std::unordered_map<TileKey, PendingRank> bestRanks_;
+    // Keys currently being fetched by a worker (prevents duplicate active transfers on upgrades).
+    std::unordered_set<TileKey> inFlight_;
+    uint64_t enqueueSeq_ = 0;
     
     std::vector<std::thread> workers_;
     std::atomic<bool> running_{true};
@@ -68,6 +81,9 @@ private:
     // Cancellation
     std::unordered_set<TileKey> cancelled_;
     std::mutex cancelMutex_;
+
+    // Optional basic-auth credentials ("user:password")
+    std::string basicAuthUserPwd_;
 };
 
 } // namespace globe
