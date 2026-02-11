@@ -11,6 +11,7 @@
 #include <functional>
 #include <atomic>
 #include <unordered_set>
+#include <list>
 #include <chrono>
 #include <cstdint>
 
@@ -168,9 +169,13 @@ public:
 private:
     Config config_;
     
-    // Cache: TileKey -> DemGridData
+    // Cache: TileKey -> DemGridData with O(1) LRU eviction.
     mutable std::mutex cacheMutex_;
     std::unordered_map<TileKey, DemGridData> cache_;
+    // LRU order: front = most recently used, back = least recently used.
+    mutable std::list<TileKey> lruOrder_;
+    mutable std::unordered_map<TileKey, std::list<TileKey>::iterator> lruIterMap_;
+    void TouchLru(const TileKey& key) const;  // Move key to front of LRU list.
     
     struct DemRequest {
         TileKey key;

@@ -2,6 +2,8 @@
 
 namespace globe {
 
+std::atomic<uint64_t> TileStateMachine::unexpectedTransitions{0};
+
 bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
     TileState currentState = tile.state;
     TileState newState = currentState;
@@ -23,6 +25,9 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
             if (currentState == TileState::Fetching ||
                 currentState == TileState::Scheduled ||
                 currentState == TileState::Decoding) {
+                if (currentState == TileState::Decoding) {
+                    unexpectedTransitions.fetch_add(1, std::memory_order_relaxed);
+                }
                 newState = TileState::Decoding;
             }
             break;

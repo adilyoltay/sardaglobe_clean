@@ -77,11 +77,12 @@ layout(location = 2) in vec4 aTexScaleOffset;  // xy scale, zw offset
 layout(location = 3) in vec4 aInstanceData;    // x: fade
 
 uniform mat4 uMVP;
+uniform int uUseLogDepth;
+uniform float uLogDepthFar;
 
 out vec2 vTexCoord;
 out vec3 vNormal;
 out float vFade;
-out float vViewDepth;
 
 const float PI = 3.14159265358979323846;
 const float WGS84_A_KM = 6378.137;
@@ -112,7 +113,10 @@ void main() {
     );
 
     gl_Position = uMVP * vec4(pos, 1.0);
-    vViewDepth = max(1e-6, gl_Position.w);
+    if (uUseLogDepth == 1) {
+        float Fcoef = 2.0 / log2(max(1.0, uLogDepthFar) + 1.0);
+        gl_Position.z = log2(max(1e-6, gl_Position.w + 1.0)) * Fcoef - 1.0;
+    }
     vNormal = normalize(pos);
     vTexCoord = aGridUv * aTexScaleOffset.xy + aTexScaleOffset.zw;
     vFade = clamp(aInstanceData.x, 0.0, 1.0);
@@ -124,11 +128,8 @@ constexpr char kInstancedFlatTileFragmentShader[] = R"(
 in vec2 vTexCoord;
 in vec3 vNormal;
 in float vFade;
-in float vViewDepth;
 
 uniform sampler2D uTexture;
-uniform int uUseLogDepth;
-uniform float uLogDepthFar;
 
 out vec4 fragColor;
 
@@ -138,13 +139,6 @@ void main() {
     float diff = max(dot(normalize(vNormal), lightDir), 0.3);
     vec3 color = texColor.rgb * diff;
     fragColor = vec4(color, texColor.a * vFade);
-
-    if (uUseLogDepth == 1) {
-        float farVal = max(1.0, uLogDepthFar);
-        float denom = max(1e-6, log2(farVal + 1.0));
-        float logDepth = clamp(log2(vViewDepth + 1.0) / denom, 0.0, 1.0);
-        gl_FragDepth = logDepth;
-    }
 }
 )";
 

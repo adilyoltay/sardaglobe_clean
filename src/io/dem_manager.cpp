@@ -74,6 +74,14 @@ void DemManager::Shutdown() {
     workers_.clear();
 }
 
+void DemManager::TouchLru(const TileKey& key) const {
+    // Move key to front of LRU list (most recently used). Caller must hold cacheMutex_.
+    auto it = lruIterMap_.find(key);
+    if (it != lruIterMap_.end()) {
+        lruOrder_.splice(lruOrder_.begin(), lruOrder_, it->second);
+    }
+}
+
 void DemManager::Request(const TileKey& key, int priority, double score) {
     // Auth backoff check - skip all DEM requests during backoff period
     if (authBackoff_.load()) {
@@ -94,6 +102,8 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
                 return;  // Already have valid data
             }
             // Invalid cached entry must not permanently block retries.
+            auto lruIt = lruIterMap_.find(key);
+            if (lruIt != lruIterMap_.end()) { lruOrder_.erase(lruIt->second); lruIterMap_.erase(lruIt); }
             cache_.erase(it);
         }
         // Check fail TTL - retry if expired
@@ -146,9 +156,7 @@ bool DemManager::HasData(const TileKey& key) const {
     std::lock_guard<std::mutex> lock(cacheMutex_);
     auto it = cache_.find(key);
     if (it != cache_.end() && it->second.valid) {
-        // Update access time for LRU eviction
-        auto now = std::chrono::steady_clock::now();
-        it->second.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+        TouchLru(key);
         return true;
     }
     return false;
@@ -234,9 +242,7 @@ bool DemManager::SampleHeightDetailed(double lonDeg, double latDeg, int level, D
         if (it != cache_.end() && it->second.valid) {
             const DemGridData& data = it->second;
 
-            // Update access time for LRU eviction.
-            auto now = std::chrono::steady_clock::now();
-            data.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+            TouchLru(key);
 
             // Compute UV inside the sampled tile (exact or ancestor).
             double lonLeft = Tile2Lon(sampleX, sampleLevel);
@@ -274,11 +280,7 @@ bool DemManager::GetGridData(const TileKey& key, DemGridData& outData) const {
     if (it == cache_.end() || !it->second.valid) {
         return false;
     }
-    // Touch LRU so grid-based sampling paths don't evict actively-used tiles.
-    {
-        auto now = std::chrono::steady_clock::now();
-        it->second.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
-    }
+    TouchLru(key);
     outData = it->second;
     return true;
 }
@@ -288,11 +290,16 @@ void DemManager::PutGridData(const TileKey& key, const DemGridData& data) {
         return;
     }
     DemGridData copy = data;
-    auto now = std::chrono::steady_clock::now();
-    copy.lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
 
     std::lock_guard<std::mutex> lock(cacheMutex_);
     cache_[key] = std::move(copy);
+    // Insert or move-to-front in LRU list.
+    auto lruIt = lruIterMap_.find(key);
+    if (lruIt != lruIterMap_.end()) {
+        lruOrder_.erase(lruIt->second);
+    }
+    lruOrder_.push_front(key);
+    lruIterMap_[key] = lruOrder_.begin();
 }
 
 void DemManager::SetPinnedTiles(const std::vector<TileKey>& keys) {
@@ -314,26 +321,24 @@ void DemManager::Update() {
     // Process completed requests - cache cleanup
     std::lock_guard<std::mutex> lock(cacheMutex_);
     
-    // Evict least recently used entries if cache is too large
-    while (cache_.size() > config_.cacheSize) {
-        // True LRU among unpinned entries: remove entry with oldest lastAccessTime.
-        double oldestTime = std::numeric_limits<double>::max();
-        TileKey oldestKey;
+    // O(1) LRU eviction: pop from back of LRU list, skip pinned entries.
+    while (cache_.size() > config_.cacheSize && !lruOrder_.empty()) {
+        // Walk from back (oldest) to find first unpinned victim.
         bool foundVictim = false;
-        for (const auto& [key, data] : cache_) {
-            if (pinnedKeys_.count(key) > 0) {
+        for (auto rit = lruOrder_.rbegin(); rit != lruOrder_.rend(); ++rit) {
+            if (pinnedKeys_.count(*rit) > 0) {
                 continue;
             }
-            if (data.lastAccessTime < oldestTime) {
-                oldestTime = data.lastAccessTime;
-                oldestKey = key;
-                foundVictim = true;
-            }
+            TileKey victim = *rit;
+            cache_.erase(victim);
+            lruIterMap_.erase(victim);
+            lruOrder_.erase(std::next(rit).base());
+            foundVictim = true;
+            break;
         }
         if (!foundVictim) {
-            break;  // Everything is pinned; postpone eviction for this frame.
+            break;  // Everything is pinned; postpone eviction.
         }
-        cache_.erase(oldestKey);
     }
 }
 
@@ -387,10 +392,14 @@ void DemManager::WorkerLoop() {
             
             std::lock_guard<std::mutex> lock(cacheMutex_);
             for (size_t i = 0; i < batch.size() && i < results.size(); ++i) {
-                results[i].lastAccessTime = accessTime;
                 // Only cache valid grids; invalid entries must not permanently block retries.
                 if (results[i].valid && !results[i].heights.empty() && results[i].meshN > 1) {
                     cache_[batch[i]] = std::move(results[i]);
+                    // Insert into LRU list (move-to-front if exists).
+                    auto lruIt = lruIterMap_.find(batch[i]);
+                    if (lruIt != lruIterMap_.end()) { lruOrder_.erase(lruIt->second); }
+                    lruOrder_.push_front(batch[i]);
+                    lruIterMap_[batch[i]] = lruOrder_.begin();
                 } else {
                     auto failUntil = std::chrono::steady_clock::now() +
                                      std::chrono::seconds(static_cast<int>(config_.failRetryDelaySec));
@@ -525,7 +534,11 @@ bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGri
 
         stats_.fetchSuccess++;
         stats_.parseSuccess++;
-        stats_.totalFetchMs.store(stats_.totalFetchMs.load() + elapsedMs);
+        { // CAS loop for atomic double accumulation (no fetch_add for double in C++17).
+            double prev = stats_.totalFetchMs.load(std::memory_order_relaxed);
+            while (!stats_.totalFetchMs.compare_exchange_weak(prev, prev + elapsedMs,
+                       std::memory_order_relaxed, std::memory_order_relaxed)) {}
+        }
         healthStatus_.store(DemHealthStatus::Healthy);
 
         NetworkPanel::Instance().RecordComplete(keys[0], RequestType::DemMesh, true, 200,
@@ -580,7 +593,11 @@ bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGri
     // Telemetry
     if (ok) {
         stats_.fetchSuccess++;
-        stats_.totalFetchMs.store(stats_.totalFetchMs.load() + elapsedMs);
+        { // CAS loop for atomic double accumulation.
+            double prev = stats_.totalFetchMs.load(std::memory_order_relaxed);
+            while (!stats_.totalFetchMs.compare_exchange_weak(prev, prev + elapsedMs,
+                       std::memory_order_relaxed, std::memory_order_relaxed)) {}
+        }
     } else {
         stats_.fetchFail++;
         if (res == CURLE_OPERATION_TIMEDOUT) stats_.fetchTimeout++;
@@ -651,8 +668,12 @@ DemHealthStatus DemManager::CheckHealth() {
         // Cache probe result so it's not wasted
         std::lock_guard<std::mutex> lock(cacheMutex_);
         auto now = std::chrono::steady_clock::now();
-        probeResults[0].lastAccessTime = std::chrono::duration<double>(now.time_since_epoch()).count();
         cache_[probeKey] = std::move(probeResults[0]);
+        // Insert into LRU.
+        auto lruIt = lruIterMap_.find(probeKey);
+        if (lruIt != lruIterMap_.end()) { lruOrder_.erase(lruIt->second); }
+        lruOrder_.push_front(probeKey);
+        lruIterMap_[probeKey] = lruOrder_.begin();
         std::cerr << "[DEM] Health: OK (" << cache_[probeKey].heights.size() << " samples, "
                   << "min=" << cache_[probeKey].minHeight << "m, max=" << cache_[probeKey].maxHeight << "m)" << std::endl;
     } else if (stats_.fetchAuth.load() > 0) {

@@ -1191,6 +1191,11 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     }
 
                     if (coarserDelta > 0) {
+                        if (coarserDelta > 1 && config_.edgeStitching) {
+                            std::cerr << "[WARN] Stitch delta > 1 at tile " << key.ToString()
+                                      << " dir=" << dir << " delta=" << coarserDelta
+                                      << " (stitching assumes delta <= 1)" << std::endl;
+                        }
                         newEdgeCoarserMask |= edgeBits[dir];
                         edgeCoarserDelta[dir] = static_cast<float>(coarserDelta);
                         // If stitch-mask topology is enabled, rely on crack-free index stitching

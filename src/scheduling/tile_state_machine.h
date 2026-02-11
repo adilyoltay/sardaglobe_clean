@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/tile.h"
+#include <atomic>
 
 namespace globe {
 
@@ -33,6 +34,10 @@ public:
     
     // Check if transition is valid
     static bool IsValidTransition(TileState from, Event event);
+
+    // Telemetry: count of accepted transitions from unexpected source states
+    // (e.g. FetchOk from Decoding). Non-zero values may indicate pipeline ordering issues.
+    static std::atomic<uint64_t> unexpectedTransitions;
 };
 
 } // namespace globe

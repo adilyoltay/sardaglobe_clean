@@ -1,15 +1,15 @@
 
--- Terrain mode: CPU_MESH_BAKE --
-
-== Scenario: CPU_MESH_BAKE ==
-End camera: lat=40.986233 lon=29.082871 alt=4042904.606315m zoom=3
-Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=5/1/5 quorumDown(max)=0 seamGapMax(max/end)=0.000000/0.000000m cliffs(max/end)=0/0 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=0 leafUnderflow(delta)=0
-
 -- Terrain mode: GPU_HEIGHTMAP --
 
 == Scenario: GPU_HEIGHTMAP ==
-End camera: lat=40.988715 lon=29.073997 alt=4039285.069218m zoom=3
-Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=2/0/2 quorumDown(max)=0 seamGapMax(max/end)=0.000000/0.000000m cliffs(max/end)=0/0 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=0 leafUnderflow(delta)=0
+End camera: lat=39.971763 lon=32.710655 alt=4010777.548421m zoom=3
+Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=115/25/16 quorumDown(max)=124 seamGapMax(max/end)=0.000000/0.000000m cliffs(max/end)=0/0 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=0 leafUnderflow(delta)=0
+
+-- Terrain mode: CPU_MESH_BAKE --
+
+== Scenario: CPU_MESH_BAKE ==
+End camera: lat=40.135776 lon=32.124136 alt=4244446.387278m zoom=3
+Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=47/8/16 quorumDown(max)=140 seamGapMax(max/end)=31.576566/31.066015m cliffs(max/end)=14/8 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=0 leafUnderflow(delta)=0
 
 SMOKE TEST RESULT: PASS
 Report: smoke/smoke_report.txt

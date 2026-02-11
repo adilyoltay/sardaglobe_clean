@@ -695,30 +695,41 @@ void TileMeshBuilder::GenerateSkirts(
         vertices.push_back(h);
     };
     
-    // Add skirt vertices for all 4 edges
-    // North edge (top, iy=0)
-    for (int ix = 0; ix <= segments; ++ix) {
-        addSkirtVertex(ix);
+    // Only generate skirt vertices for edges present in skirtMask (selective skirts).
+    // Dynamic offsets track where each edge's skirt vertices begin in the VBO.
+    unsigned int skirtCursor = mainVertexCount;
+
+    unsigned int northSkirtStart = skirtCursor;
+    if (skirtMask & Tile::EDGE_NORTH) {
+        for (int ix = 0; ix <= segments; ++ix) {
+            addSkirtVertex(ix);
+        }
+        skirtCursor += segments + 1;
     }
-    unsigned int northSkirtStart = mainVertexCount;
-    
-    // South edge (bottom, iy=segments)
-    for (int ix = 0; ix <= segments; ++ix) {
-        addSkirtVertex(segments * (segments + 1) + ix);
+
+    unsigned int southSkirtStart = skirtCursor;
+    if (skirtMask & Tile::EDGE_SOUTH) {
+        for (int ix = 0; ix <= segments; ++ix) {
+            addSkirtVertex(segments * (segments + 1) + ix);
+        }
+        skirtCursor += segments + 1;
     }
-    unsigned int southSkirtStart = northSkirtStart + segments + 1;
-    
-    // West edge (left, ix=0)
-    for (int iy = 0; iy <= segments; ++iy) {
-        addSkirtVertex(iy * (segments + 1));
+
+    unsigned int westSkirtStart = skirtCursor;
+    if (skirtMask & Tile::EDGE_WEST) {
+        for (int iy = 0; iy <= segments; ++iy) {
+            addSkirtVertex(iy * (segments + 1));
+        }
+        skirtCursor += segments + 1;
     }
-    unsigned int westSkirtStart = southSkirtStart + segments + 1;
-    
-    // East edge (right, ix=segments)
-    for (int iy = 0; iy <= segments; ++iy) {
-        addSkirtVertex(iy * (segments + 1) + segments);
+
+    unsigned int eastSkirtStart = skirtCursor;
+    if (skirtMask & Tile::EDGE_EAST) {
+        for (int iy = 0; iy <= segments; ++iy) {
+            addSkirtVertex(iy * (segments + 1) + segments);
+        }
+        skirtCursor += segments + 1;
     }
-    unsigned int eastSkirtStart = westSkirtStart + segments + 1;
     
     // Generate skirt triangles
     auto emitNorth = [&]() {

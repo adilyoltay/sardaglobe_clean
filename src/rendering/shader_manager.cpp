@@ -98,7 +98,6 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     ss << "in vec2 vTexCoord;\n";
     ss << "in vec3 vNormal;\n";
     ss << "in vec3 vWorldPos;\n";
-    ss << "in float vViewDepth;\n";
     ss << "\n";
     ss << "uniform sampler2D uTexture;\n";
     ss << "uniform sampler2D uPhotoTileTextureUnpop;\n";
@@ -107,8 +106,6 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     ss << "uniform vec4 uTexScaleOffsetMain;\n";   // xy=scale, zw=offset
     ss << "uniform vec4 uTexScaleOffsetUnpop;\n";  // xy=scale, zw=offset
     ss << "uniform int uRasterCrossfade;\n";       // 0=single texture, 1=crossfade
-    ss << "uniform int uUseLogDepth;\n";
-    ss << "uniform float uLogDepthFar;\n";
     
     if (HasFlag(flags, ShaderFlags::DebugLOD)) {
         ss << "uniform int uLodLevel;\n";
@@ -153,12 +150,6 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     }
     
     ss << "    fragColor = vec4(color, texColor.a * uFade);\n";
-    ss << "    if (uUseLogDepth == 1) {\n";
-    ss << "        float farVal = max(1.0, uLogDepthFar);\n";
-    ss << "        float denom = max(1e-6, log2(farVal + 1.0));\n";
-    ss << "        float logDepth = clamp(log2(vViewDepth + 1.0) / denom, 0.0, 1.0);\n";
-    ss << "        gl_FragDepth = logDepth;\n";
-    ss << "    }\n";
     ss << "}\n";
     
     return ss.str();

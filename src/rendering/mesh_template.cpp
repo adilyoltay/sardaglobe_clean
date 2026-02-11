@@ -105,6 +105,7 @@ void MeshTemplate::Clear() {
             data.ebo = 0;
         }
     }
+    templates_.clear();
 }
 
 std::vector<unsigned int> MeshTemplate::BuildIndices(
@@ -240,10 +241,17 @@ std::vector<unsigned int> MeshTemplate::BuildIndices(
 
     const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
 
-    unsigned int northSkirtStart = mainVertexCount;
-    unsigned int southSkirtStart = northSkirtStart + segments + 1;
-    unsigned int westSkirtStart = southSkirtStart + segments + 1;
-    unsigned int eastSkirtStart = westSkirtStart + segments + 1;
+    // Dynamic skirt vertex offsets: only edges present in skirtMask have vertices.
+    // Must match the layout in TileMeshBuilder::GenerateSkirts().
+    unsigned int skirtCursor = mainVertexCount;
+    unsigned int northSkirtStart = skirtCursor;
+    if (skirtMask & 0x01) skirtCursor += segments + 1;
+    unsigned int southSkirtStart = skirtCursor;
+    if (skirtMask & 0x04) skirtCursor += segments + 1;
+    unsigned int westSkirtStart = skirtCursor;
+    if (skirtMask & 0x08) skirtCursor += segments + 1;
+    unsigned int eastSkirtStart = skirtCursor;
+    if (skirtMask & 0x02) skirtCursor += segments + 1;
 
     auto appendEdge = [&](uint8_t edgeBit) {
         if ((skirtMask & edgeBit) == 0) {

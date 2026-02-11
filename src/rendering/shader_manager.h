@@ -125,11 +125,12 @@ uniform int uHasHeightmap;
 uniform vec4 uHeightmapUvTransform;  // Heightmap UV: uv * scale.xy + offset.zw
 uniform vec4 uCornerLods;  // NW, NE, SE, SW corner LODs for bilinear interpolation
 uniform float uTerrainMorph;  // 0=flat, 1=full displacement
+uniform int uUseLogDepth;
+uniform float uLogDepthFar;
 
 out vec2 vTexCoord;
 out vec3 vNormal;
 out vec3 vWorldPos;
-out float vViewDepth;
 
 void main() {
     vec3 pos = aPos;
@@ -186,11 +187,15 @@ void main() {
     }
     
     gl_Position = uMVP * vec4(pos, 1.0);
+    // Vertex-shader log-depth: preserves early-Z optimization (no gl_FragDepth write).
+    // Outerra/Brano Kemen technique: encode log2(w+1) into clip-space Z.
+    if (uUseLogDepth == 1) {
+        float Fcoef = 2.0 / log2(max(1.0, uLogDepthFar) + 1.0);
+        gl_Position.z = log2(max(1e-6, gl_Position.w + 1.0)) * Fcoef - 1.0;
+    }
     vTexCoord = aTexCoord;
     vNormal = normal;
     vWorldPos = pos;
-    // In standard perspective projection, clip.w ~= view-space depth magnitude.
-    vViewDepth = max(1e-6, gl_Position.w);
 }
 )";
 
