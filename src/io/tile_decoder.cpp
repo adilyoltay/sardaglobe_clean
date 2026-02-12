@@ -1,7 +1,6 @@
 #include "tile_decoder.h"
 #include "decoded_tile_blob.h"
 
-#define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 #include <chrono>
 
@@ -21,16 +20,21 @@ bool HasAnyTransparency(const std::vector<uint8_t>& rgba) {
 
 bool IsMostlyBlackOpaque(const std::vector<uint8_t>& rgba) {
     // Detect provider-side opaque black nodata tiles.
-    // Two-pass detection:
-    //   1) Per-pixel ratio: >=90% of opaque pixels are near-black (R,G,B <= 10)
-    //   2) Mean brightness fallback: average opaque RGB <= 3.0 (catches tiles with
+    // Three-pass detection:
+    //   1) Per-pixel ratio: >=85% of opaque pixels are near-black (R,G,B <= 20)
+    //      Threshold raised from 10→20 and ratio from 90%→85% to catch JPEG-compressed
+    //      nodata tiles where DCT rounding lifts pure-black values into 1-18 range.
+    //   2) Mean brightness fallback: average opaque RGB <= 8.0 (catches tiles with
     //      thin non-black borders or JPEG artifacts that drop the ratio)
+    //   3) Max channel check: if the brightest pixel is <= 30, the tile is black
+    //      regardless of ratio (catches uniform very-dark tiles).
     if (rgba.empty()) {
         return false;
     }
     std::size_t opaqueCount = 0;
     std::size_t blackCount = 0;
     uint64_t brightnessSum = 0;
+    uint8_t maxChannel = 0;
     for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
         const uint8_t r = rgba[i + 0];
         const uint8_t g = rgba[i + 1];
@@ -39,7 +43,8 @@ bool IsMostlyBlackOpaque(const std::vector<uint8_t>& rgba) {
         if (a >= 250) {
             ++opaqueCount;
             brightnessSum += r + g + b;
-            if (r <= 10 && g <= 10 && b <= 10) {
+            maxChannel = std::max(maxChannel, std::max(r, std::max(g, b)));
+            if (r <= 20 && g <= 20 && b <= 20) {
                 ++blackCount;
             }
         }
@@ -47,14 +52,21 @@ bool IsMostlyBlackOpaque(const std::vector<uint8_t>& rgba) {
     if (opaqueCount < 1024) {
         return false;
     }
-    // Pass 1: ratio check (relaxed from 99.5% to 90% to catch border/artifact tiles)
+    // Pass 1: ratio check (85% of pixels are near-black)
     const double ratio = static_cast<double>(blackCount) / static_cast<double>(opaqueCount);
-    if (ratio >= 0.90) {
+    if (ratio >= 0.85) {
         return true;
     }
     // Pass 2: mean brightness fallback (catches tiles with thin colored borders)
     const double meanBrightness = static_cast<double>(brightnessSum) / (3.0 * static_cast<double>(opaqueCount));
-    return meanBrightness <= 3.0;
+    if (meanBrightness <= 8.0) {
+        return true;
+    }
+    // Pass 3: max channel check (entire tile is uniformly very dark)
+    if (maxChannel <= 30) {
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -185,6 +197,8 @@ bool TileDecoder::DoDecode(const DecodeRequest& request, DecodeResult& result) {
     }
     
     int channels = 0;
+    // Pin flip mode per worker thread to avoid cross-subsystem interference.
+    stbi_set_flip_vertically_on_load_thread(1);
     unsigned char* pixels = stbi_load_from_memory(
         request.data.data(),
         static_cast<int>(request.data.size()),

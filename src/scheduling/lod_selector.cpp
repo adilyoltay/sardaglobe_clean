@@ -81,6 +81,9 @@ LodSelection LodSelector::Select(
             }
         }
     }
+
+    // Save finalized leaf set for next frame's hysteresis check.
+    previousLeafSet_ = result.leafSet;
     
     return result;
 }
@@ -166,10 +169,22 @@ bool LodSelector::TraverseTile(
         return true;
     }
     
-    // Check if should subdivide (SSE test)
+    auto children = key.Children();
+    bool wasRefinedLastFrame = false;
+    if (!previousLeafSet_.empty()) {
+        for (const auto& child : children) {
+            if (previousLeafSet_.count(child)) {
+                wasRefinedLastFrame = true;
+                break;
+            }
+        }
+    }
+
+    // Check if should subdivide (SSE + hysteresis).
     bool subdivide = ShouldSubdivide(
-        key, cameraPos, viewportHeight,
-        fovDegrees_, settings.sseThreshold, settings.tiltFactor
+        key, cameraPos, viewportHeight, fovDegrees_,
+        settings.sseThreshold, settings.tiltFactor,
+        wasRefinedLastFrame, settings.sseHysteresisRatio
     );
 
     // Progressive refinement budget (GE-style smoothness):
@@ -225,7 +240,6 @@ bool LodSelector::TraverseTile(
     // Should subdivide - check if children are ready
     bool childrenReady = AreChildrenReady(key, isReady, settings);
     
-    auto children = key.Children();
     // Keep parent fallback only when children are not ready.
     // If children are ready, retaining a coarse parent can violate neighbor conformance
     // and produce unnecessary mixed-LOD artifacts.
@@ -297,7 +311,9 @@ bool LodSelector::ShouldSubdivide(
     int viewportHeight,
     float fovDegrees,
     float sseThreshold,
-    float tiltFactor
+    float tiltFactor,
+    bool isCurrentlySubdivided,
+    float hysteresisRatio
 ) {
     glm::vec3 center = TileCenterWorld(key);
     float radius = TileBoundingRadius(key);
@@ -315,7 +331,13 @@ bool LodSelector::ShouldSubdivide(
     // Apply tilt factor (reduce detail when tilted)
     // Floor raised to 0.25 (max 4x inflation) to prevent LOD stall at extreme tilt
     float adjustedThreshold = sseThreshold / std::max(0.25f, tiltFactor);
-    
+
+    // Hysteresis: once refined, use a lower collapse threshold to avoid
+    // frame-to-frame oscillation near the boundary.
+    if (isCurrentlySubdivided && hysteresisRatio > 0.0f && hysteresisRatio < 1.0f) {
+        adjustedThreshold *= hysteresisRatio;
+    }
+
     return sse > adjustedThreshold;
 }
 

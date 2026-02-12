@@ -1,4 +1,5 @@
 #include "dem_manager.h"
+#include "terrain_rgb_decoder.h"
 #include "../debug/network_panel.h"
 #include <curl/curl.h>
 #include <cmath>
@@ -6,8 +7,11 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <limits>
+#include <string>
+#include <vector>
 
 namespace globe {
 
@@ -26,6 +30,22 @@ bool StartsWith(const std::string& s, const char* prefix) {
     if (!prefix) return false;
     size_t n = std::strlen(prefix);
     return s.size() >= n && s.compare(0, n, prefix) == 0;
+}
+
+std::string ToLowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+void ReplaceAllInPlace(std::string& text, const std::string& from, const std::string& to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
 }
 
 } // namespace
@@ -50,6 +70,11 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 }
 
 DemManager::DemManager(const Config& config) : config_(config) {
+    sourceType_ = ResolveSourceType(config_);
+    if (sourceType_ != DemSourceType::PirireisBatch) {
+        config_.maxBatchSize = 1;
+    }
+
     // Start worker threads
     int numWorkers = 4;
     workers_.reserve(numWorkers);
@@ -86,29 +111,47 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
     // Auth backoff check - skip all DEM requests during backoff period
     if (authBackoff_.load()) {
         auto now = std::chrono::steady_clock::now();
-        if (now < backoffUntil_) {
-            return;  // Still in backoff period
+        bool stillBackingOff = false;
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            if (now < backoffUntil_) {
+                stillBackingOff = true;
+            } else {
+                authBackoff_.store(false);  // Backoff expired
+                consecutiveAuthFails_.store(0);
+            }
         }
-        authBackoff_.store(false);  // Backoff expired
-        consecutiveAuthFails_.store(0);
+        if (stillBackingOff) {
+            return;
+        }
     }
     
+    TileKey requestKey = key;
+    if (sourceType_ != DemSourceType::PirireisBatch &&
+        config_.maxZoom >= 0 &&
+        requestKey.level > config_.maxZoom) {
+        const int shift = requestKey.level - config_.maxZoom;
+        requestKey.level = config_.maxZoom;
+        requestKey.x >>= shift;
+        requestKey.y >>= shift;
+    }
+
     // Check if already cached or in fail TTL
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
-        coEvictedKeys_.erase(key);
-        auto it = cache_.find(key);
+        coEvictedKeys_.erase(requestKey);
+        auto it = cache_.find(requestKey);
         if (it != cache_.end()) {
             if (it->second.valid) {
                 return;  // Already have valid data
             }
             // Invalid cached entry must not permanently block retries.
-            auto lruIt = lruIterMap_.find(key);
+            auto lruIt = lruIterMap_.find(requestKey);
             if (lruIt != lruIterMap_.end()) { lruOrder_.erase(lruIt->second); lruIterMap_.erase(lruIt); }
             cache_.erase(it);
         }
         // Check fail TTL - retry if expired
-        auto failIt = failedUntil_.find(key);
+        auto failIt = failedUntil_.find(requestKey);
         if (failIt != failedUntil_.end()) {
             auto now = std::chrono::steady_clock::now();
             if (now < failIt->second) {
@@ -124,10 +167,10 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
     // Pending/in-flight dedupe with priority/score upgrade
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        if (inFlightKeys_.count(key) > 0) {
+        if (inFlightKeys_.count(requestKey) > 0) {
             return;  // Worker already fetching this tile.
         }
-        auto it = pendingRanks_.find(key);
+        auto it = pendingRanks_.find(requestKey);
         if (it != pendingRanks_.end()) {
             bool better = (priority > it->second.priority) ||
                           (priority == it->second.priority && score > it->second.score);
@@ -139,11 +182,11 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
         rank.priority = priority;
         rank.score = score;
         rank.seq = ++requestSeq_;
-        requestQueue_.push(DemRequest{key, rank.priority, rank.score, rank.seq});
+        requestQueue_.push(DemRequest{requestKey, rank.priority, rank.score, rank.seq});
         if (it == pendingRanks_.end()) {
             pendingCount_++;
         }
-        pendingRanks_[key] = rank;
+        pendingRanks_[requestKey] = rank;
     }
     queueCv_.notify_one();
 }
@@ -463,6 +506,42 @@ void DemManager::WorkerLoop() {
     }
 }
 
+DemSourceType DemManager::ResolveSourceType(const Config& config) {
+    if (config.sourceType != DemSourceType::Auto) {
+        return config.sourceType;
+    }
+
+    const std::string lowerUrl = ToLowerAscii(config.baseUrl);
+    const bool hasTileTemplate = lowerUrl.find("{z}") != std::string::npos &&
+                                 lowerUrl.find("{x}") != std::string::npos &&
+                                 lowerUrl.find("{y}") != std::string::npos;
+    if (!hasTileTemplate) {
+        return DemSourceType::PirireisBatch;
+    }
+
+    if (lowerUrl.find("terrarium") != std::string::npos) {
+        return DemSourceType::TerrainRGBTerrarium;
+    }
+
+    return DemSourceType::TerrainRGBMapbox;
+}
+
+std::string DemManager::BuildTerrainRGBUrl(const TileKey& key, int effectiveLevel) const {
+    int x = key.x;
+    int y = key.y;
+    if (effectiveLevel < key.level) {
+        const int shift = key.level - effectiveLevel;
+        x >>= shift;
+        y >>= shift;
+    }
+
+    std::string url = config_.baseUrl;
+    ReplaceAllInPlace(url, "{z}", std::to_string(effectiveLevel));
+    ReplaceAllInPlace(url, "{x}", std::to_string(x));
+    ReplaceAllInPlace(url, "{y}", std::to_string(y));
+    return url;
+}
+
 std::string DemManager::BuildBatchUrl(const std::vector<DemCell>& cells) const {
     std::ostringstream oss;
     oss.setf(std::ios::fixed);
@@ -504,7 +583,144 @@ DemCell DemManager::BuildDemCell(const TileKey& key) const {
     return cell;
 }
 
+bool DemManager::FetchTerrainRGBBatch(const std::vector<TileKey>& keys, std::vector<DemGridData>& outDataVec) {
+    outDataVec.clear();
+    outDataVec.resize(keys.size());
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        DemGridData data;
+        if (!FetchSingleTerrainRGB(keys[i], data)) {
+            data.valid = false;
+            data.meshN = std::max(2, config_.meshN);
+        }
+        outDataVec[i] = std::move(data);
+    }
+
+    // Keep batch-level contract "successful" and let per-tile valid flags drive retry TTL.
+    return true;
+}
+
+bool DemManager::FetchSingleTerrainRGB(const TileKey& key, DemGridData& outData) {
+    outData = DemGridData{};
+    const int effectiveLevel = std::min(key.level, std::max(0, config_.maxZoom));
+    const std::string url = BuildTerrainRGBUrl(key, effectiveLevel);
+
+    NetworkPanel::Instance().RecordStart(key, RequestType::DemMesh, url);
+    const auto startTime = std::chrono::high_resolution_clock::now();
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        stats_.fetchFail++;
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, false, 0, 0, 0.0, false, "curl init failed");
+        return false;
+    }
+
+    std::string response;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.timeoutSec);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, config_.connectTimeoutSec);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT,
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36");
+
+    if (!config_.basicAuthUserPwd.empty()) {
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERPWD, config_.basicAuthUserPwd.c_str());
+    }
+
+    struct curl_slist* headers = nullptr;
+    const std::string origin = ExtractOrigin(url);
+    if (!origin.empty()) {
+        headers = curl_slist_append(headers, ("Origin: " + origin).c_str());
+        headers = curl_slist_append(headers, ("Referer: " + origin + "/").c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
+
+    const CURLcode res = curl_easy_perform(curl);
+    long responseCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+    if (headers) {
+        curl_slist_free_all(headers);
+    }
+    curl_easy_cleanup(curl);
+
+    const auto endTime = std::chrono::high_resolution_clock::now();
+    const double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+
+    const bool fetchOk = (res == CURLE_OK && responseCode == 200);
+    if (fetchOk) {
+        stats_.fetchSuccess++;
+        double prev = stats_.totalFetchMs.load(std::memory_order_relaxed);
+        while (!stats_.totalFetchMs.compare_exchange_weak(
+                   prev, prev + elapsedMs, std::memory_order_relaxed, std::memory_order_relaxed)) {}
+    } else {
+        stats_.fetchFail++;
+        if (res == CURLE_OPERATION_TIMEDOUT) stats_.fetchTimeout++;
+        if (responseCode == 401 || responseCode == 403) stats_.fetchAuth++;
+    }
+
+    if (!fetchOk) {
+        if (responseCode == 401 || responseCode == 403) {
+            const int fails = consecutiveAuthFails_.fetch_add(1) + 1;
+            if (fails >= config_.authBackoffThreshold) {
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                authBackoff_.store(true);
+                backoffUntil_ = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(static_cast<int>(config_.authBackoffSec));
+                healthStatus_.store(DemHealthStatus::AuthFailed);
+            }
+        } else if (healthStatus_.load() != DemHealthStatus::Healthy) {
+            healthStatus_.store(DemHealthStatus::Unreachable);
+        }
+
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, false, responseCode, response.size(), elapsedMs, false,
+            curl_easy_strerror(res));
+        return false;
+    }
+
+    consecutiveAuthFails_.store(0);
+
+    const TerrainRGBEncoding encoding =
+        (sourceType_ == DemSourceType::TerrainRGBTerrarium)
+            ? TerrainRGBEncoding::Terrarium
+            : TerrainRGBEncoding::Mapbox;
+
+    std::vector<uint8_t> payload(response.begin(), response.end());
+    std::string decodeError;
+    const bool parsed = DecodeTerrainRGBFromImage(
+        payload, std::max(2, config_.meshN), encoding, outData, &decodeError);
+    if (parsed) {
+        stats_.parseSuccess++;
+        healthStatus_.store(DemHealthStatus::Healthy);
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, true, responseCode, payload.size(), elapsedMs, false, "");
+        return true;
+    }
+
+    stats_.parseFail++;
+    if (healthStatus_.load() != DemHealthStatus::Healthy) {
+        healthStatus_.store(DemHealthStatus::BadResponse);
+    }
+    NetworkPanel::Instance().RecordComplete(
+        key, RequestType::DemMesh, false, responseCode, payload.size(), elapsedMs, false, decodeError);
+    return false;
+}
+
 bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGridData>& outDataVec) {
+    if (keys.empty()) {
+        outDataVec.clear();
+        return true;
+    }
+
+    if (sourceType_ != DemSourceType::PirireisBatch) {
+        return FetchTerrainRGBBatch(keys, outDataVec);
+    }
+
     // Build cells and URL
     std::vector<DemCell> cells;
     cells.reserve(keys.size());
@@ -654,8 +870,9 @@ bool DemManager::FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGri
         if (responseCode == 401 || responseCode == 403) {
             int fails = consecutiveAuthFails_.fetch_add(1) + 1;
             if (fails >= config_.authBackoffThreshold) {
+                std::lock_guard<std::mutex> lock(queueMutex_);
                 authBackoff_.store(true);
-                backoffUntil_ = std::chrono::steady_clock::now() + 
+                backoffUntil_ = std::chrono::steady_clock::now() +
                                 std::chrono::seconds(static_cast<int>(config_.authBackoffSec));
                 healthStatus_.store(DemHealthStatus::AuthFailed);
                 std::cerr << "[DEM] Auth failed " << fails << " times, backoff " 

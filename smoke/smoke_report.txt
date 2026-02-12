@@ -1,16 +1,17 @@
 
--- Terrain mode: GPU_HEIGHTMAP --
-
-== Scenario: GPU_HEIGHTMAP ==
-End camera: lat=39.971763 lon=32.710655 alt=4010777.548421m zoom=3
-Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=115/25/16 quorumDown(max)=124 seamGapMax(max/end)=0.000000/0.000000m cliffs(max/end)=0/0 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=0 leafUnderflow(delta)=0
-
 -- Terrain mode: CPU_MESH_BAKE --
 
 == Scenario: CPU_MESH_BAKE ==
-End camera: lat=40.135776 lon=32.124136 alt=4244446.387278m zoom=3
-Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=47/8/16 quorumDown(max)=140 seamGapMax(max/end)=31.576566/31.066015m cliffs(max/end)=14/8 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=0 leafUnderflow(delta)=0
+End camera: lat=39.496590 lon=32.348948 alt=4000001.467724m zoom=3
+Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=48/39/16 quorumDown(max)=148 seamGapMax(max/end)=12267.113686/7171.570182m cliffs(max/end)=195/113 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=38 leafUnderflow(delta)=0
+FAIL: seamGapMax exceeded 50m (terrain continuity).
 
-SMOKE TEST RESULT: PASS
+-- Terrain mode: GPU_HEIGHTMAP --
+
+== Scenario: GPU_HEIGHTMAP ==
+End camera: lat=39.930000 lon=32.860000 alt=3935364.977851m zoom=3
+Metrics: missing(max)=0 placeholder(max)=0 fetch(p/d/a max)=33/24/16 quorumDown(max)=144 seamGapMax(max/end)=0.000000/0.000000m cliffs(max/end)=0/0 placeholder(end)=0 hmMissing(max/end)=0/0 demFlat(end)=0 demPending(end)=0 leafUnderflow(delta)=0
+
+SMOKE TEST RESULT: FAIL
 Report: smoke/smoke_report.txt
 Screenshots: smoke/*.ppm

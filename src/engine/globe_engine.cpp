@@ -23,6 +23,7 @@
 #include <thread>
 #include <numeric>
 #include <limits>
+#include <cctype>
 
 // ImGui
 #include <imgui.h>
@@ -37,6 +38,27 @@ namespace globe {
 #ifndef NATIVE_GLOBE_GIT_SHA
 #define NATIVE_GLOBE_GIT_SHA "unknown"
 #endif
+
+namespace {
+
+DemSourceType ParseDemSourceType(std::string format) {
+    std::transform(format.begin(), format.end(), format.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+
+    if (format == "pirireis" || format == "batch") {
+        return DemSourceType::PirireisBatch;
+    }
+    if (format == "terrarium") {
+        return DemSourceType::TerrainRGBTerrarium;
+    }
+    if (format == "terrain-rgb" || format == "terrain_rgb" || format == "mapbox") {
+        return DemSourceType::TerrainRGBMapbox;
+    }
+    return DemSourceType::Auto;
+}
+
+} // namespace
 
 GlobeEngine::GlobeEngine(const Config& config)
     : config_(config) {
@@ -129,7 +151,9 @@ bool GlobeEngine::Init() {
         DemManager::Config demConfig;
         demConfig.baseUrl = config_.demUrl.empty() ? config_.demBaseUrl : config_.demUrl;
         demConfig.basicAuthUserPwd = config_.demAuth;
+        demConfig.sourceType = ParseDemSourceType(config_.demFormat);
         demConfig.meshN = config_.demMeshN;
+        demConfig.maxZoom = config_.demMaxZoom;
         demConfig.cacheSize = config_.demCacheSize;
         demConfig.debug = config_.demDebug;
         demConfig.timeoutSec = 30;
@@ -1311,6 +1335,28 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     } else {
                         newSkirtMask |= edgeBits[dir];
                     }
+                } else if (hasDem) {
+                    // FIX: Same-LOD neighbor DEM mismatch skirt.
+                    // When both tiles are at the same LOD level but compute shared border
+                    // vertices from different DEM source tiles, floating-point differences
+                    // in bilinear interpolation produce residual height cracks.
+                    // Add a skirt on edges where DEM state differs.
+                    auto nit = tiles_.find(neighborSame);
+                    if (nit != tiles_.end()) {
+                        const Tile& neighborTile = nit->second;
+                        const Tile& selfTile = it->second;
+                        bool selfHasDem = selfTile.demUsed;
+                        bool neighborHasDem = neighborTile.demUsed;
+                        // One side flat, other side displaced → guaranteed height cliff.
+                        if (selfHasDem != neighborHasDem) {
+                            newSkirtMask |= edgeBits[dir];
+                        }
+                        // Both have DEM but at different effective levels → residual crack.
+                        else if (selfHasDem && neighborHasDem &&
+                                 selfTile.demEffectiveLevel != neighborTile.demEffectiveLevel) {
+                            newSkirtMask |= edgeBits[dir];
+                        }
+                    }
                 }
             }
         }
@@ -1821,6 +1867,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 if (textureManager_) {
                     textureManager_->ReleaseTileResources(tile);
                 }
+                if (tile.vao != 0) {
+                    glDeleteVertexArrays(1, &tile.vao);
+                }
+                if (tile.vbo != 0) {
+                    glDeleteBuffers(1, &tile.vbo);
+                }
+                if (tile.ebo != 0 && tile.ownsEBO) {
+                    glDeleteBuffers(1, &tile.ebo);
+                }
                 demMeshWaitStartSec_.erase(it->first);
                 it = tiles_.erase(it);
                 continue;
@@ -1834,6 +1889,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 }
                 if (textureManager_) {
                     textureManager_->ReleaseTileResources(tile);
+                }
+                if (tile.vao != 0) {
+                    glDeleteVertexArrays(1, &tile.vao);
+                }
+                if (tile.vbo != 0) {
+                    glDeleteBuffers(1, &tile.vbo);
+                }
+                if (tile.ebo != 0 && tile.ownsEBO) {
+                    glDeleteBuffers(1, &tile.ebo);
                 }
                 demMeshWaitStartSec_.erase(it->first);
                 it = tiles_.erase(it);

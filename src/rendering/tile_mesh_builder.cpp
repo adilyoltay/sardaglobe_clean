@@ -219,8 +219,10 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
 
     std::vector<glm::dvec3> positions;
     std::vector<float> heightsKm;
+    std::vector<uint8_t> missingHeightMask;
     positions.reserve(static_cast<size_t>(vertexCount));
     heightsKm.resize(static_cast<size_t>(vertexCount), 0.0f);
+    missingHeightMask.assign(static_cast<size_t>(vertexCount), 0);
 
     int demSourceLevelMin = std::numeric_limits<int>::max();
     int demSourceLevelMax = std::numeric_limits<int>::min();
@@ -360,6 +362,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                     ++demMissingSamples;
                     result.demPending = true;
                     finalH = 0.0f;
+                    missingHeightMask[vertexIndex] = 1;
                 }
                 heightsKm[vertexIndex] = finalH;
 
@@ -372,6 +375,71 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                     result.demUsed = true;
                     demSourceLevelMin = std::min(demSourceLevelMin, srcEdge);
                     demSourceLevelMax = std::max(demSourceLevelMax, srcEdge);
+                }
+            }
+        }
+    }
+
+    if (demSamplingEnabled && demMissingSamples > 0) {
+        const int stride = segments + 1;
+        int unresolved = demMissingSamples;
+
+        // Iteratively fill missing vertices from valid 4-neighborhood.
+        for (int pass = 0; pass < 4 && unresolved > 0; ++pass) {
+            int filledThisPass = 0;
+            for (int iy = 0; iy <= segments; ++iy) {
+                for (int ix = 0; ix <= segments; ++ix) {
+                    const size_t idx = static_cast<size_t>(iy * stride + ix);
+                    if (missingHeightMask[idx] == 0) {
+                        continue;
+                    }
+
+                    float sum = 0.0f;
+                    int count = 0;
+                    auto tryNeighbor = [&](int nx, int ny) {
+                        if (nx < 0 || nx > segments || ny < 0 || ny > segments) {
+                            return;
+                        }
+                        const size_t nidx = static_cast<size_t>(ny * stride + nx);
+                        if (missingHeightMask[nidx] == 0) {
+                            sum += heightsKm[nidx];
+                            ++count;
+                        }
+                    };
+
+                    tryNeighbor(ix - 1, iy);
+                    tryNeighbor(ix + 1, iy);
+                    tryNeighbor(ix, iy - 1);
+                    tryNeighbor(ix, iy + 1);
+
+                    if (count > 0) {
+                        heightsKm[idx] = sum / static_cast<float>(count);
+                        missingHeightMask[idx] = 0;
+                        ++filledThisPass;
+                    }
+                }
+            }
+
+            unresolved -= filledThisPass;
+            if (filledThisPass == 0) {
+                break;
+            }
+        }
+
+        if (unresolved > 0) {
+            float globalSum = 0.0f;
+            int globalCount = 0;
+            for (size_t i = 0; i < heightsKm.size(); ++i) {
+                if (missingHeightMask[i] == 0) {
+                    globalSum += heightsKm[i];
+                    ++globalCount;
+                }
+            }
+            const float fallbackHeight = (globalCount > 0) ? (globalSum / static_cast<float>(globalCount)) : 0.0f;
+            for (size_t i = 0; i < heightsKm.size(); ++i) {
+                if (missingHeightMask[i] != 0) {
+                    heightsKm[i] = fallbackHeight;
+                    missingHeightMask[i] = 0;
                 }
             }
         }
@@ -657,14 +725,15 @@ void TileMeshBuilder::GenerateSkirts(
     // Calculate skirt depth based on tile size at this zoom level
     double tileArcKm = 40075.0 / (1 << level);
     double minDepth = std::max(0.001, static_cast<double>(config.skirtDepthNearKm));
-    double maxDepth = std::max(minDepth, static_cast<double>(config.skirtDepthFarKm));
+    double farDepth = std::max(minDepth, static_cast<double>(config.skirtDepthFarKm));
+    double clampMaxDepth = std::max(farDepth, static_cast<double>(config.skirtMaxDepthKm));
     double lodT = std::clamp(tileArcKm / 2500.0, 0.0, 1.0);
-    double skirtDepth = minDepth + (maxDepth - minDepth) * lodT;
+    double skirtDepth = minDepth + (farDepth - minDepth) * lodT;
     if (heightRange > 0.0) {
         // Keep skirts proportional to relief, but avoid excessive "wall" silhouettes.
         skirtDepth = std::max(skirtDepth, heightRange * 0.15);
     }
-    skirtDepth = std::clamp(skirtDepth, minDepth, maxDepth);
+    skirtDepth = std::clamp(skirtDepth, minDepth, clampMaxDepth);
     
     // Lambda to add a skirt vertex
     auto addSkirtVertex = [&](int mainIdx) {

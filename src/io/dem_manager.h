@@ -58,6 +58,14 @@ enum class DemHealthStatus {
     Disabled      // DEM explicitly disabled
 };
 
+// DEM backend/source format.
+enum class DemSourceType {
+    Auto,
+    PirireisBatch,      // Existing bbox batch service
+    TerrainRGBMapbox,   // Mapbox Terrain-RGB encoding
+    TerrainRGBTerrarium // AWS/Mapzen Terrarium encoding
+};
+
 const char* DemHealthStatusToString(DemHealthStatus s);
 
 // DEM telemetry statistics
@@ -85,10 +93,12 @@ struct DemStats {
 
 // DEM Manager configuration
 struct DemManagerConfig {
-    std::string baseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
+    std::string baseUrl = "https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key=YGPXGCyXf6kh5TO9dJ7l";
     // Optional HTTP basic auth, format: "user:password"
     std::string basicAuthUserPwd;
+    DemSourceType sourceType = DemSourceType::Auto;
     int meshN = 5;                    // Grid resolution per tile
+    int maxZoom = 15;                 // Terrain-RGB providers often cap DEM detail below raster max
     size_t cacheSize = 256;           // Max cached tiles
     double heightScale = 0.001;       // Meters to world units (km)
     bool debug = false;
@@ -236,14 +246,20 @@ private:
     // Helper functions
     void WorkerLoop();
     bool FetchBatch(const std::vector<TileKey>& keys, std::vector<DemGridData>& outDataVec);
+    bool FetchTerrainRGBBatch(const std::vector<TileKey>& keys, std::vector<DemGridData>& outDataVec);
+    bool FetchSingleTerrainRGB(const TileKey& key, DemGridData& outData);
     std::string BuildBatchUrl(const std::vector<DemCell>& cells) const;
+    std::string BuildTerrainRGBUrl(const TileKey& key, int effectiveLevel) const;
     DemCell BuildDemCell(const TileKey& key) const;
     bool ParseBatchResponse(const std::string& payload, int cellCount, std::vector<DemGridData>& outDataVec) const;
     double SampleBilinear(const DemGridData& data, double u, double v) const;
-    
+    static DemSourceType ResolveSourceType(const Config& config);
+
     // Tile bounds calculation (WGS84)
     static double Tile2Lon(int x, int z);
     static double Tile2Lat(int y, int z);
+
+    DemSourceType sourceType_ = DemSourceType::PirireisBatch;
 };
 
 } // namespace globe

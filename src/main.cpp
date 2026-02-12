@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 
 int main(int argc, char** argv) {
     globe::Config config;
@@ -9,8 +10,10 @@ int main(int argc, char** argv) {
     bool runSmokeTest = false;
     bool runPanProfile = false;
     
-    // Default tile URL (Pirireis HGM Orthofoto)
-    config.tileUrl = "https://goksun.pirireis.com.tr/gorsun/gorsun/tile/HGM_Orthofoto/{z}/{x}/{y}";
+    // Default tile URL: open satellite imagery (EOX Sentinel-2 cloudless mosaic).
+    // OSM fallback:
+    //   https://tile.openstreetmap.org/{z}/{x}/{y}.png
+    config.tileUrl = "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg";
 
     // Optional basic-auth via environment (avoids leaking credentials into shell history).
     // Format: "user:password"
@@ -30,8 +33,15 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--dem-url") == 0 && i + 1 < argc) {
             config.demUrl = argv[++i];
             config.demEnabled = true;
+        } else if (std::strcmp(argv[i], "--dem-format") == 0 && i + 1 < argc) {
+            config.demFormat = argv[++i];
+            config.demEnabled = true;
         } else if (std::strcmp(argv[i], "--dem-auth") == 0 && i + 1 < argc) {
             config.demAuth = argv[++i];
+        } else if (std::strcmp(argv[i], "--dem-max-zoom") == 0 && i + 1 < argc) {
+            config.demMaxZoom = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--dem-mesh-n") == 0 && i + 1 < argc) {
+            config.demMeshN = std::max(2, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             config.cacheDir = argv[++i];
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
@@ -66,7 +76,10 @@ int main(int argc, char** argv) {
                       << "  --tile-url URL    Tile server URL template\n"
                       << "  --tile-auth U:P   Tile HTTP basic auth (user:password)\n"
                       << "  --dem-url URL     DEM server URL (elevation)\n"
+                      << "  --dem-format FMT  DEM format: auto | pirireis | terrain-rgb | terrarium\n"
                       << "  --dem-auth U:P    DEM HTTP basic auth (user:password)\n"
+                      << "  --dem-max-zoom N  Max DEM source zoom level (default 15)\n"
+                      << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
                       << "  --cache-dir DIR   Tile cache directory\n"
                       << "  --no-cache        Disable disk cache\n"
                       << "  --no-dem          Disable DEM\n"
@@ -91,6 +104,8 @@ int main(int argc, char** argv) {
     
     std::cout << "Native Globe - Clean Architecture\n";
     std::cout << "Tile URL: " << config.tileUrl << "\n";
+    std::cout << "DEM URL: " << (config.demUrl.empty() ? config.demBaseUrl : config.demUrl) << "\n";
+    std::cout << "DEM Format: " << config.demFormat << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";
     std::cout << "DEM Auth: " << (config.demAuth.empty() ? "none" : "basic") << "\n";
     

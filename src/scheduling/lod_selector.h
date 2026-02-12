@@ -34,13 +34,19 @@ public:
         // Limits how many parent->children refinements can happen in one selection pass.
         // <=0 means unlimited (legacy behavior).
         int maxRefinementsPerFrame = 0;
-        
+
+        // SSE hysteresis: once a tile refines (children become leaves), require
+        // SSE to drop to threshold * sseHysteresisRatio before collapsing back.
+        // Prevents frame-to-frame LOD oscillation that causes visible flickering.
+        // 0.0 = no hysteresis, 0.8 = 20% dead zone (default).
+        float sseHysteresisRatio = 0.80f;
+
         // Neighbor LOD conformance (FAZ 1.2)
         int maxNeighborDelta = 1;      // Max LOD difference between neighbors
         bool enforceNeighborDelta = true;  // Enable conformance pass
         int maxConformPasses = 6;      // Prevent infinite refinement
         bool lodChildQuorum = true;    // Refine only when full child set is render-ready
-        
+
         // Debug culling toggles (for gap diagnosis)
         bool disableFrustumCull = false;
         bool disableHorizonCull = false;
@@ -87,7 +93,9 @@ private:
         int viewportHeight,
         float fovDegrees,
         float sseThreshold,
-        float tiltFactor
+        float tiltFactor,
+        bool isCurrentlySubdivided,
+        float hysteresisRatio
     );
     
     bool AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady, const Settings& settings);
@@ -111,6 +119,7 @@ private:
     HorizonCuller horizon_;
     float fovDegrees_ = 45.0f;
     float tiltDegrees_ = 0.0f;  // For horizon culling bypass
+    std::unordered_set<TileKey> previousLeafSet_;  // SSE hysteresis state
 };
 
 } // namespace globe

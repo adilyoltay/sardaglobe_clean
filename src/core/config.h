@@ -16,11 +16,11 @@ enum class DisplacementMode {
 // Adaptive mesh segments based on tile zoom level.
 // Higher zoom tiles cover less geographic area → less spherical curvature → fewer segments needed.
 // DEM grid is small (e.g. 5×5), so excessive segments just oversample bilinear interpolation.
-// Formula: halve segments every 2 zoom levels beyond level 1, floor at max(demMeshN-1, 4).
+// Formula: halve segments every 2 zoom levels beyond level 1, floor at max(demMeshN-1, 8).
 inline int AdaptiveMeshSegments(int level, int meshSegments, int demMeshN, bool hasDem) {
     if (!hasDem) return meshSegments;
     int shift = std::max(0, level / 2);
-    int seg = std::max(meshSegments >> shift, std::max(demMeshN - 1, 4));
+    int seg = std::max(meshSegments >> shift, std::max(demMeshN - 1, 8));
     return seg;
 }
 
@@ -94,8 +94,11 @@ struct Config {
     bool atlasEdgeDilate = true;     // Dilate border texels into gutter on upload
     bool textureAtlasMipmaps = false; // Optional atlas mip generation (costly per upload)
     
-    // DEM/Terrain settings (PiriReis mesh service)
-    std::string demBaseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
+    // DEM/Terrain settings
+    // Default: MapTiler Terrain-RGB v2 tiles (Mapbox Terrain-RGB encoding).
+    std::string demBaseUrl = "https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key=YGPXGCyXf6kh5TO9dJ7l";
+    std::string demFormat = "terrain-rgb"; // auto | pirireis | terrain-rgb | terrarium
+    int demMaxZoom = 15;               // Clamp DEM requests above provider max zoom
     int demMeshN = 5;                 // Grid resolution per tile (5x5 = 25 samples, webglobe parity)
     size_t demCacheSize = 512;        // Max cached DEM tiles
     int demVisiblePinBudget = 1024;   // Max visible/neighbor DEM keys pinned against eviction
