@@ -16,6 +16,7 @@ enum class TileState {
     Fetching,       // HTTP request in progress
     Decoding,       // Image decode in progress
     Uploading,      // GPU upload pending
+    Canceled,       // Loading canceled while out of view
     Ready,          // Fully loaded, renderable
     Failed          // Load failed
 };
@@ -107,6 +108,10 @@ struct Tile {
     uint8_t prevEdgeCoarserMask = 0;  // For tracking mesh rebuild need
     uint8_t stitchMask = 0;
     uint8_t skirtMask = 0;
+    // FIX A: Latched seam-skirt mask. Once a seam gap triggers a skirt on an edge,
+    // it stays ON until a structural change (DEM level, edge coarser mask) resets it.
+    // Prevents frame-to-frame oscillation: gap → skirt → gap hidden → skirt removed → gap...
+    uint8_t latchedSeamSkirtMask = 0;
     static constexpr uint8_t EDGE_NORTH = 1 << 0;  // 0x01
     static constexpr uint8_t EDGE_EAST  = 1 << 1;  // 0x02
     static constexpr uint8_t EDGE_SOUTH = 1 << 2;  // 0x04
@@ -128,6 +133,8 @@ struct Tile {
     bool terrainMorphActive = false;
     bool hadTerrainData = false;
     static constexpr float TERRAIN_MORPH_DURATION = 0.2f;  // 200ms
+    // FIX 5: Max stagger spread so batch DEM arrivals don't all flash at once.
+    static constexpr float TERRAIN_MORPH_MAX_STAGGER = 0.10f;  // 100ms
     
     // Update fade animation, returns current alpha
     float UpdateFade(double currentTime, float fadeDuration = FADE_DURATION) {
@@ -162,7 +169,14 @@ struct Tile {
         if (!hadTerrainData) {
             hadTerrainData = true;
             terrainMorphActive = true;
-            terrainMorphStartTime = currentTime;
+            // FIX 5: Stagger morph start using tile key hash so batch DEM completions
+            // produce a smooth wave rather than a single-frame flash.
+            // Hash spreads tiles across [0, TERRAIN_MORPH_MAX_STAGGER] seconds delay.
+            uint32_t h = static_cast<uint32_t>(key.level * 73856093u) ^
+                         static_cast<uint32_t>(key.x * 19349663u) ^
+                         static_cast<uint32_t>(key.y * 83492791u);
+            float stagger = static_cast<float>(h % 1000u) / 1000.0f * TERRAIN_MORPH_MAX_STAGGER;
+            terrainMorphStartTime = currentTime + static_cast<double>(stagger);
             terrainMorph = 0.0f;
         }
 

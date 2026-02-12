@@ -54,6 +54,7 @@ struct FetchResult {
     TileKey key;
     std::vector<uint8_t> data;
     bool success = false;
+    bool canceled = false;
     std::string error;
     long httpStatus = 0;
     Priority priority = Priority::Normal;

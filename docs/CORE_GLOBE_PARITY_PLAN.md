@@ -1,6 +1,6 @@
 # SardaGlobe — Core Globe Parity Plan (Kod-Doğrulamalı Tek Doküman)
 
-> **Tarih:** 2026-02-06  
+> **Tarih:** 2026-02-12  
 > **Parity Hedefi:** Sadece Google Earth  
 > **Ana Referans:** `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md`  
 > **Kapsam:** Temel globe fonksiyonları (tile yaşam döngüsü, LOD, mesh, DEM, render pipeline, terrain-aware navigation)
@@ -20,25 +20,8 @@ Bu doküman, kod tabanındaki mevcut implementasyon doğrudan incelenerek günce
   - `src/core/*`
   - `tests/*`
 - Çalıştırılan test seti:
-  - `LodConformanceTest`
-  - `PredictivePrefetchTest`
-  - `EdgeMaskTest`
-  - `GlobeSystemTest`
-  - `TileFadeTest`
-  - `CornerLodTest`
-  - `TileTerrainMorphTest`
-  - `TileCacheStatsTest`
-  - `DepthPrecisionTest`
-  - `MemoryTileCacheTest`
-  - `DecodedTileBlobTest`
-  - `TileDecoderBlobFastpathTest`
-  - `TextureAtlasAllocatorTest`
-  - `FrustumExtractTest`
-  - `LodLeafNonEmptyTest`
-  - `AtlasGutterUvTest`
-  - `DemFallbackTest`
-  - `DemContinuityTest`
-  - `VisualParityPresetsTest`
+  - `ctest --test-dir build --output-on-failure` → **35/35 green**
+  - Kritik regresyonlar: `TileStateMachineCancelTest`, `TileSchedulerCancelFlowTest`, `TileFetcherCancelRerequestTest`, `DemCoEvictionTest`, `UnpopCrossfadePolicyTest`, `CornerLodTest`, `DepthPrecisionTest`
 
 ---
 
@@ -50,8 +33,8 @@ Bu doküman, kod tabanındaki mevcut implementasyon doğrudan incelenerek günce
 2. **“SSE LOD neighbor conformance tam değil” bulgusu kapanmış durumda.**
    - `P0.1` sonrası `LodConformanceTest` geçiyor.
 
-3. **“Tile State Machine tam parity değil” bulgusu büyük ölçüde kapanmış durumda.**
-   - `P0.2` ile `FetchStart/DecodeStart/UploadStart/Evict` yaşam döngüsüne bağlandı.
+3. **“Tile State Machine tam parity değil” bulgusu kapanmış durumda.**
+   - `P0.2` ile `Canceled` state + `Event::Cancel` akışı eklendi; `FetchStart/DecodeStart/UploadStart/Evict` ile birlikte yaşam döngüsü tamamlandı.
 
 4. **“4-layer cache mevcut” ifadesi hâlâ doğru değil.**
    - Pratikte disk/network + GPU texture yönetimi var; GE’deki net GPU→Memory→Disk→Network hiyerarşisi ve layer hit/miss zinciri parity seviyesinde değil.
@@ -77,8 +60,8 @@ Durum etiketleri:
 | Tile kimliği (quadkey/parent-child/neighbor/wrap) | ✅ | `TileKey` güçlü ve testli |
 | SSE tabanlı LOD traversal | ✅ | Frustum+horizon + ranked required/prefetch |
 | Neighbor conformance | ✅ | `LodConformanceTest` geçiyor |
-| Tile state machine tanımı | ✅ | 7 state / 11 event tanımlı |
-| Tile state machine yaşam döngüsüne tam entegrasyon | ✅ | `FetchStart/DecodeStart/UploadStart/Evict` akışta aktif |
+| Tile state machine tanımı | ✅ | 8 state / 12 event (`Canceled` + `Cancel`) |
+| Tile state machine yaşam döngüsüne tam entegrasyon | ✅ | `FetchStart/DecodeStart/UploadStart/Cancel/Evict` akışta aktif |
 | Gap-free render fallback (parent/placeholder/leaf) | ✅ | 3-pass yaklaşım aktif |
 | GE unpop + gerçek parent-child crossfade | ✅ | Shader-level parent/child raster crossfade aktif |
 
@@ -117,6 +100,8 @@ Durum etiketleri:
 | Upload priority/budget + texture reuse | ✅ | Budget ve `glTexSubImage2D` kullanılıyor |
 | Async mesh scheduler + revision kontrolü | ✅ | Worker + stale result discard |
 | Epoch pin + budgeted eviction | ✅ | Uygulama aktif |
+| Touch-based cancel lifecycle | ✅ | `cancelAfterFramesUntouched` + viewport-out cancel aktif |
+| DEM/raster co-eviction | ✅ | `demRasterCoEviction` + `DemManager::UnpinAndEvict` aktif |
 | Drop metriği (queue overflow) | ✅ | Queue overflow sayaçları aktif artıyor |
 | Decoded memory cache layer telemetrisi | ✅ | Pre-decoded RGBA LRU + decode bypass sayaçları aktif |
 | Memory cache layer telemetrisi | ✅ | Compressed tile LRU + hit/miss/write/evict sayaçları aktif |
@@ -141,7 +126,7 @@ Durum etiketleri:
 
 | Alan | Durum | Not |
 |---|---|---|
-| CTest otomatik test sayısı | ✅ | 19 test mevcut |
+| CTest otomatik test sayısı | ✅ | 35 test mevcut |
 | LOD conformance | ✅ | `LodConformanceTest` pass |
 | Predictive prefetch regression | ✅ | `PredictivePrefetchTest` pass |
 | Core sistem testi | ✅ | `GlobeSystemTest` pass |
@@ -167,11 +152,12 @@ Bu plan yalnızca temel globe parity boşluklarına odaklanır.
   - `ctest` içinde `LodConformanceTest` pass.
 
 ### P0.2 Tile state machine’i gerçek yaşam döngüsüne tam bağla
-- Durum: ✅ Tamamlandı (2026-02-06)
+- Durum: ✅ Tamamlandı (2026-02-12)
 - Hedef: Event akışı deterministik olsun.
 - İş:
   - `FetchStart/DecodeStart/UploadStart/Evict` olaylarını gerçek akışta kullan.
-  - Eviction sırasında `Event::Evict` üzerinden standart kapanış.
+  - `Canceled` state + `Event::Cancel` geçişlerini scheduler cancel akışına bağla.
+  - Cancel edilen fetch/decode sonuçlarını fail/retry akışından ayrıştır (`FetchResult.canceled`).
 - Çıkış kriteri:
   - Ölü event kalmaması.
   - State geçiş logunda illegal geçiş olmaması.
@@ -205,7 +191,7 @@ Bu plan yalnızca temel globe parity boşluklarına odaklanır.
   - Child tile UV’sinden ancestor texture UV’sine dönüşüm (scale/offset) bağlandı.
   - Debug panelde `Crossfading` ve `Cam Speed` telemetrileri eklendi.
 - Test:
-  - `ctest --test-dir build --output-on-failure` (19/19 geçti).
+  - `ctest --test-dir build --output-on-failure` (35/35 geçti).
   - Yeni `TileFadeTest`: değişken fade süresinde monoton alpha ve clamp davranışı doğrulandı.
 
 ### P1.2 `uCornerLods` bilinear LOD interpolation
@@ -223,7 +209,7 @@ Bu plan yalnızca temel globe parity boşluklarına odaklanır.
   - Heightmap texture’larında mip chain üretimi aktif edildi (`glGenerateMipmap`).
 - Test:
   - Yeni `CornerLodTest`: edge mask -> corner lod mapping doğrulandı.
-  - `ctest --test-dir build --output-on-failure` (19/19 geçti).
+  - `ctest --test-dir build --output-on-failure` (35/35 geçti).
 - Kalan parity farkı:
   - Görsel seam/jitter doğrulaması henüz otomatik görüntü tabanlı regresyon testi ile güvenceye alınmadı.
 
@@ -242,7 +228,7 @@ Bu plan yalnızca temel globe parity boşluklarına odaklanır.
   - CPU mesh-bake path için vertex başına `heightKm` attribute eklendi ve shader’da geometri morph aktif edildi.
 - Test:
   - Yeni `TileTerrainMorphTest`: başlangıç, orta, tamamlanma ve reset/restart davranışı doğrulandı.
-  - `ctest --test-dir build --output-on-failure` (19/19 geçti).
+  - `ctest --test-dir build --output-on-failure` (35/35 geçti).
 
 ### P1.4 Depth precision iyileştirmesi
 - Durum: 🟡 Kısmi tamamlandı (2026-02-06)
@@ -259,7 +245,7 @@ Bu plan yalnızca temel globe parity boşluklarına odaklanır.
   - Debug panelde `Log Depth Precision` ve `Reversed-Z Precision` toggle’ları eklendi.
 - Test:
   - Yeni `DepthPrecisionTest`: standart ve reversed-Z near/far NDC mapping + ray tutarlılığı doğrulandı.
-  - `ctest --test-dir build --output-on-failure` (19/19 geçti).
+  - `ctest --test-dir build --output-on-failure` (35/35 geçti).
 - Kalan parity farkı:
   - Z-fighting için otomatik görsel regresyon/eşik testi henüz yok.
 
@@ -279,7 +265,7 @@ Bu plan yalnızca temel globe parity boşluklarına odaklanır.
   - `Update` sonunda scene snapshot üretiliyor (`mvp`, `leafSet`, render state).
   - `Render` yalnızca snapshot tüketiyor; render input’u update sırasında sabitleniyor.
 - Test:
-  - `ctest --test-dir build --output-on-failure` (19/19 geçti).
+  - `ctest --test-dir build --output-on-failure` (35/35 geçti).
 
 ### P2.2 Request-driven frame (`RequestNewFrame`)
 - Durum: ✅ Tamamlandı (2026-02-06)
@@ -293,7 +279,7 @@ Bu plan yalnızca temel globe parity boşluklarına odaklanır.
   - Idle durumda render/swap atlanıp kısa sleep uygulanıyor.
   - Input callback’leri, kamera hareketi, queue aktivitesi ve fade/morph animasyonları frame request üretiyor.
 - Test:
-  - `ctest --test-dir build --output-on-failure` (19/19 geçti).
+  - `ctest --test-dir build --output-on-failure` (35/35 geçti).
 
 ---
 
@@ -384,7 +370,7 @@ Bu kalemler core parity tamamlandıktan sonra ele alınmalı.
   - Sabit hızda pan sırasında `Pending > 0` frame oranı %30'dan %10'un altına düşer.
   - Mevcut prefetch davranışı bozulmaz (statik neighbor/child prefetch korunur).
 - Test:
-  - Mevcut tüm CTest seti regression geçti (`19/19`).
+  - Mevcut tüm CTest seti regression geçti (`35/35`).
   - Yeni `PredictivePrefetchTest` eklendi:
     - tiny velocity (`<0.05 km/s`) için prefetch seti değişmiyor (threshold gate),
     - normal velocity için en az bir senaryoda prefetch seti genişliyor.
@@ -415,7 +401,7 @@ Bu kalemler core parity tamamlandıktan sonra ele alınmalı.
   - Z-fighting olayları azalır (özellikle uzak tile'larda).
   - Mevcut gap-free 3-pass render davranışı bozulmaz.
 - Test:
-  - Mevcut tüm CTest seti regression geçti (`19/19`).
+  - Mevcut tüm CTest seti regression geçti (`35/35`).
   - Görsel doğrulama adımı (overdraw/z-fighting etkisi) manuel acceptance gate olarak açık.
 - Tahmini süre: 0.5 gün
 
@@ -449,7 +435,7 @@ Bu kalemler core parity tamamlandıktan sonra ele alınmalı.
   - Gereksiz mesh rebuild sayısı %50+ azalır.
   - DEM olmayan durumda (endpoint down) mevcut davranış korunur.
 - Test:
-  - Mevcut tüm CTest seti regression geçti (`19/19`).
+  - Mevcut tüm CTest seti regression geçti (`35/35`).
   - Yeni `DemFallbackTest`: parent fallback örnekleme + exact-child önceliği doğrulandı.
   - Yeni `DemContinuityTest`: exact child + ancestor fallback komşuluğunda edge delta eşiği doğrulandı.
   - Dedicated `FetchCoordinationTest` henüz eklenmedi.

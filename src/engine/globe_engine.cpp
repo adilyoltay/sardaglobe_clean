@@ -154,13 +154,21 @@ bool GlobeEngine::Init() {
     scheduler_->SetUploadCallback([this](Tile& tile) {
         textureManager_->QueueUpload(tile);
     });
-    
-    // Set eviction callback for heightmap cleanup
-    if (heightmapManager_) {
-        textureManager_->SetEvictionCallback([this](const TileKey& key) {
+
+    adaptiveBaseMaxInFlightFetches_ = std::max(1, config_.maxInFlightFetches);
+    adaptiveBaseUploadBudgetMs_ = std::max(0.1, config_.uploadBudgetMs);
+    adaptiveBaseMeshUploadBudgetMs_ = std::max(0.1, config_.meshUploadBudgetMs);
+
+    // Set eviction callback for co-eviction cleanup.
+    textureManager_->SetEvictionCallback([this](const TileKey& key) {
+        if (heightmapManager_) {
             heightmapManager_->Release(key);
-        });
-    }
+        }
+        if (demManager_ && config_.demRasterCoEviction) {
+            demManager_->UnpinAndEvict(key);
+            ++demCoEvictions_;
+        }
+    });
     
     // GL state
     glEnable(GL_DEPTH_TEST);
@@ -306,9 +314,47 @@ bool GlobeEngine::GetScreenPointFromGeo(double lon, double lat, double& outScree
 
 void GlobeEngine::Update(double dt, double currentTime) {
     double updateStartMs = glfwGetTime() * 1000.0;
+    ++frameSerial_;
 
     // Update flight controller (handles momentum, animations)
     flightController_->Update(dt, currentTime);
+
+    if (scheduler_) {
+        if (config_.adaptiveResourceLimits) {
+            auto schedulerStats = scheduler_->GetStats();
+            const double fpsTarget = 60.0;
+            const double fpsDeficit = std::clamp((fpsTarget - static_cast<double>(fps_)) / fpsTarget, 0.0, 1.0);
+            const double queueLoad = static_cast<double>(
+                schedulerStats.pendingFetches + schedulerStats.pendingDecodes + schedulerStats.activeFetches);
+            const double queuePressure = std::clamp(
+                queueLoad / static_cast<double>(std::max(1, adaptiveBaseMaxInFlightFetches_)),
+                0.0, 2.0);
+            const double queueDeficit = std::clamp(queuePressure - 1.0, 0.0, 1.0);
+            const double targetPressure = std::clamp(fpsDeficit * 0.65 + queueDeficit * 0.35, 0.0, 1.0);
+
+            // Damped update to avoid oscillation.
+            adaptivePressure_ = adaptivePressure_ * 0.9 + targetPressure * 0.1;
+
+            const double scale = std::clamp(1.0 - adaptivePressure_ * 0.5, 0.5, 1.0);
+            config_.maxInFlightFetches = std::clamp(
+                static_cast<int>(std::lround(static_cast<double>(adaptiveBaseMaxInFlightFetches_) * scale)),
+                8,
+                adaptiveBaseMaxInFlightFetches_);
+            config_.uploadBudgetMs = std::clamp(
+                adaptiveBaseUploadBudgetMs_ * scale,
+                0.5,
+                adaptiveBaseUploadBudgetMs_);
+            config_.meshUploadBudgetMs = std::clamp(
+                adaptiveBaseMeshUploadBudgetMs_ * scale,
+                0.5,
+                adaptiveBaseMeshUploadBudgetMs_);
+        } else {
+            adaptivePressure_ = 0.0;
+            config_.maxInFlightFetches = adaptiveBaseMaxInFlightFetches_;
+            config_.uploadBudgetMs = adaptiveBaseUploadBudgetMs_;
+            config_.meshUploadBudgetMs = adaptiveBaseMeshUploadBudgetMs_;
+        }
+    }
 
     // Terrain displacement mode is user-toggleable from the debug UI.
     // Invalidate all meshes/heightmaps on mode switches to avoid mixing CPU-baked geometry
@@ -770,6 +816,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         
         Tile& tile = it->second;
         tile.lastAccessTime = currentTime;
+        tile.lastFrameUsed = frameSerial_;
         tile.accessCount++;
         tile.importance = ranked.score;  // Store score for eviction decisions
         // Leaf-ness for streaming must match what we *intend to draw* (temporal hold + render-time quorum),
@@ -782,7 +829,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
         tile.requestPriority = static_cast<uint8_t>(priority);
         
-        if (tile.state == TileState::Unloaded) {
+        if (tile.state == TileState::Unloaded || tile.state == TileState::Canceled) {
             if (scheduler_->Request(key, priority, ranked.score)) {
                 TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule, currentTime);
                 TileStateMachine::Advance(tile, TileStateMachine::Event::FetchStart, currentTime);
@@ -890,8 +937,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
         Tile& tile = it->second;
         tile.importance = ranked.score;
         tile.requestPriority = static_cast<uint8_t>(Priority::Low);
+        tile.lastFrameUsed = frameSerial_;
         
-        if (tile.state == TileState::Unloaded) {
+        if (tile.state == TileState::Unloaded || tile.state == TileState::Canceled) {
             tile.lastAccessTime = currentTime;
             tile.accessCount++;
             if (scheduler_->Request(key, Priority::Low, ranked.score)) {  // Low priority prefetch with score
@@ -901,7 +949,58 @@ void GlobeEngine::Update(double dt, double currentTime) {
             }
         }
     }
+    for (const TileKey& key : baseTileKeys_) {
+        auto it = tiles_.find(key);
+        if (it != tiles_.end()) {
+            it->second.lastAccessTime = currentTime;
+            it->second.lastFrameUsed = frameSerial_;
+        }
+    }
+    for (const TileKey& key : renderLeafSet_) {
+        auto it = tiles_.find(key);
+        if (it != tiles_.end()) {
+            it->second.lastAccessTime = currentTime;
+            it->second.lastFrameUsed = frameSerial_;
+        }
+    }
+    for (const TileKey& key : desiredLeafSet) {
+        auto it = tiles_.find(key);
+        if (it != tiles_.end()) {
+            it->second.lastFrameUsed = frameSerial_;
+        }
+    }
     frameTimings_.requestLoopMs = (glfwGetTime() * 1000.0) - requestStartMs;
+
+    if (config_.cancelAfterFramesUntouched > 0) {
+        std::vector<TileKey> cancelKeys;
+        cancelKeys.reserve(64);
+        const uint64_t untouchedLimit = static_cast<uint64_t>(config_.cancelAfterFramesUntouched);
+
+        for (const auto& [key, tile] : tiles_) {
+            if (!tile.IsLoading()) {
+                continue;
+            }
+            if (baseTileKeys_.count(key) > 0) {
+                continue;
+            }
+            if (selection.required.count(key) > 0) {
+                continue;
+            }
+            if (renderLeafSet_.count(key) > 0 || desiredLeafSet.count(key) > 0) {
+                continue;
+            }
+            uint64_t ageFrames = frameSerial_ > tile.lastFrameUsed
+                ? (frameSerial_ - tile.lastFrameUsed)
+                : 0;
+            if (ageFrames >= untouchedLimit) {
+                cancelKeys.push_back(key);
+            }
+        }
+
+        for (const TileKey& key : cancelKeys) {
+            scheduler_->Cancel(key);
+        }
+    }
     
     // Process scheduler (fetch/decode results)
     double schedulerStartMs = glfwGetTime() * 1000.0;
@@ -1191,17 +1290,14 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     }
 
                     if (coarserDelta > 0) {
-                        if (coarserDelta > 1 && config_.edgeStitching) {
-                            std::cerr << "[WARN] Stitch delta > 1 at tile " << key.ToString()
-                                      << " dir=" << dir << " delta=" << coarserDelta
-                                      << " (stitching assumes delta <= 1)" << std::endl;
-                        }
                         newEdgeCoarserMask |= edgeBits[dir];
                         edgeCoarserDelta[dir] = static_cast<float>(coarserDelta);
-                        // If stitch-mask topology is enabled, rely on crack-free index stitching
-                        // instead of skirts on delta-LOD boundaries. Skirts on these edges tend to
-                        // produce visible dark grids / walls at oblique views.
                         if (!config_.edgeStitching) {
+                            // No stitching → always use skirts on LOD boundaries.
+                            newSkirtMask |= edgeBits[dir];
+                        } else if (coarserDelta > 1) {
+                            // Stitching only handles delta=1. For larger gaps, add a safety
+                            // skirt to cover the geometry mismatch that stitching cannot fix.
                             newSkirtMask |= edgeBits[dir];
                         }
                         continue;
@@ -1298,14 +1394,46 @@ void GlobeEngine::Update(double dt, double currentTime) {
             effectiveDemLevel = std::clamp(effectiveDemLevel, 0, key.level);
         }
 
-        // P1: Seam→skirt feedback — if the previous frame measured a significant
-        // seam gap on specific edges, enable skirts only on those edges.
-        // This prevents the "skirt everywhere" regression that produces visible dark grids.
-        if (config_.selectiveSkirts && tile.seamGapMask != 0) {
-            // Seam->skirt feedback should not override delta-LOD stitching policy.
-            // Skirts on stitched (delta-LOD) edges tend to create visible "walls" at joins.
-            uint8_t deltaLodMask = static_cast<uint8_t>(newEdgeCoarserMask | newEdgeFinerMask);
-            newSkirtMask |= static_cast<uint8_t>(tile.seamGapMask & ~deltaLodMask);
+        // FIX A: Seam→skirt feedback with hysteresis (latch).
+        //
+        // Problem: without latch, seam feedback oscillates every frame:
+        //   Frame N: gap detected → skirt added → mesh rebuild
+        //   Frame N+1: skirt hides gap → seamGapMask=0 → skirt removed → mesh rebuild
+        //   Frame N+2: gap reappears → ... (visible as tile "vibration")
+        //
+        // Solution: once seamGapMask triggers a skirt on an edge, latch it ON.
+        // The latch only resets when a *structural* change occurs (DEM level change,
+        // edge coarser mask change), not when the seam measurement itself clears.
+        if (config_.selectiveSkirts) {
+            // Accumulate new seam gaps into the latch (never shrink from seam feedback alone).
+            if (tile.seamGapMask != 0) {
+                // For delta-LOD stitched edges, only latch if gap is significant (>= 12m).
+                uint8_t seamForceMask = tile.seamGapMask;
+                if (config_.edgeStitching) {
+                    constexpr float kStitchedEdgeForceSkirtGapM = 12.0f;
+                    const uint8_t deltaLodMask = static_cast<uint8_t>(newEdgeCoarserMask | newEdgeFinerMask);
+
+                    auto edgeGapForBit = [&](uint8_t edgeBit) -> float {
+                        if (edgeBit == Tile::EDGE_NORTH) return tile.edgeGapM.x;
+                        if (edgeBit == Tile::EDGE_EAST) return tile.edgeGapM.y;
+                        if (edgeBit == Tile::EDGE_SOUTH) return tile.edgeGapM.z;
+                        return tile.edgeGapM.w;
+                    };
+
+                    const uint8_t edgeBits[4] = {
+                        Tile::EDGE_NORTH, Tile::EDGE_EAST, Tile::EDGE_SOUTH, Tile::EDGE_WEST
+                    };
+                    for (uint8_t edgeBit : edgeBits) {
+                        if ((seamForceMask & edgeBit) == 0) continue;
+                        if ((deltaLodMask & edgeBit) == 0) continue;
+                        if (edgeGapForBit(edgeBit) < kStitchedEdgeForceSkirtGapM) {
+                            seamForceMask = static_cast<uint8_t>(seamForceMask & ~edgeBit);
+                        }
+                    }
+                }
+                tile.latchedSeamSkirtMask |= seamForceMask;
+            }
+            newSkirtMask |= tile.latchedSeamSkirtMask;
         }
 
         uint8_t stitchedMask = config_.edgeStitching ? newEdgeCoarserMask : 0;
@@ -1316,15 +1444,19 @@ void GlobeEngine::Update(double dt, double currentTime) {
         tile.cornerLods = CornerLodsFromEdgeDeltas(edgeCoarserDelta[0], edgeCoarserDelta[1],
                                                    edgeCoarserDelta[2], edgeCoarserDelta[3]);
         bool revisionChanged = false;
+        // FIX A: Track structural changes that should reset the seam-skirt latch.
+        bool structuralChange = false;
         if (newEdgeCoarserMask != tile.edgeCoarserMask) {
             tile.edgeCoarserMask = newEdgeCoarserMask;
             if (tile.edgeCoarserMask != tile.prevEdgeCoarserMask) {
                 revisionChanged = true;
+                structuralChange = true;
             }
         }
         if (tile.stitchMask != stitchedMask) {
             tile.stitchMask = stitchedMask;
             revisionChanged = true;
+            structuralChange = true;
         }
         if (tile.skirtMask != resolvedSkirtMask) {
             tile.skirtMask = resolvedSkirtMask;
@@ -1334,8 +1466,20 @@ void GlobeEngine::Update(double dt, double currentTime) {
         if (tile.demTargetLevel != newEffectiveLevel) {
             tile.demTargetLevel = newEffectiveLevel;
             revisionChanged = true;
+            // NOTE: DEM level changes rebuild the mesh but must NOT reset the
+            // seam-skirt latch.  When neighbor DEM instability causes the level
+            // to flip-flop between frames, resetting the latch each time
+            // re-introduces the gap→skirt→gap oscillation (visible shimmer).
+            // Topology changes (edgeCoarserMask, stitchMask) still reset it.
         }
-        
+
+        // FIX A: Reset seam-skirt latch on structural changes so stale skirts
+        // are re-evaluated with fresh geometry. Without this, skirts latched from
+        // an old DEM level persist forever even when no longer needed.
+        if (structuralChange) {
+            tile.latchedSeamSkirtMask = 0;
+        }
+
         // Check DEM availability - check edge-specific coarser neighbor parents
         if (demManager_ && tile.demPending) {
             const bool hasOwnDem = demManager_->HasData(key);
@@ -1661,11 +1805,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
         Tile& tile = it->second;
         if (baseTileKeys_.count(key) > 0 ||
             selection.required.count(key) > 0 ||
-            tilePyramid_.IsPrefetch(key)) {
+            tilePyramid_.IsPrefetch(key) ||
+            renderLeafSet_.count(key) > 0 ||
+            desiredLeafSet.count(key) > 0) {
             ++it;
             continue;
         }
-        if (tile.state == TileState::Unloaded) {
+        if (tile.state == TileState::Unloaded || tile.state == TileState::Canceled) {
             double last = tile.lastAccessTime;
             if (last <= 0.0 || (cleanupNow - last) > UNLOADED_STALE_SEC) {
                 // Release heightmap texture before erasing
@@ -2244,6 +2390,7 @@ void GlobeEngine::Render() {
         : 0.0;
     debugStats_.demFlatLeaves = demFlatLeaves;
     debugStats_.demPendingLeaves = demPendingLeaves;
+    debugStats_.demCoEvictions = demCoEvictions_;
     debugStats_.heightmapCacheSize = heightmapManager_ ? heightmapManager_->GetCacheSize() : 0;
     debugStats_.heightmapPendingUploads = heightmapManager_ ? heightmapManager_->GetPendingCount() : 0;
     debugStats_.heightmapMissingLeaves = 0;
@@ -2703,6 +2850,7 @@ void GlobeEngine::RenderDebugPanel() {
                 bool terrainRequired = config_.demEnabled &&
                                        (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
                 ImGui::Text("Terrain Required: %s", terrainRequired ? "yes" : "no");
+                ImGui::Text("DEM Co-Evicts: %zu", debugStats_.demCoEvictions);
             }
             if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) {
                 ImGui::Text("Heightmap Cache/Pending: %d / %d",
@@ -3146,6 +3294,7 @@ void GlobeEngine::PreloadBaseTiles() {
                 }
                 
                 Tile& tile = it->second;
+                tile.lastFrameUsed = frameSerial_;
                 tile.demTargetLevel = static_cast<uint8_t>(std::clamp(key.level, 0, 255));
                 tile.demEffectiveLevel = tile.demTargetLevel;
                 {
@@ -3170,7 +3319,7 @@ void GlobeEngine::PreloadBaseTiles() {
                 }
                 
                 // Request real texture with high priority (state machine handles transitions)
-                if (tile.state == TileState::Unloaded) {
+                if (tile.state == TileState::Unloaded || tile.state == TileState::Canceled) {
                     tile.requestPriority = static_cast<uint8_t>(Priority::Urgent);
                     if (scheduler_->Request(key, Priority::Urgent, 1.0f)) {
                         TileStateMachine::Advance(tile, TileStateMachine::Event::Schedule, nowSec);

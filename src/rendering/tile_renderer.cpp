@@ -47,9 +47,10 @@ DrawCallBreakdown DrawTileGeometry(const Tile& tile) {
         }
         GLboolean polyOffsetEnabled = glIsEnabled(GL_POLYGON_OFFSET_FILL);
         glEnable(GL_POLYGON_OFFSET_FILL);
-        // Use a slightly stronger offset for skirts, then restore the batch's default
+        // Use a stronger offset for skirts, then restore the batch's default
         // offset so subsequent main-tile draws don't inherit skirt bias (causes dark grids).
-        glPolygonOffset(1.5f, 2.0f);
+        // FIX 4: Matched to increased ancestor offset (2.0, 4.0) → skirt (3.0, 6.0).
+        glPolygonOffset(3.0f, 6.0f);
         const std::size_t offsetBytes = static_cast<std::size_t>(mainCount) * sizeof(unsigned int);
         glDrawElements(GL_TRIANGLES,
                        static_cast<GLsizei>(skirtCount),
@@ -57,7 +58,7 @@ DrawCallBreakdown DrawTileGeometry(const Tile& tile) {
                        reinterpret_cast<const void*>(offsetBytes));
         ++out.drawCalls;
         out.triangles += static_cast<int>(skirtCount / 3);
-        glPolygonOffset(1.0f, 1.0f);
+        glPolygonOffset(2.0f, 4.0f);
         if (!polyOffsetEnabled) {
             glDisable(GL_POLYGON_OFFSET_FILL);
         }

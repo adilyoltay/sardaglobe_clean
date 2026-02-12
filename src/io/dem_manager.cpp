@@ -96,6 +96,7 @@ void DemManager::Request(const TileKey& key, int priority, double score) {
     // Check if already cached or in fail TTL
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
+        coEvictedKeys_.erase(key);
         auto it = cache_.find(key);
         if (it != cache_.end()) {
             if (it->second.valid) {
@@ -154,6 +155,9 @@ bool DemManager::HasPendingRequest(const TileKey& key) {
 
 bool DemManager::HasData(const TileKey& key) const {
     std::lock_guard<std::mutex> lock(cacheMutex_);
+    if (coEvictedKeys_.count(key) > 0) {
+        return false;
+    }
     auto it = cache_.find(key);
     if (it != cache_.end() && it->second.valid) {
         TouchLru(key);
@@ -166,6 +170,13 @@ bool DemManager::HasDataOrAncestor(const TileKey& key) const {
     std::lock_guard<std::mutex> lock(cacheMutex_);
     TileKey probe = key;
     while (probe.level >= 0) {
+        if (coEvictedKeys_.count(probe) > 0) {
+            if (probe.level == 0) {
+                break;
+            }
+            probe = probe.Parent();
+            continue;
+        }
         auto it = cache_.find(probe);
         if (it != cache_.end() && it->second.valid) {
             return true;
@@ -182,6 +193,13 @@ bool DemManager::GetBestAvailableLevel(const TileKey& key, int& outLevel) const 
     std::lock_guard<std::mutex> lock(cacheMutex_);
     TileKey probe = key;
     while (probe.level >= 0) {
+        if (coEvictedKeys_.count(probe) > 0) {
+            if (probe.level == 0) {
+                break;
+            }
+            probe = probe.Parent();
+            continue;
+        }
         auto it = cache_.find(probe);
         if (it != cache_.end() && it->second.valid) {
             outLevel = probe.level;
@@ -276,6 +294,9 @@ bool DemManager::SampleHeightDetailed(double lonDeg, double latDeg, int level, D
 
 bool DemManager::GetGridData(const TileKey& key, DemGridData& outData) const {
     std::lock_guard<std::mutex> lock(cacheMutex_);
+    if (coEvictedKeys_.count(key) > 0) {
+        return false;
+    }
     auto it = cache_.find(key);
     if (it == cache_.end() || !it->second.valid) {
         return false;
@@ -292,6 +313,7 @@ void DemManager::PutGridData(const TileKey& key, const DemGridData& data) {
     DemGridData copy = data;
 
     std::lock_guard<std::mutex> lock(cacheMutex_);
+    coEvictedKeys_.erase(key);
     cache_[key] = std::move(copy);
     // Insert or move-to-front in LRU list.
     auto lruIt = lruIterMap_.find(key);
@@ -308,6 +330,19 @@ void DemManager::SetPinnedTiles(const std::vector<TileKey>& keys) {
     pinnedKeys_.reserve(keys.size());
     for (const TileKey& key : keys) {
         pinnedKeys_.insert(key);
+    }
+}
+
+void DemManager::UnpinAndEvict(const TileKey& key) {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    pinnedKeys_.erase(key);
+    coEvictedKeys_.insert(key);
+    cache_.erase(key);
+    failedUntil_.erase(key);
+    auto lruIt = lruIterMap_.find(key);
+    if (lruIt != lruIterMap_.end()) {
+        lruOrder_.erase(lruIt->second);
+        lruIterMap_.erase(lruIt);
     }
 }
 
@@ -392,6 +427,9 @@ void DemManager::WorkerLoop() {
             
             std::lock_guard<std::mutex> lock(cacheMutex_);
             for (size_t i = 0; i < batch.size() && i < results.size(); ++i) {
+                if (coEvictedKeys_.count(batch[i]) > 0) {
+                    continue;
+                }
                 // Only cache valid grids; invalid entries must not permanently block retries.
                 if (results[i].valid && !results[i].heights.empty() && results[i].meshN > 1) {
                     cache_[batch[i]] = std::move(results[i]);

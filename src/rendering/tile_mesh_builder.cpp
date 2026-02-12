@@ -661,7 +661,8 @@ void TileMeshBuilder::GenerateSkirts(
     double lodT = std::clamp(tileArcKm / 2500.0, 0.0, 1.0);
     double skirtDepth = minDepth + (maxDepth - minDepth) * lodT;
     if (heightRange > 0.0) {
-        skirtDepth = std::max(skirtDepth, heightRange * 0.10);
+        // Keep skirts proportional to relief, but avoid excessive "wall" silhouettes.
+        skirtDepth = std::max(skirtDepth, heightRange * 0.15);
     }
     skirtDepth = std::clamp(skirtDepth, minDepth, maxDepth);
     

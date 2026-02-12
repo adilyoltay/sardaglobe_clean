@@ -21,12 +21,16 @@ bool HasAnyTransparency(const std::vector<uint8_t>& rgba) {
 
 bool IsMostlyBlackOpaque(const std::vector<uint8_t>& rgba) {
     // Detect provider-side opaque black nodata tiles.
-    // We intentionally use a strict threshold to avoid misclassifying dark real imagery.
+    // Two-pass detection:
+    //   1) Per-pixel ratio: >=90% of opaque pixels are near-black (R,G,B <= 10)
+    //   2) Mean brightness fallback: average opaque RGB <= 3.0 (catches tiles with
+    //      thin non-black borders or JPEG artifacts that drop the ratio)
     if (rgba.empty()) {
         return false;
     }
     std::size_t opaqueCount = 0;
     std::size_t blackCount = 0;
+    uint64_t brightnessSum = 0;
     for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
         const uint8_t r = rgba[i + 0];
         const uint8_t g = rgba[i + 1];
@@ -34,7 +38,8 @@ bool IsMostlyBlackOpaque(const std::vector<uint8_t>& rgba) {
         const uint8_t a = rgba[i + 3];
         if (a >= 250) {
             ++opaqueCount;
-            if (r <= 4 && g <= 4 && b <= 4) {
+            brightnessSum += r + g + b;
+            if (r <= 10 && g <= 10 && b <= 10) {
                 ++blackCount;
             }
         }
@@ -42,8 +47,14 @@ bool IsMostlyBlackOpaque(const std::vector<uint8_t>& rgba) {
     if (opaqueCount < 1024) {
         return false;
     }
+    // Pass 1: ratio check (relaxed from 99.5% to 90% to catch border/artifact tiles)
     const double ratio = static_cast<double>(blackCount) / static_cast<double>(opaqueCount);
-    return ratio >= 0.995;
+    if (ratio >= 0.90) {
+        return true;
+    }
+    // Pass 2: mean brightness fallback (catches tiles with thin colored borders)
+    const double meanBrightness = static_cast<double>(brightnessSum) / (3.0 * static_cast<double>(opaqueCount));
+    return meanBrightness <= 3.0;
 }
 
 } // namespace

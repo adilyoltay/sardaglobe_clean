@@ -256,6 +256,7 @@ private:
         int demFlatLeaves = 0;         // Visible leaves with no DEM baked (flat ellipsoid mesh)
         int demPendingLeaves = 0;      // Visible leaves still awaiting exact DEM rebuild
         int tilesUsingAncestorDem = 0;
+        size_t demCoEvictions = 0;
         // GPU heightmap terrain telemetry (only meaningful in GPU heightmap mode).
         int heightmapCacheSize = 0;
         int heightmapPendingUploads = 0;
@@ -286,6 +287,12 @@ private:
     double prevAltitudeKm_ = 0.0;
     uint64_t stallFrameCounter_ = 0;
     int staleTileCount_ = 0;
+    uint64_t frameSerial_ = 0;
+    int adaptiveBaseMaxInFlightFetches_ = 0;
+    double adaptiveBaseUploadBudgetMs_ = 0.0;
+    double adaptiveBaseMeshUploadBudgetMs_ = 0.0;
+    double adaptivePressure_ = 0.0;
+    size_t demCoEvictions_ = 0;
 
     FrameTimings frameTimings_;
     FrameTimeTracker frameTimeTracker_;

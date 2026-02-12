@@ -1,6 +1,6 @@
 # SardaGlobe — Tile, DEM & Render Teknik Referans ve Geliştirme Planı
 
-> **Birleştirilmiş Doküman** (2026-02-06)
+> **Birleştirilmiş Doküman** (2026-02-12)
 > 3 kaynak birleştirildi: GE Derin Analiz + 3D Terrain Planı + Tile Pipeline Optimizasyon Planı
 
 **Yapı:**
@@ -143,8 +143,11 @@ _main (func 32863, ~60 call/sec)
 │   │   │   ├── PaintParametersAsset decode
 │   │   │   └── GlobalStyleTableAsset decode
 │   │   │
+│   │   └── Main-thread callback kuyruğuna closure schedule
+│   │
+│   ├── [2b] Main-thread callback drain
 │   │   ├── VectorTileAssetLoader::UpdateExpirationsOnMainThread()
-│   │   └── VectorTileAssetLoader::FinishMerge() ← GPU upload
+│   │   └── VectorTileAssetLoader::FinishMerge() ← GPU upload (main thread)
 │   │
 │   ├── [3] InstanceImpl::BuildNextScene(build_frame)
 │   │   ├── SetTraversalViewport(left, top, width, height)
@@ -321,14 +324,14 @@ AssetLoader Pipeline (her asset tipi için):
 UNLOADED ──schedule──→ SCHEDULED
 SCHEDULED ──fetch──→ FETCHING
                        ├── disk hit → DECODING
-                       └── network  → FETCHING → received → DECODING
+                       └── network  → received → DECODING
 DECODING ──decode──→ UPLOADING (main thread FinishMerge)
 UPLOADING ──upload──→ READY
-READY ──expire──→ EVICTED
-READY ──camera moved far──→ EVICTED (SmartEvict)
-任意状态 ──error──→ FAILED
+SCHEDULED/FETCHING/DECODING/UPLOADING ──cancel──→ CANCELED
+CANCELED ──re-enter view / schedule──→ SCHEDULED
+READY ──evict──→ UNLOADED (cache release + tile erase)
+FETCHING/DECODING/UPLOADING ──error──→ FAILED
 FAILED ──retry (max 3)──→ SCHEDULED
-EVICTED ──re-enter view──→ SCHEDULED
 ```
 
 ### 3.4. Tile Unpop (Progressive Loading) Mekanizması
@@ -747,7 +750,22 @@ Tile Decoder Threads
 └── Max worker count = pbi->tile_workers array boyutu
 ```
 
-### 7.2. İş Dispatch Mekanizması
+### 7.2. Thread Ownership Matrix (Kod-Doğrulamalı)
+
+| Operasyon | Thread | Kaynak |
+|-----------|--------|--------|
+| Camera update + input apply | Main | `src/engine/globe_engine.cpp` |
+| LOD traversal / scene build (BuildNextScene eşdeğeri) | Main | `src/scheduling/tile_pyramid.cpp` |
+| Tile fetch | Worker pool (varsayılan 16) | `src/io/tile_fetcher.cpp` |
+| Tile decode | Worker pool (varsayılan 8) | `src/io/tile_decoder.cpp` |
+| DEM fetch | DEM worker pool | `src/io/dem_manager.cpp` |
+| Mesh build | Mesh worker pool (varsayılan 4) | `src/rendering/tile_mesh_scheduler.cpp` |
+| Texture upload (`FinishMerge` eşdeğeri) | **Main** | `src/scheduling/tile_scheduler.cpp` + `src/engine/globe_engine.cpp` |
+| Mesh GPU upload | **Main** | `src/engine/globe_engine.cpp` |
+| Disk cache read/write | Fetch worker | `src/io/tile_fetcher.cpp` |
+| Eviction | Main | `src/engine/globe_engine.cpp` |
+
+### 7.3. İş Dispatch Mekanizması
 
 ```cpp
 // geo/render/mirth/core/base/job/jobdispatcher.cc
@@ -764,7 +782,7 @@ Tile Decoder Threads
 // "Threading::IsMainThread()" — main thread kontrolü
 ```
 
-### 7.3. Closure / Job Scheduling (WASM String Ground-Truth)
+### 7.4. Closure / Job Scheduling (WASM String Ground-Truth)
 
 WASM string'leri, `JobDispatcher` tarafında sadece worker işleri değil, **frame-bound closure scheduling** olduğunu da gösteriyor:
 
@@ -1115,17 +1133,17 @@ GPU'da `aTileCoords` / `uTileParams` uniform/attrib'lerine karşılık gelir.
 
 ### 12.4. WASM'dan Çıkarılan Sabitler
 ```cpp
-constexpr double EARTH_RADIUS = 6378137.0;      // meters
-constexpr double EARTH_CIRCUMFERENCE = 40075017.0;
-constexpr int TILE_SIZE = 256;
-constexpr int MIN_ZOOM = 0;
-constexpr int MAX_ZOOM = 22;
-constexpr double DEFAULT_FOV = 45.0;            // degrees
-constexpr double DEFAULT_NEAR = 1.0;
-constexpr double DEFAULT_FAR = 1000000.0;
-constexpr float SSE_THRESHOLD = 2.0f;           // pixels
-constexpr size_t MAX_CACHE_MB = 512;
-constexpr size_t TARGET_CACHE_MB = 400;
+constexpr double EARTH_RADIUS = 6378137.0;      // [binary] meters
+constexpr double EARTH_CIRCUMFERENCE = 40075017.0;  // [çıkarım] 2*pi*R
+constexpr int TILE_SIZE = 256;                  // [binary]
+constexpr int MIN_ZOOM = 0;                     // [çıkarım]
+constexpr int MAX_ZOOM = 22;                    // [binary]
+constexpr double DEFAULT_FOV = 45.0;            // [binary] degrees
+constexpr double DEFAULT_NEAR = 1.0;            // [binary]
+constexpr double DEFAULT_FAR = 1000000.0;       // [binary]
+constexpr float SSE_THRESHOLD = 2.0f;           // [binary] pixels
+constexpr size_t MAX_CACHE_MB = 512;            // [çıkarım] runtime tuning
+constexpr size_t TARGET_CACHE_MB = 400;         // [çıkarım] runtime tuning
 ```
 
 ### 12.5. SSE Threshold Değerleri
@@ -1153,6 +1171,15 @@ constexpr size_t TARGET_CACHE_MB = 400;
 2. **Proprietary API endpoint'leri** — Google internal URL'ler
 3. **Scheduling heuristic değerleri** — Deneysel tuning gerekir
 4. **Optimize edilmiş inline code** — Tam reconstruct zor
+
+### 13.1. Kapsam Kararı: TriTreePath vs MercTreePath
+
+Bu iterasyonda core parity uygulama yolu **MercTreePath/WebMercator** ile sınırlandırıldı.
+
+1. SardaGlobe raster/terrain request hattı (`TileKey`, `TilePyramid`, imagery URL templates) Mercator ekseninde deterministik ve test kapsamı bu hat üzerine kurulu.
+2. `TriTreePath` kanıtı binary'de var; ancak kutup bölgelerinde distortion/coverage davranışını parity seviyesinde kapatmak için ayrı traversal, seam ve test gate gerektiriyor.
+3. Bu nedenle dual-tree yaklaşımı bu iterasyonda "research backlog" olarak ayrıldı; mevcut hedef cancel lifecycle, co-eviction, parity gate ve adaptif limitleri stabilize etmek.
+4. Karar: core parity için mercator-only strateji korunur; dual-tree değerlendirmesi ayrı parity fazında ele alınır.
 
 ---
 
@@ -1389,7 +1416,7 @@ geo/earth/builtenv/lib/geometry/geometry_utils.cc     ← Geometry utils
 
 # BÖLÜM B: 3D Terrain Geliştirme Planı
 
-> **Tarih:** 2026-02-05 (Güncelleme: 2026-02-06)
+> **Tarih:** 2026-02-05 (Güncelleme: 2026-02-12)
 > **Hedef:** Google Earth benzeri 3D terrain deneyimi (yakın zoom + tilt + orbit)
 > **Kapsam:** DEM/elevation pipeline, shader displacement, terrain-aware kamera, tile mesh ve LOD/geçiş kalitesi
 > **GE Referans:** BÖLÜM A §5 (DEM Sistemi), §3.4 (Unpop), §4 (LOD), §6.2 (Terrain Render Pass)
@@ -1472,31 +1499,31 @@ Bu plan `AGENTS.md` kurallarına bağlıdır:
 - Kameradan çıkan tile isteklerini düşür.
 - Child DEM gelene kadar parent DEM remap + morph (100-250 ms).
 - Frame-budgetli upload.
+- Cancel lifecycle state machine'e bağlandı (`Canceled` state + untouched cancel policy).
 
 **DoD:** Göze batan pop/çatlak yok. DEM gecikmede parent fallback ile tutarlı yüzey.
 
-### FAZ 4 — Test, Parity Benchmark ve Release Gate
-**Süre:** 2-3 gün | **Öncelik:** P1 | **Durum:** Not Started
+### FAZ 4 — Render Parity Core (Corner/Skirt/Depth Kararı)
+**Süre:** 3-4 gün | **Öncelik:** P1 | **Durum:** In Progress
 
-- DEM fetch/auth/fallback testleri.
-- Terrain-aware picking unit+integration testleri.
-- Dağlık, vadili, kıyı, şehir görüntü benchmark seti.
-- Navigasyon parity checklist (orbit merkez, tilt sınırı, zoom-to-cursor).
-- CTest/CI gate: terrain testleri fail ise merge engeli.
+1. Unpop/crossfade (`uUnpopBlend`, parent-child blend) aktif ve testli.
+2. `uCornerLods` bilinear interpolation aktif; seam görsel gate'i eksik.
+3. Skirt generation aktif; selective skirt mask ve stitch mask testleri mevcut.
+4. Depth-plane implementasyonu koşullu: önce parity gate ile ölçüm, kritik z-fighting kalırsa depth-plane uygulanır.
 
-**DoD:** Tüm terrain/nav testleri green. Kritik parity checklist kabul edildi.
+**DoD:** Pop/seam kritik olayları görsel gate altında sıfırlanır; depth-plane için ölçüme dayalı go/no-go kararı yazılıdır.
 
-### FAZ 5 — GE Parity: Unpop, Crossfade ve Corner LODs
-**Süre:** 3-4 gün | **Öncelik:** P2 | **Durum:** Not Started
-**GE Referans:** §3.4 (Unpop), §3.5 (Crossfade), §4.2 (uCornerLods), §4.3 (Skirts)
+### FAZ 5 — Test, Parity Benchmark ve Release Gate
+**Süre:** 2-3 gün | **Öncelik:** P1 | **Durum:** In Progress
+**GE Referans:** §3.4 (Unpop), §4.2 (`uCornerLods`), §5.5 (depth precision)
 
-1. **Unpop:** `unpopBlend` 0→1 animasyonu (parent → child fade). Hızlı kamerada bypass.
-2. **Raster crossfade:** `uCrossfadeInterpolant` [0,1] + `RASTER_CROSSFADE` shader define.
-3. **Corner LODs:** `uCornerLods` uniform, vertex shader bilinear interpolation.
-4. **Skirt generation:** Perimeter vertex radial aşağı çekilir. `SKIRTS` shader define.
-5. **Depth plane equations:** PlaneEquation (ax+by+cz+d=0) → shader per-vertex depth.
+1. DEM fetch/auth/fallback + cancel/re-request regresyon testleri (`TileFetcherCancelRerequestTest`, `TileSchedulerCancelFlowTest`).
+2. DEM/raster co-eviction testi (`DemCoEvictionTest`) ve debug metriği (`demCoEvictions`).
+3. Terrain-aware pick + continuity testleri (`DemFallbackTest`, `DemContinuityTest`).
+4. Dağlık/vadi/kıyı/şehir visual parity benchmark seti.
+5. CTest + visual gate kırmızı/yeşil merge kriteri.
 
-**DoD:** Pop-free tile yükleme. Komşu LOD tile'lar arasında seam yok. Z-fighting yok.
+**DoD:** Terrain/nav acceptance gate CI'da deterministik çalışır; kritik parity checklist kabul edilir.
 
 ---
 
@@ -1526,14 +1553,14 @@ Bu plan `AGENTS.md` kurallarına bağlıdır:
 | FAZ 0 | ✅ Done | DEM health + telemetri (DemStats, CheckHealth, debug panel) |
 | FAZ 1 | ✅ Done | Tek displacement authority (DisplacementMode enum, CPU/GPU gate) |
 | FAZ 2 | ✅ Done | Terrain-aware picking (iterative DEM refinement in PickGlobe) |
-| FAZ 3 | ✅ Done | Priority DEM (ranked request ordering via SSE score) |
-| FAZ 4 | Not Started | Test + parity gate |
-| FAZ 5 | Not Started | GE parity: unpop, crossfade, corner LODs, skirts, depth planes |
+| FAZ 3 | ✅ Done | Priority DEM + progressive fallback + cancel lifecycle entegrasyonu |
+| FAZ 4 | 🟡 In Progress | Corner/skirt parity aktif, depth-plane go/no-go ölçümü açık |
+| FAZ 5 | 🟡 In Progress | Test + parity gate otomasyonu genişliyor, visual benchmark seti açık |
 
 ### Hemen Sonraki İşler
-1. DEM queue unit test: rank upgrade + leaf priority
-2. Terrain pick regression test: parent DEM fallback
-3. Morph transition: child DEM geldiğinde 100-250 ms yumuşak geçiş
+1. Visual parity gate: z-fighting / corner seam / hızlı nav sahneleri için screenshot fark eşiği.
+2. Depth-plane go/no-go: log-depth + reversed-Z sonucu kritikleri kapatamıyorsa implementasyonu aç.
+3. Adaptive resource limits tuning: gerçek cihaz profillerinde clamp/damping kalibrasyonu.
 
 ---
 
@@ -1548,14 +1575,15 @@ Bu plan `AGENTS.md` kurallarına bağlıdır:
 
 | Aşama | Google Earth (§3.2) | SardaGlobe Mevcut | Hedef |
 |-------|---------------------|-------------------|-------|
-| Schedule | Priority (kamera mesafesi, SSE) | ✅ SSE-based | — |
-| Fetch | DoDiskFetch → Network (async) | ⚠️ Main-thread disk I/O | P1: Worker'a taşı |
-| Decode | Worker pool (DoMergeAndLoad) | ✅ Worker thread | P2: Priority queue |
-| Upload | FinishMerge (main thread, budgeted) | ⚠️ Unbounded | P4: Budget + priority |
-| Mesh | Worker pool → GPU upload | ❌ Sync main-thread | P5: Async mesh |
-| Cache | 4-katman (GPU→Memory→Disk→Network) | ⚠️ 2-katman | P6: Eviction iyileştir |
-| Telemetri | DoFrameCallCount, MissedSceneBuilds, Jank metrics | ❌ Yok | P0: Telemetri ekle |
-| Unpop | uUnpopBlend + speed limit (§3.4) | ❌ Yok | Terrain FAZ 5 |
+| Schedule | Priority (kamera mesafesi, SSE) | ✅ SSE + ranked required/prefetch | Kalan: threshold tuning |
+| Fetch | DoDiskFetch → Network (async) | ✅ Worker fetch + disk/memory cache + cancel hook | Kalan: adaptive limit tuning |
+| Decode | Worker pool (DoMergeAndLoad) | ✅ Worker decode + priority/fairness | — |
+| Upload | FinishMerge (main thread, budgeted) | ✅ Budget + priority + atlas upload | Kalan: visual gate ile doğrulama |
+| Mesh | Worker pool → GPU upload | ✅ `TileMeshScheduler` + frame/time budget | Kalan: adaptif budget tuning |
+| Cache | 4-katman (GPU→Memory→Disk→Network) | 🟡 GPU/Decoded/Memory/Disk/Network aktif, promotion tuning kısmi | P6: tuning + invalidation |
+| Telemetri | DoFrameCallCount, MissedSceneBuilds, Jank metrics | ✅ Frame/cache/queue/metrikleri aktif | Kalan: parity visual gate metrikleri |
+| Unpop | uUnpopBlend + speed limit (§3.4) | ✅ Aktif + testli | — |
+| Cancel lifecycle | touch-based `cancel_old_fetches` | 🟡 `Canceled` state + untouched cancel aktif | Kalan: scene bazlı threshold kalibrasyonu |
 
 ---
 
@@ -1581,25 +1609,26 @@ Bu plan `AGENTS.md` kurallarına bağlıdır:
 ```
 LOD Select → Request → Fetch → Decode → Upload → Mesh Build → Render
     ↓           ↓         ↓        ↓         ↓          ↓          ↓
-TilePyramid  Scheduler  Fetcher  Decoder  TexManager  MeshBuilder  RenderFrame
-(main)       (main)     (16 wrk) (8 wrk)  (main+bgt)  (4 wrk)      (main)
+TilePyramid  Scheduler  Fetcher  Decoder  TexManager  MeshScheduler RenderFrame
+(main)       (main)     (16 wrk) (8 wrk)  (main+bgt)  (4 wrk+main) (main)
+   └──────────── stale/untouched tiles ──Cancel──→ Canceled ──re-enter──→ Scheduled
 ```
 
 **GE karşılığı (§3.2):** `SCHEDULE → FETCH → DECODE → MERGE(main) → READY`
 
 ### 16.3. Faz Tablosu
 
-| Faz | Ad | Öncelik | Süre | Etki |
-|-----|----|---------|------|------|
-| P0 | Telemetri & Görünürlük | Önkoşul | 2 saat | Ölçülebilirlik |
-| P1 | Fetch/Cache Hattı | Yüksek | 3 saat | %50-70 fetch hızı |
-| P2 | Priority + Lock Azaltma | Yüksek | 2 saat | Urgent latency |
-| P3 | Backpressure & Queue | Orta | 2 saat | Retry loop çözümü |
-| P4 | Texture Upload | Yüksek | 3 saat | GPU hitch azalır |
-| P5 | Async Mesh Pipeline | Kritik | 4 saat | Frame stutter çözümü |
-| P6 | Pin/Eviction & Micro-Opt | Düşük | 2 saat | Alloc spike azalır |
+| Faz | Ad | Durum | Kalan İş |
+|-----|----|-------|----------|
+| P0 | Telemetri & Görünürlük | ✅ Done | Visual parity gate metriklerine bağlama |
+| P1 | Fetch/Cache Hattı | ✅ Done | RTT/FPS adaptif tuning |
+| P2 | Priority + Lock Azaltma | ✅ Done | Nadir starvation corner-case gözlemi |
+| P3 | Backpressure & Queue | ✅ Done | Saha profillerinde queue clamp tuning |
+| P4 | Texture Upload | ✅ Done | Cihaz profiline göre budget tuning |
+| P5 | Async Mesh Pipeline | ✅ Done | Mesh/upload budget adaptif kalibrasyon |
+| P6 | Co-Eviction + Micro-Opt + Adaptive | 🟡 In Progress | visual gate + adaptive feedback kararlılığı |
 
-**Toplam:** ~18 saat
+**Not:** Pipeline rebaseline sonrası kritik kalanlar `cancel lifecycle tuning`, `DEM/raster co-eviction` gözlemi, `adaptiveResourceLimits` kalibrasyonu.
 
 ---
 
@@ -1877,11 +1906,13 @@ constexpr double EVICT_TIME_BUDGET_MS = 1.0;
 ## 16.12. Pipeline Uygulama Sırası
 
 ```
-P0 (Telemetri) → P1 (Fetch/Cache) → P2 (Priority) ─┐
-                                  └→ P3 (Backpressure) → P4 (Texture) → P5 (Async Mesh) → P6 (Micro-Opt)
+P0 (Telemetri) ──┐
+                  ├── paralel ──→ P1 (Fetch/Cache) → P2 (Priority)
+P5 (Async Mesh) ──┘                                  │
+                                                     └→ P3 (Backpressure) → P4 (Texture Upload) → P6 (Adaptive + Micro-Opt)
 ```
 
-**Bağımlılıklar:** P0 önkoşul. P1-P2 paralel. P3→P4→P5 sıralı. P6 son.
+**Bağımlılıklar:** P0 salt ölçüm olduğundan P1 ile paralel başlanır. P5 altyapısı aktif olduğu için P4 ile birlikte budget tuning yapılır. Son adım P6 adaptif limit/kalibrasyondur.
 
 ## 16.13. Pipeline Public API Değişiklikleri Özeti
 
@@ -1891,6 +1922,10 @@ P0 (Telemetri) → P1 (Fetch/Cache) → P2 (Priority) ─┐
 | `DecodeRequest` | `Priority priority`, `float score` |
 | `TextureManager` | `UploadJob` struct (priority/score) |
 | `Tile` | `pinnedEpoch`, `meshPending`, `meshRevision`, `texWidth/texHeight` |
+| `TileState` / `TileStateMachine` | `Canceled` state + `Event::Cancel` |
+| `FetchResult` | `bool canceled` (retry/fail akışından ayrıştırma) |
+| `Config` | `cancelAfterFramesUntouched`, `demRasterCoEviction`, `adaptiveResourceLimits` |
+| `DemManager` | `UnpinAndEvict(const TileKey&)` |
 | **Yeni Modüller** | |
 | `TileUrlTemplate` | `src/io/tile_url_template.{h,cpp}` |
 | `TileMeshScheduler` | `src/rendering/tile_mesh_scheduler.{h,cpp}` |

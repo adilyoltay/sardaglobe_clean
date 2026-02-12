@@ -19,7 +19,7 @@ enum class DisplacementMode {
 // Formula: halve segments every 2 zoom levels beyond level 1, floor at max(demMeshN-1, 4).
 inline int AdaptiveMeshSegments(int level, int meshSegments, int demMeshN, bool hasDem) {
     if (!hasDem) return meshSegments;
-    int shift = std::max(0, (level - 1) / 2);
+    int shift = std::max(0, level / 2);
     int seg = std::max(meshSegments >> shift, std::max(demMeshN - 1, 4));
     return seg;
 }
@@ -73,6 +73,8 @@ struct Config {
     int maxEvictsPerFrame = MAX_EVICTS_PER_FRAME;
     double evictBudgetMs = EVICT_BUDGET_MS;
     int meshSchedulerWorkers = MESH_SCHEDULER_WORKERS;
+    int cancelAfterFramesUntouched = 120;
+    bool adaptiveResourceLimits = false;
     
     // Features
     bool demEnabled = true;           // Enable terrain elevation
@@ -98,11 +100,12 @@ struct Config {
     size_t demCacheSize = 512;        // Max cached DEM tiles
     int demVisiblePinBudget = 1024;   // Max visible/neighbor DEM keys pinned against eviction
     double demHeightScale = 2.5;      // Height exaggeration (2.5x for visible terrain)
-    int demEdgeBlendSegments = 1;     // Edge coherence blend band (in vertex rings). 0 disables blending.
+    bool demRasterCoEviction = true;  // Evict DEM cache entries when matching raster tile is evicted
+    int demEdgeBlendSegments = 2;     // Edge coherence blend band (in vertex rings). 0 disables blending.
     bool demDebug = false;            // Enable DEM debug logging
     DisplacementMode terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;  // Single authority
-    float skirtDepthNearKm = 0.015f;  // Near-view skirt depth (km, ~15 m)
-    float skirtDepthFarKm = 0.10f;    // Far-view skirt depth (km, ~100 m)
+    float skirtDepthNearKm = 0.03f;   // Near-view skirt depth (km, ~30 m)
+    float skirtDepthFarKm = 0.15f;    // Far-view skirt depth (km, ~150 m)
     float skirtDepthRatio = 0.003f;   // Relative skirt depth vs tile arc length
     float skirtMinDepthKm = 0.05f;    // Minimum skirt depth (km)
     float skirtMaxDepthKm = 0.4f;     // Maximum skirt depth (km)

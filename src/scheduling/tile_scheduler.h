@@ -122,6 +122,8 @@ private:
     };
     std::unordered_map<TileKey, PendingFetchRank> pendingFetchRanks_;
     std::unordered_set<TileKey> pendingDecodes_;
+    std::unordered_set<TileKey> canceledKeys_;
+    std::queue<TileKey> canceledTransitions_;
     std::mutex trackingMutex_;
     
     UploadCallback uploadCallback_;

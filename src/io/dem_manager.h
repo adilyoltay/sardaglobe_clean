@@ -148,6 +148,8 @@ public:
     // Pin visible DEM keys (and optional neighbors) against LRU eviction.
     // Existing pin set is fully replaced by the incoming list.
     void SetPinnedTiles(const std::vector<TileKey>& keys);
+    // Force remove one key from pin set + cache.
+    void UnpinAndEvict(const TileKey& key);
     
     // Get height at a specific lat/lon for a tile
     bool SampleHeight(double lonDeg, double latDeg, int level, double& heightMeters) const;
@@ -215,6 +217,8 @@ private:
 
     // Visible DEM pin set. Entries in this set are skipped by eviction.
     std::unordered_set<TileKey> pinnedKeys_;
+    // Co-evicted keys are temporarily blocked from worker cache insert until re-requested.
+    std::unordered_set<TileKey> coEvictedKeys_;
     
     // Failed tile tracking with TTL (retry after timeout)
     std::unordered_map<TileKey, std::chrono::steady_clock::time_point> failedUntil_;  // TTL cache

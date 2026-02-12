@@ -142,6 +142,7 @@ bool GenerateNgrdTile(int z, int x, int y, std::vector<uint8_t>& outPacked) {
 static thread_local std::optional<TileKey> tls_currentKey;
 static thread_local CURL* tls_curl = nullptr;
 static thread_local struct curl_slist* tls_headers = nullptr;
+static thread_local bool tls_cancelledByProgress = false;
 
 } // anonymous namespace
 
@@ -262,6 +263,7 @@ static void CleanupThreadLocalCurl() {
         tls_curl = nullptr;
     }
     tls_currentKey.reset();
+    tls_cancelledByProgress = false;
 }
 
 void TileFetcher::WorkerLoop() {
@@ -404,6 +406,7 @@ int TileFetcher::ProgressCallback(void* userp, curl_off_t, curl_off_t, curl_off_
     std::lock_guard<std::mutex> lock(fetcher->cancelMutex_);
     if (fetcher->cancelled_.count(*tls_currentKey)) {
         fetcher->cancelled_.erase(*tls_currentKey);
+        tls_cancelledByProgress = true;
         return 1;  // Abort transfer
     }
     return 0;
@@ -501,6 +504,7 @@ bool TileFetcher::DoFetch(const FetchRequest& request, FetchResult& result) {
     }
 
     result.data.reserve(256 * 1024);
+    tls_cancelledByProgress = false;
     tls_currentKey = request.key;
     CURLcode res = curl_easy_perform(curl);
     tls_currentKey.reset();
@@ -515,6 +519,11 @@ bool TileFetcher::DoFetch(const FetchRequest& request, FetchResult& result) {
     }
     
     if (res != CURLE_OK) {
+        if (res == CURLE_ABORTED_BY_CALLBACK && tls_cancelledByProgress) {
+            result.canceled = true;
+            result.error = "Canceled";
+            return false;
+        }
         result.error = curl_easy_strerror(res);
         std::cerr << "[FETCH] " << request.key.ToString() 
                   << " CURL error: " << result.error << std::endl;

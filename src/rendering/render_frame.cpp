@@ -31,7 +31,8 @@ Tile* RenderFrame::FindRenderableAncestor(const TileKey& key,
         if (it != tiles.end()) {
             Tile& tile = it->second;
             const bool hasTexture = tile.textureId != 0 &&
-                                    (allowPlaceholder || tile.textureId != loadingTexture);
+                                    (allowPlaceholder || tile.textureId != loadingTexture) &&
+                                    !tile.mostlyBlackOpaqueRaster;
             if (tile.hasMesh && hasTexture) {
                 return &tile;
             }
@@ -108,7 +109,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             if (it != tiles.end()) {
                 Tile& tile = it->second;
                 const bool hasTexture = tile.textureId != 0 &&
-                                        (allowPlaceholder || tile.textureId != loadingTexture);
+                                        (allowPlaceholder || tile.textureId != loadingTexture) &&
+                                        !tile.mostlyBlackOpaqueRaster;
                 if (tile.hasMesh && hasTexture) {
                     bool hasTerrain = heightmapManager ? hasAnyHeightmap(parentKey) : tile.demUsed;
                     if (!hasTerrain) {
@@ -348,6 +350,13 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         if (!useInstancedFlatPath) return false;
         if (usesCrossfade || hasHeightmap) return false;
         if (tile.demUsed || tile.terrainMorphActive) return false;
+        // FIX 1: Tiles awaiting DEM must go through the standard skirt-capable path.
+        // Instanced flat path has no skirt geometry, so demPending tiles rendered here
+        // leave uncovered gaps between displaced neighbors and flat self.
+        if (tile.demPending) return false;
+        // Transparent or mostly-black tiles need ancestor underlay, which the
+        // instanced path does not support (no per-tile crossfade/fallback).
+        if (tile.hasTransparentPixels || tile.mostlyBlackOpaqueRaster) return false;
         if (!tile.atlasAllocated) return false;
         if (tile.textureId == 0) return false;
         if (tile.builtSegments <= 1) return false;
@@ -356,11 +365,14 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     };
     
     // Depth bias policy (GE-style):
-    // - Parent/placeholder fallback tiles should be slightly behind to avoid z-fighting.
+    // - Parent/placeholder fallback tiles should be pushed behind leaves to avoid z-fighting.
     // - Main leaves render without polygon offset to avoid depth discontinuities that
     //   can manifest as dark grids / "black gap" lines at tile boundaries.
+    // FIX 4: Increased offset from (1.0, 1.0) to (2.0, 4.0) to prevent log-depth
+    // quantization-induced z-fighting between ancestor underlay and leaf overlay,
+    // especially visible at oblique (tilted) views and far-horizon tiles.
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(1.0f, 1.0f);
+    glPolygonOffset(2.0f, 4.0f);
 
     // Pass 0: Placeholder tiles (last-resort, underneath everything)
     if (loadingTexture != 0) {

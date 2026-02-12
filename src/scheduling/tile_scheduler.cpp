@@ -60,6 +60,7 @@ bool TileScheduler::Request(const TileKey& key, Priority priority, float score) 
     // the pending marker. TileFetcher does lazy stale-skip based on per-key rank upgrades.
     {
         std::lock_guard<std::mutex> lock(trackingMutex_);
+        canceledKeys_.erase(key);
         if (pendingDecodes_.count(key)) {
             return false;  // Already decoding/uploading; fetch stage is done
         }
@@ -137,9 +138,28 @@ void TileScheduler::Cancel(const TileKey& key) {
     std::lock_guard<std::mutex> lock(trackingMutex_);
     pendingFetches_.erase(key);
     pendingFetchRanks_.erase(key);
+    pendingDecodes_.erase(key);
+    canceledKeys_.insert(key);
+    canceledTransitions_.push(key);
 }
 
 void TileScheduler::Update(TileMap& tiles, double currentTime) {
+    // Apply deferred cancel transitions on main-thread-owned tiles.
+    {
+        std::lock_guard<std::mutex> lock(trackingMutex_);
+        while (!canceledTransitions_.empty()) {
+            TileKey key = canceledTransitions_.front();
+            canceledTransitions_.pop();
+            if (canceledKeys_.count(key) == 0) {
+                continue;
+            }
+            auto it = tiles.find(key);
+            if (it != tiles.end()) {
+                TileStateMachine::Advance(it->second, TileStateMachine::Event::Cancel, currentTime);
+            }
+        }
+    }
+
     // Process dropped keys first - mark tiles as Failed for retry
     {
         std::lock_guard<std::mutex> lock(droppedKeysMutex_);
@@ -149,16 +169,22 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
 
             // A dropped result means the worker finished, but we lost the completion message.
             // Clear in-flight markers so the tile can be re-requested immediately (avoids multi-second stalls).
+            bool canceled = false;
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
                 pendingFetches_.erase(key);
                 pendingFetchRanks_.erase(key);
                 pendingDecodes_.erase(key);
+                canceled = (canceledKeys_.count(key) > 0);
             }
             
             auto it = tiles.find(key);
             if (it != tiles.end()) {
-                TileStateMachine::Advance(it->second, TileStateMachine::Event::Drop, currentTime);
+                if (canceled) {
+                    TileStateMachine::Advance(it->second, TileStateMachine::Event::Cancel, currentTime);
+                } else {
+                    TileStateMachine::Advance(it->second, TileStateMachine::Event::Drop, currentTime);
+                }
             }
         }
     }
@@ -167,13 +193,22 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
     {
         FetchResult result;
         while (fetchResults_.TryPop(result)) {
-            
+            bool canceled = false;
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
                 pendingFetches_.erase(result.key);
                 pendingFetchRanks_.erase(result.key);
+                canceled = (canceledKeys_.count(result.key) > 0);
             }
-            
+            canceled = canceled || result.canceled;
+            if (canceled) {
+                auto it = tiles.find(result.key);
+                if (it != tiles.end()) {
+                    TileStateMachine::Advance(it->second, TileStateMachine::Event::Cancel, currentTime);
+                }
+                continue;
+            }
+
             if (!result.success) {
                 if (result.httpStatus == 401 || result.httpStatus == 403) {
                     ++fetchAuthFails_;
@@ -219,14 +254,19 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
     {
         DecodeResult result;
         while (decodeResults_.TryPop(result)) {
-            
+            bool canceled = false;
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
                 pendingDecodes_.erase(result.key);
+                canceled = (canceledKeys_.count(result.key) > 0);
             }
-            
+
             auto it = tiles.find(result.key);
             if (it == tiles.end()) continue;
+            if (canceled) {
+                TileStateMachine::Advance(it->second, TileStateMachine::Event::Cancel, currentTime);
+                continue;
+            }
             
             if (!result.success) {
                 if (cache_) {

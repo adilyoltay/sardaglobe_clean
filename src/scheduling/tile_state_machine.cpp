@@ -10,7 +10,9 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
     
     switch (event) {
         case Event::Schedule:
-            if (currentState == TileState::Unloaded || currentState == TileState::Failed) {
+            if (currentState == TileState::Unloaded ||
+                currentState == TileState::Failed ||
+                currentState == TileState::Canceled) {
                 newState = TileState::Scheduled;
             }
             break;
@@ -84,6 +86,15 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
                 tile.fadeComplete = false;
             }
             break;
+
+        case Event::Cancel:
+            if (currentState == TileState::Scheduled ||
+                currentState == TileState::Fetching ||
+                currentState == TileState::Decoding ||
+                currentState == TileState::Uploading) {
+                newState = TileState::Canceled;
+            }
+            break;
             
         case Event::Evict:
             // Can evict from any state
@@ -93,7 +104,9 @@ bool TileStateMachine::Advance(Tile& tile, Event event, double currentTime) {
             
         case Event::Drop:
             // Queue overflow - mark as failed for retry
-            if (currentState != TileState::Ready && currentState != TileState::Unloaded) {
+            if (currentState != TileState::Ready &&
+                currentState != TileState::Unloaded &&
+                currentState != TileState::Canceled) {
                 newState = TileState::Failed;
                 tile.retryCount++;
                 if (currentTime > 0.0) {
@@ -124,6 +137,7 @@ const char* TileStateMachine::EventName(Event event) {
         case Event::DecodeFail:  return "DecodeFail";
         case Event::UploadStart: return "UploadStart";
         case Event::UploadOk:    return "UploadOk";
+        case Event::Cancel:      return "Cancel";
         case Event::Evict:       return "Evict";
         case Event::Drop:        return "Drop";
         default:                 return "Unknown";
@@ -137,6 +151,7 @@ const char* TileStateMachine::StateName(TileState state) {
         case TileState::Fetching:  return "Fetching";
         case TileState::Decoding:  return "Decoding";
         case TileState::Uploading: return "Uploading";
+        case TileState::Canceled:  return "Canceled";
         case TileState::Ready:     return "Ready";
         case TileState::Failed:    return "Failed";
         default:                   return "Unknown";
@@ -146,7 +161,9 @@ const char* TileStateMachine::StateName(TileState state) {
 bool TileStateMachine::IsValidTransition(TileState from, Event event) {
     switch (event) {
         case Event::Schedule:
-            return from == TileState::Unloaded || from == TileState::Failed;
+            return from == TileState::Unloaded ||
+                   from == TileState::Failed ||
+                   from == TileState::Canceled;
         case Event::FetchStart:
             return from == TileState::Scheduled || from == TileState::Fetching;
         case Event::FetchOk:
@@ -163,10 +180,17 @@ bool TileStateMachine::IsValidTransition(TileState from, Event event) {
             return from == TileState::Decoding || from == TileState::Uploading;
         case Event::UploadOk:
             return from == TileState::Uploading;
+        case Event::Cancel:
+            return from == TileState::Scheduled ||
+                   from == TileState::Fetching ||
+                   from == TileState::Decoding ||
+                   from == TileState::Uploading;
         case Event::Evict:
             return true;  // Can evict from any state
         case Event::Drop:
-            return from != TileState::Ready && from != TileState::Unloaded;
+            return from != TileState::Ready &&
+                   from != TileState::Unloaded &&
+                   from != TileState::Canceled;
         default:
             return false;
     }

@@ -20,6 +20,7 @@ public:
         DecodeFail,     // Decode failed
         UploadStart,    // GPU upload started
         UploadOk,       // Upload succeeded (tile ready)
+        Cancel,         // Request canceled while out of view
         Evict,          // Tile evicted from cache
         Drop            // Result dropped due to queue overflow
     };

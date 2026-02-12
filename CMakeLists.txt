@@ -330,6 +330,36 @@ target_include_directories(tile_fetcher_cancel_rerequest_test PRIVATE
 target_link_libraries(tile_fetcher_cancel_rerequest_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME TileFetcherCancelRerequestTest COMMAND tile_fetcher_cancel_rerequest_test)
 
+# Tile state machine cancel transition test
+add_executable(tile_state_machine_cancel_test
+  tests/tile_state_machine_cancel_test.cpp
+  src/scheduling/tile_state_machine.cpp
+)
+target_include_directories(tile_state_machine_cancel_test PRIVATE
+  src
+)
+target_link_libraries(tile_state_machine_cancel_test PRIVATE glm::glm)
+add_test(NAME TileStateMachineCancelTest COMMAND tile_state_machine_cancel_test)
+
+# Tile scheduler cancel flow integration test
+add_executable(tile_scheduler_cancel_flow_test
+  tests/tile_scheduler_cancel_flow_test.cpp
+  src/scheduling/tile_scheduler.cpp
+  src/scheduling/tile_state_machine.cpp
+  src/io/tile_fetcher.cpp
+  src/io/tile_decoder.cpp
+  src/io/decoded_tile_blob.cpp
+  src/io/tile_cache.cpp
+  src/io/memory_tile_cache.cpp
+  src/io/tile_url_template.cpp
+)
+target_include_directories(tile_scheduler_cancel_flow_test PRIVATE
+  src
+  third_party
+)
+target_link_libraries(tile_scheduler_cancel_flow_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME TileSchedulerCancelFlowTest COMMAND tile_scheduler_cancel_flow_test)
+
 # Texture atlas allocator test
 add_executable(texture_atlas_allocator_test
   tests/texture_atlas_allocator_test.cpp
@@ -507,6 +537,17 @@ target_include_directories(dem_grid_row_order_test PRIVATE
 )
 target_link_libraries(dem_grid_row_order_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME DemGridRowOrderTest COMMAND dem_grid_row_order_test)
+
+# DEM/raster co-eviction behavior test
+add_executable(dem_co_eviction_test
+  tests/dem_co_eviction_test.cpp
+  src/io/dem_manager.cpp
+)
+target_include_directories(dem_co_eviction_test PRIVATE
+  src
+)
+target_link_libraries(dem_co_eviction_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME DemCoEvictionTest COMMAND dem_co_eviction_test)
 
 # Adaptive mesh segments policy test
 add_executable(adaptive_mesh_segments_test
