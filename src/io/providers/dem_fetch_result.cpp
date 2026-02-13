@@ -22,6 +22,16 @@ DemFetchResult DemFetchResult::NetworkError(int curlCode, const std::string& msg
     return r;
 }
 
+DemFetchResult DemFetchResult::TimeoutError(int curlCode, const std::string& msg, double elapsedMs) {
+    DemFetchResult r;
+    r.success = false;
+    r.curlResult = curlCode;
+    r.errorMessage = msg;
+    r.elapsedMs = elapsedMs;
+    r.errorType = ErrorType::Timeout;
+    return r;
+}
+
 DemFetchResult DemFetchResult::AuthError(long httpCode, const std::string& msg) {
     DemFetchResult r;
     r.success = false;

@@ -1,4 +1,5 @@
 #include "google_earth_dem_provider.h"
+#include "../../debug/network_panel.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -17,15 +18,16 @@ static GoogleEarthElevationConfig ToElevationConfig(const GoogleEarthDemConfig& 
 }
 
 GoogleEarthDemProvider::GoogleEarthDemProvider(const GoogleEarthDemConfig& config)
-    : meshN_(config.meshN) {
+    : meshN_(config.meshN), elevationEndpoint_(config.elevationEndpoint) {
     // Create elevation provider
     elevationProvider_ = std::make_unique<GoogleEarthElevationProvider>(
         ToElevationConfig(config));
 }
 
 GoogleEarthDemProvider::GoogleEarthDemProvider(std::unique_ptr<IElevationProvider> elevationProvider,
-                                               int meshN)
-    : elevationProvider_(std::move(elevationProvider)), meshN_(meshN) {
+                                               int meshN,
+                                               const std::string& elevationEndpoint)
+    : elevationProvider_(std::move(elevationProvider)), meshN_(meshN), elevationEndpoint_(elevationEndpoint) {
 }
 
 GoogleEarthDemProvider::~GoogleEarthDemProvider() = default;
@@ -73,9 +75,12 @@ bool GoogleEarthDemProvider::ConvertToDemGridData(const std::vector<double>& hei
     size_t expectedCount = static_cast<size_t>(meshN_) * meshN_;
     
     if (heights.size() != expectedCount) {
-        outResult = DemFetchResult::DecodeError(
-            "Height count mismatch: expected " + std::to_string(expectedCount) +
-            ", got " + std::to_string(heights.size()));
+        // Preserve existing metadata (httpStatusCode, bytesReceived, elapsedMs) from outResult
+        // Only update error fields
+        outResult.errorType = DemFetchResult::ErrorType::Decode;
+        outResult.errorMessage = "Height count mismatch: expected " + std::to_string(expectedCount) +
+                                 ", got " + std::to_string(heights.size());
+        outResult.success = false;
         return false;
     }
     
@@ -93,15 +98,20 @@ bool GoogleEarthDemProvider::ConvertToDemGridData(const std::vector<double>& hei
         outData.maxHeight = std::max(outData.maxHeight, h);
     }
     
-    // Success result with preserved metadata (if any)
-    // Caller should set HTTP-related fields
-    outResult = DemFetchResult::Success(200, 0, 0.0);
+    // Success: update outResult to reflect success while preserving metadata
+    // outResult already contains httpStatusCode, bytesReceived, elapsedMs from batchResult.fetch
+    outResult.success = true;
+    outResult.errorType = DemFetchResult::ErrorType::None;
+    outResult.errorMessage.clear();
     
     return true;
 }
 
 bool GoogleEarthDemProvider::FetchDemTile(const TileKey& key, DemGridData& outData,
                                           DemFetchResult& outResult) {
+    // NetworkPanel: record start
+    NetworkPanel::Instance().RecordStart(key, RequestType::DemMesh, elevationEndpoint_);
+    
     // Generate grid points for this tile
     std::vector<GeoPoint> points = GenerateTileGrid(key);
     
@@ -111,23 +121,37 @@ bool GoogleEarthDemProvider::FetchDemTile(const TileKey& key, DemGridData& outDa
     
     ElevationBatchResult batchResult = elevationProvider_->BatchQuery(points, opt);
     
+    // Use the fetch result directly (preserves metadata: httpStatusCode, bytesReceived, elapsedMs, curlResult)
+    outResult = batchResult.fetch;
+    
     if (!batchResult.ok) {
-        // Map error to DemFetchResult
-        if (batchResult.error.find("401") != std::string::npos ||
-            batchResult.error.find("Authentication") != std::string::npos) {
-            outResult = DemFetchResult::AuthError(401, batchResult.error);
-            healthStatus_.store(DemHealthStatus::AuthFailed);
-        } else if (batchResult.error.find("403") != std::string::npos ||
-                   batchResult.error.find("Access denied") != std::string::npos) {
-            outResult = DemFetchResult::AuthError(403, batchResult.error);
-            healthStatus_.store(DemHealthStatus::AuthFailed);
-        } else if (batchResult.error.find("Network") != std::string::npos) {
-            outResult = DemFetchResult::NetworkError(0, batchResult.error, 0.0);
-            healthStatus_.store(DemHealthStatus::Unreachable);
-        } else {
-            outResult = DemFetchResult::DecodeError(batchResult.error);
-            healthStatus_.store(DemHealthStatus::BadResponse);
+        // Map error type to health status for internal tracking
+        // No substring matching - rely on errorType set by elevation provider
+        switch (outResult.errorType) {
+            case DemFetchResult::ErrorType::Auth:
+            case DemFetchResult::ErrorType::HttpError:
+                if (outResult.httpStatusCode == 401 || outResult.httpStatusCode == 403) {
+                    healthStatus_.store(DemHealthStatus::AuthFailed);
+                }
+                break;
+            case DemFetchResult::ErrorType::Network:
+            case DemFetchResult::ErrorType::Timeout:
+                healthStatus_.store(DemHealthStatus::Unreachable);
+                break;
+            case DemFetchResult::ErrorType::Decode:
+                healthStatus_.store(DemHealthStatus::BadResponse);
+                break;
+            default:
+                healthStatus_.store(DemHealthStatus::BadResponse);
+                break;
         }
+        
+        // NetworkPanel: record failure
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, false,
+            outResult.httpStatusCode, outResult.bytesReceived,
+            outResult.elapsedMs, false, outResult.errorMessage);
+        
         return false;
     }
     
@@ -136,6 +160,18 @@ bool GoogleEarthDemProvider::FetchDemTile(const TileKey& key, DemGridData& outDa
     
     if (success) {
         healthStatus_.store(DemHealthStatus::Healthy);
+        
+        // NetworkPanel: record success
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, true,
+            outResult.httpStatusCode, outResult.bytesReceived,
+            outResult.elapsedMs, false, "");
+    } else {
+        // NetworkPanel: record decode/validation failure
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, false,
+            outResult.httpStatusCode, outResult.bytesReceived,
+            outResult.elapsedMs, false, outResult.errorMessage);
     }
     
     return success;
@@ -153,14 +189,26 @@ DemHealthStatus GoogleEarthDemProvider::CheckHealth() {
         return DemHealthStatus::Healthy;
     }
     
-    // Map error to health status
-    if (result.error.find("401") != std::string::npos ||
-        result.error.find("403") != std::string::npos) {
-        healthStatus_.store(DemHealthStatus::AuthFailed);
-    } else if (result.error.find("Network") != std::string::npos) {
-        healthStatus_.store(DemHealthStatus::Unreachable);
-    } else {
-        healthStatus_.store(DemHealthStatus::BadResponse);
+    // Map error type to health status (no substring matching)
+    switch (result.fetch.errorType) {
+        case DemFetchResult::ErrorType::Auth:
+        case DemFetchResult::ErrorType::HttpError:
+            if (result.fetch.httpStatusCode == 401 || result.fetch.httpStatusCode == 403) {
+                healthStatus_.store(DemHealthStatus::AuthFailed);
+            } else {
+                healthStatus_.store(DemHealthStatus::BadResponse);
+            }
+            break;
+        case DemFetchResult::ErrorType::Network:
+        case DemFetchResult::ErrorType::Timeout:
+            healthStatus_.store(DemHealthStatus::Unreachable);
+            break;
+        case DemFetchResult::ErrorType::Decode:
+            healthStatus_.store(DemHealthStatus::BadResponse);
+            break;
+        default:
+            healthStatus_.store(DemHealthStatus::BadResponse);
+            break;
     }
     
     return healthStatus_.load();

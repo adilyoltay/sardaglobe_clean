@@ -107,10 +107,6 @@ add_executable(native_globe
   src/io/terrain_rgb_decoder.cpp
   src/io/providers/dem_fetch_result.cpp
   src/io/providers/terrain_rgb_provider.cpp
-  src/io/providers/http_transport.cpp
-  src/io/providers/protobuf_wire.cpp
-  src/io/providers/google_earth_elevation_provider.cpp
-  src/io/providers/google_earth_dem_provider.cpp
   # Scheduling module
   src/scheduling/tile_scheduler.cpp
   src/scheduling/lod_selector.cpp
@@ -322,11 +318,6 @@ add_executable(tile_decoder_blob_fastpath_test
   tests/tile_decoder_blob_fastpath_test.cpp
   src/io/tile_decoder.cpp
   src/io/stb_image_impl.c
-  src/io/providers/dem_fetch_result.cpp
-  src/io/providers/http_transport.cpp
-  src/io/providers/protobuf_wire.cpp
-  src/io/providers/google_earth_elevation_provider.cpp
-  src/io/providers/google_earth_dem_provider.cpp
   src/io/decoded_tile_blob.cpp
 )
 target_include_directories(tile_decoder_blob_fastpath_test PRIVATE
@@ -368,11 +359,6 @@ add_executable(tile_scheduler_cancel_flow_test
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
   src/io/stb_image_impl.c
-  src/io/providers/dem_fetch_result.cpp
-  src/io/providers/http_transport.cpp
-  src/io/providers/protobuf_wire.cpp
-  src/io/providers/google_earth_elevation_provider.cpp
-  src/io/providers/google_earth_dem_provider.cpp
   src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
   src/io/memory_tile_cache.cpp
@@ -719,6 +705,7 @@ add_test(NAME GeElevationProviderTest COMMAND ge_elevation_provider_test)
 # Google Earth DEM Grid Order test
 add_executable(ge_dem_grid_order_test
   tests/ge_dem_grid_order_test.cpp
+  tests/stubs/network_panel_stub.cpp
   src/io/providers/google_earth_dem_provider.cpp
   src/io/providers/google_earth_elevation_provider.cpp
   src/io/providers/http_transport.cpp

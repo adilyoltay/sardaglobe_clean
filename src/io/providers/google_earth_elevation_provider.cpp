@@ -76,6 +76,7 @@ ElevationBatchResult GoogleEarthElevationProvider::BatchQuery(const std::vector<
     // Validate endpoint
     if (config_.endpoint.empty()) {
         result.error = "Google Earth elevation endpoint not configured";
+        result.fetch = DemFetchResult::DecodeError(result.error);
         return result;
     }
     
@@ -96,6 +97,7 @@ ElevationBatchResult GoogleEarthElevationProvider::BatchQuery(const std::vector<
         requestBody = protobuf::ge::BuildElevationRequest(lats, lons, config_.elevationType);
     } catch (const std::exception& e) {
         result.error = std::string("Failed to build request: ") + e.what();
+        result.fetch = DemFetchResult::DecodeError(result.error);
         return result;
     }
     
@@ -103,19 +105,25 @@ ElevationBatchResult GoogleEarthElevationProvider::BatchQuery(const std::vector<
     auto headers = BuildRequestHeaders();
     HttpResponse httpResponse = transport_->Post(config_.endpoint, requestBody, headers);
     
+    // Map HTTP response to DemFetchResult for telemetry/backoff
+    // This preserves metadata (httpStatusCode, bytesReceived, elapsedMs, curlResult)
+    result.fetch = HttpResponseToDemFetchResult(httpResponse);
+    
     // Check HTTP result
     if (!httpResponse.success) {
-        result.error = "HTTP request failed: " + httpResponse.errorMessage;
-        
-        // Map HTTP errors to specific error messages
+        // Use httpCode and curlResult for specific error mapping (no substring matching)
         if (httpResponse.httpCode == 401) {
             result.error = "Authentication failed (401). Check GE auth token.";
         } else if (httpResponse.httpCode == 403) {
             result.error = "Access denied (403). Check GE permissions.";
+        } else if (httpResponse.curlResult == 28) {
+            result.error = "Request timeout (curl=28)";
         } else if (httpResponse.httpCode == 0) {
             result.error = "Network error: " + httpResponse.errorMessage;
+        } else {
+            result.error = "HTTP error " + std::to_string(httpResponse.httpCode) 
+                         + ": " + httpResponse.errorMessage;
         }
-        
         return result;
     }
     
@@ -124,14 +132,21 @@ ElevationBatchResult GoogleEarthElevationProvider::BatchQuery(const std::vector<
     try {
         elevations = protobuf::ge::ParseElevationResponse(httpResponse.body);
     } catch (const std::exception& e) {
+        // Decode error: preserve HTTP metadata (Phase 3 "decode metadata preserve")
         result.error = std::string("Failed to parse response: ") + e.what();
+        result.fetch.errorType = DemFetchResult::ErrorType::Decode;
+        result.fetch.errorMessage = result.error;
+        // httpStatusCode, bytesReceived, elapsedMs already preserved from HttpResponseToDemFetchResult
         return result;
     }
     
     // Validate response
     std::string validationError;
     if (!ValidateResponse(elevations, points.size(), validationError)) {
+        // Validation error: preserve HTTP metadata
         result.error = validationError;
+        result.fetch.errorType = DemFetchResult::ErrorType::Decode;
+        result.fetch.errorMessage = result.error;
         return result;
     }
     

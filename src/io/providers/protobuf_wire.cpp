@@ -252,14 +252,28 @@ std::vector<uint8_t> BuildElevationRequest(const std::vector<double>& lats,
     
     ProtobufEncoder encoder;
     
-    // Encode latitudes (field 1, packed double)
-    encoder.EncodePackedDouble(1, lats);
+    // RE-based schema: repeated LatitudeLongitude points = 1 (embedded messages)
+    // Each point: { latitude=1 (double), longitude=2 (double) }
+    for (size_t i = 0; i < lats.size(); ++i) {
+        // Encode each point as embedded message
+        // Field 1 (points), wire type 2 (length-delimited)
+        // First, build the embedded message
+        ProtobufEncoder pointEncoder;
+        // latitude = field 1, fixed64 (double)
+        pointEncoder.EncodeTag(1, WireType::Fixed64);
+        pointEncoder.EncodeFixed64(lats[i]);
+        // longitude = field 2, fixed64 (double)
+        pointEncoder.EncodeTag(2, WireType::Fixed64);
+        pointEncoder.EncodeFixed64(lons[i]);
+        
+        // Now encode as length-delimited field 1
+        std::vector<uint8_t> pointBytes = pointEncoder.TakeBytes();
+        encoder.EncodeTag(1, WireType::LengthDelimited);
+        encoder.EncodeLengthDelimited(pointBytes);
+    }
     
-    // Encode longitudes (field 2, packed double)
-    encoder.EncodePackedDouble(2, lons);
-    
-    // Encode elevation type (field 3, varint)
-    encoder.EncodeTag(3, WireType::Varint);
+    // Encode elevation type (field 2, varint) - RE: int32 elevation_type = 2
+    encoder.EncodeTag(2, WireType::Varint);
     encoder.EncodeVarint(static_cast<uint64_t>(elevationType));
     
     return encoder.TakeBytes();
@@ -276,9 +290,19 @@ std::vector<double> ParseElevationResponse(const std::vector<uint8_t>& responseD
         
         if (!decoder.ReadTag(fieldNumber, wireType)) break;
         
-        if (fieldNumber == 1 && wireType == WireType::LengthDelimited) {
-            // Field 1 is elevations (packed double)
-            elevations = decoder.DecodePackedDouble();
+        if (fieldNumber == 1) {
+            // Field 1 is elevations - can be packed or unpacked repeated double
+            if (wireType == WireType::LengthDelimited) {
+                // Packed repeated double: length-delimited blob of fixed64 values
+                elevations = decoder.DecodePackedDouble();
+            } else if (wireType == WireType::Fixed64) {
+                // Unpacked: individual fixed64 values
+                // We've already read the tag, so decode the double directly
+                elevations.push_back(decoder.DecodeDouble());
+            } else {
+                // Unknown wire type for field 1, skip
+                decoder.SkipField(wireType);
+            }
         } else {
             // Skip unknown fields
             decoder.SkipField(wireType);

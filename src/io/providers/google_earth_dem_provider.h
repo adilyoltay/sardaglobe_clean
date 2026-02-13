@@ -25,7 +25,8 @@ public:
     
     // Allow injection of elevation provider for testing
     explicit GoogleEarthDemProvider(std::unique_ptr<IElevationProvider> elevationProvider,
-                                    int meshN = 17);
+                                    int meshN = 17,
+                                    const std::string& elevationEndpoint = "");
     
     ~GoogleEarthDemProvider() override;
 
@@ -41,6 +42,7 @@ public:
 private:
     std::unique_ptr<IElevationProvider> elevationProvider_;
     int meshN_;
+    std::string elevationEndpoint_;  // For NetworkPanel logging
     std::atomic<DemHealthStatus> healthStatus_{DemHealthStatus::Unknown};
     
     // Generate grid of points for a tile

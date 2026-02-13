@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <optional>
+#include "dem_fetch_result.h"
 
 namespace globe {
 
@@ -23,6 +24,7 @@ struct ElevationBatchResult {
     bool ok = false;
     std::vector<double> heights;  // Heights in meters, same order as input points
     std::string error;            // Error message if ok == false
+    DemFetchResult fetch;         // Transport/HTTP metadata for telemetry/backoff
 };
 
 // Interface for point elevation providers.

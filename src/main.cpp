@@ -39,8 +39,7 @@ int main(int argc, char** argv) {
             if (std::strcmp(provider, "terrain-rgb") != 0 && 
                 std::strcmp(provider, "google-earth") != 0) {
                 std::cerr << "Error: Invalid DEM provider '" << provider << "'\n"
-                          << "Valid providers: terrain-rgb, google-earth\n"
-                          << "Note: google-earth provider is not yet implemented (Phase 4/5)\n";
+                          << "Valid providers: terrain-rgb, google-earth\n";
                 return 1;
             }
             config.demProvider = provider;
@@ -157,6 +156,7 @@ int main(int argc, char** argv) {
                       << "\nEnvironment:\n"
                       << "  NATIVE_GLOBE_TILE_AUTH  Tile HTTP basic auth (user:password)\n"
                       << "  NATIVE_GLOBE_DEM_AUTH   DEM HTTP basic auth (user:password)\n"
+                      << "  NATIVE_GLOBE_GE_TOKEN   Google Earth auth token (for --dem-provider google-earth)\n"
                       ;
             return 0;
         }
@@ -166,13 +166,18 @@ int main(int argc, char** argv) {
     if (config.demProvider == "google-earth" && !config.demUrl.empty()) {
         std::cerr << "Error: --dem-url cannot be used with --dem-provider google-earth\n"
                   << "google-earth provider uses its own elevation/mesh endpoints.\n"
-                  << "Note: google-earth provider is not yet implemented (Phase 4/5).\n";
+                  << "Use --ge-elevation-endpoint and set " << config.geTokenEnv << " env var.\n";
         return 1;
     }
     
     std::cout << "Native Globe - Clean Architecture\n";
     std::cout << "Tile URL: " << config.tileUrl << "\n";
-    std::cout << "DEM URL: " << (config.demUrl.empty() ? config.demBaseUrl : config.demUrl) << "\n";
+    if (config.demProvider == "google-earth") {
+        std::cout << "GE Elevation Endpoint: " << config.geElevationEndpoint << "\n";
+        std::cout << "GE Mesh Endpoint: " << (config.geMeshEndpoint.empty() ? "(not set)" : config.geMeshEndpoint) << "\n";
+    } else {
+        std::cout << "DEM URL: " << (config.demUrl.empty() ? config.demBaseUrl : config.demUrl) << "\n";
+    }
     std::cout << "DEM Provider: " << config.demProvider << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";
     std::cout << "DEM Auth: " << (config.demAuth.empty() ? "none" : "basic") << "\n";

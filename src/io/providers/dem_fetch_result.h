@@ -19,7 +19,8 @@ struct DemFetchResult {
     // Error categorization
     enum class ErrorType {
         None,           // Success
-        Network,        // Connection/DNS/timeout (CURLE_* errors)
+        Network,        // Connection/DNS (CURLE_* errors)
+        Timeout,        // Request timeout (CURLE_OPERATION_TIMEDOUT=28)
         Auth,           // 401/403
         HttpError,      // Other HTTP 4xx/5xx
         Decode,         // Image decode failure
@@ -43,7 +44,8 @@ struct DemFetchResult {
     bool IsTimeout() const {
         return errorType == ErrorType::Network && 
                (curlResult == 28 || // CURLE_OPERATION_TIMEDOUT
-                errorMessage.find("timeout") != std::string::npos);
+                errorMessage.find("timeout") != std::string::npos ||
+                errorMessage.find("timed out") != std::string::npos);
     }
     
     // Create success result
@@ -51,6 +53,7 @@ struct DemFetchResult {
     
     // Create common failure results
     static DemFetchResult NetworkError(int curlCode, const std::string& msg, double elapsedMs);
+    static DemFetchResult TimeoutError(int curlCode, const std::string& msg, double elapsedMs);
     static DemFetchResult AuthError(long httpCode, const std::string& msg);
     static DemFetchResult HttpError(long httpCode, const std::string& msg);
     static DemFetchResult DecodeError(const std::string& msg);

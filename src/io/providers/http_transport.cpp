@@ -73,7 +73,10 @@ HttpResponse CurlHttpTransport::DoRequest(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, config_.connectTimeoutSec);
     
     // SSL verification
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, config_.verifySsl ? 1L : 0L);
+    // verifySsl=false OR insecureMode=true -> disable both peer and host verification
+    long sslVerify = (config_.verifySsl && !config_.insecureMode) ? 1L : 0L;
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, sslVerify);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, sslVerify ? 2L : 0L);
     
     // User agent
     curl_easy_setopt(curl, CURLOPT_USERAGENT, config_.userAgent.c_str());
@@ -93,6 +96,7 @@ HttpResponse CurlHttpTransport::DoRequest(const std::string& url,
     
     // Perform request
     CURLcode res = curl_easy_perform(curl);
+    response.curlResult = static_cast<int>(res);
     
     // Get timing
     const auto endTime = std::chrono::high_resolution_clock::now();
@@ -142,10 +146,12 @@ DemFetchResult HttpResponseToDemFetchResult(const HttpResponse& response) {
         return DemFetchResult::AuthError(response.httpCode, response.errorMessage);
     }
     
-    // Check for timeout in error message
-    if (response.errorMessage.find("Timeout") != std::string::npos ||
-        response.errorMessage.find("timeout") != std::string::npos) {
-        auto result = DemFetchResult::NetworkError(28, response.errorMessage, response.elapsedMs);
+    // Check for timeout (curlResult=28) or timeout in error message
+    if (response.curlResult == 28 ||
+        response.errorMessage.find("Timeout") != std::string::npos ||
+        response.errorMessage.find("timeout") != std::string::npos ||
+        response.errorMessage.find("timed out") != std::string::npos) {
+        auto result = DemFetchResult::TimeoutError(28, response.errorMessage, response.elapsedMs);
         result.httpStatusCode = response.httpCode;
         return result;
     }

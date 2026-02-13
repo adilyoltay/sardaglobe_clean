@@ -13,12 +13,14 @@ struct HttpTransportConfig {
     std::string userAgent = "NativeGlobe/1.0";
     long timeoutSec = 30;
     long connectTimeoutSec = 10;
-    bool verifySsl = false;
+    bool verifySsl = true;      // Default: secure (MITM protection)
+    bool insecureMode = false;  // For local mock/self-signed (explicit opt-in)
 };
 
 // HTTP response structure
 struct HttpResponse {
     long httpCode = 0;
+    int curlResult = 0;       // CURLcode (e.g., 0=OK, 28=timeout)
     std::vector<uint8_t> body;
     std::string errorMessage;
     double elapsedMs = 0.0;

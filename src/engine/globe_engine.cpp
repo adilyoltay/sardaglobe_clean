@@ -169,6 +169,7 @@ bool GlobeEngine::Init() {
         demConfig.connectTimeoutSec = 10;
         // Wire GE config fields
         demConfig.geElevationEndpoint = config_.geElevationEndpoint;
+        demConfig.geMeshEndpoint = config_.geMeshEndpoint;  // Phase 5 wiring
         demConfig.geHeaders = config_.geHeaders;
         demConfig.geTokenEnv = config_.geTokenEnv;
         demConfig.geElevationType = config_.geElevationType;
