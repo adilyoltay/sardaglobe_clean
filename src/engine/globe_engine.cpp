@@ -1919,6 +1919,12 @@ void GlobeEngine::Update(double dt, double currentTime) {
             visibleLeaves.push_back(key);
         }
         rockMeshManager_->UpdateVisibleQuadKeys(visibleLeaves);
+        
+        // Process priority queue (dispatch requests within budget)
+        int dispatched = rockMeshManager_->ProcessPriorityQueue(config_.geMeshRequestBudgetMs);
+        if (dispatched > 0) {
+            frameRequested_ = true;
+        }
     }
     
     // Process RockMesh uploads (Phase 5)

@@ -98,14 +98,24 @@ public:
     // Sprint 2: Get active node keys snapshot (for debugging)
     std::vector<std::string> GetActiveNodeKeysSnapshot() const;
     
+    // Sprint 2: Process priority queue (called from main thread)
+    // Returns number of requests dispatched
+    int ProcessPriorityQueue(double budgetMs);
+    
     // Sprint 2: Get debug stats
     struct Stats {
-        int requestedCount = 0;
-        int enqueuedCount = 0;
-        int staleDropCount = 0;
-        int uploadedCount = 0;
-        int failureCount = 0;
-        int cachedCount = 0;  // Stale but cached for quick return
+        int requestedCount = 0;           // Total requests from visible set
+        int enqueuedCount = 0;            // Successfully queued to requestQueue
+        int droppedFullQueueCount = 0;    // Dropped due to full queue
+        int dedupedCount = 0;             // Skipped (already requested)
+        int priorityDispatchedCount = 0;  // Dispatched via priority queue
+        int staleDropCount = 0;           // Dropped due to stale generation
+        int generationDrops = 0;          // Worker dropped stale entries
+        int uploadQueueDrops = 0;         // Failed to push to upload queue
+        int uploadedCount = 0;            // Successfully uploaded to GPU
+        int failureCount = 0;             // Failed (network, parse, build)
+        int cachedCount = 0;              // Stale but cached for quick return
+        int inFlightCount = 0;            // Currently fetching
     };
     Stats GetStats() const;
     
@@ -156,9 +166,12 @@ private:
     // Sprint 2: Helper methods
     std::string TileKeyToNodeKey(const TileKey& key) const;
     void MarkStaleEntries(const std::unordered_set<std::string>& visibleKeys);
-    void ProcessPriorityQueue();
     void UpdateLRU(const std::string& nodeKey);
     void EvictIfNeeded();
+    
+    // Sprint 2: In-flight tracking
+    std::unordered_set<std::string> inFlightSet_;
+    mutable std::mutex inFlightMutex_;
 };
 
 } // namespace globe

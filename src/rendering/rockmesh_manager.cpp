@@ -57,42 +57,39 @@ void RockMeshManager::Shutdown() {
     }
 }
 
+// Sprint 2: Internal request - adds to priority queue, not directly to worker queue
 void RockMeshManager::Request(const std::string& nodeKey) {
-    bool shouldQueue = false;
-    {
-        std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    
+    auto it = entries_.find(nodeKey);
+    if (it != entries_.end()) {
+        // Already known - update generation and access time
+        it->second.generation = currentGeneration_.load();
+        it->second.lastAccessTime = glfwGetTime();
+        UpdateLRU(nodeKey);
         
-        auto it = entries_.find(nodeKey);
-        if (it != entries_.end()) {
-            // Already known - update generation and access time
-            it->second.generation = currentGeneration_.load();
-            it->second.lastAccessTime = glfwGetTime();
-            UpdateLRU(nodeKey);
+        // If already uploaded or in-flight, no need to re-queue
+        if (it->second.state == RockMeshState::Uploaded ||
+            it->second.state == RockMeshState::Fetching ||
+            it->second.state == RockMeshState::Queued) {
             return;
         }
         
+        // If stale/failed, reset to queue again
+        if (it->second.state == RockMeshState::Stale ||
+            it->second.state == RockMeshState::Failed) {
+            it->second.state = RockMeshState::Queued;
+            it->second.error.clear();
+        }
+    } else {
         // New entry
         RockMeshEntry entry;
         entry.state = RockMeshState::Queued;
         entry.generation = currentGeneration_.load();
         entry.lastAccessTime = glfwGetTime();
+        entry.priority = 0;  // Will be set by UpdateVisibleQuadKeys
         entries_[nodeKey] = std::move(entry);
         UpdateLRU(nodeKey);
-        shouldQueue = true;
-    }
-    
-    // Queue for worker (outside lock to avoid blocking)
-    if (shouldQueue) {
-        if (!requestQueue_.Push(nodeKey)) {
-            // Queue full or closed - mark as failed
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            auto it = entries_.find(nodeKey);
-            if (it != entries_.end()) {
-                it->second.state = RockMeshState::Failed;
-                it->second.error = "Request queue full or closed";
-            }
-            std::cerr << "[RockMesh] Failed to queue request for " << nodeKey << "\n";
-        }
     }
 }
 
@@ -118,18 +115,149 @@ void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleL
     // Mark entries not in visible set as stale
     MarkStaleEntries(visibleKeys);
     
-    // Request all visible keys
+    // Add visible keys to priority queue (not directly to requestQueue)
     int requested = 0;
-    for (const auto& key : visibleKeys) {
-        Request(key);
-        requested++;
+    int deduped = 0;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        std::lock_guard<std::mutex> reqLock(requestMutex_);
+        
+        for (const auto& key : visibleKeys) {
+            // Check if already in priority queue or in-flight
+            bool alreadyPending = false;
+            
+            // Check existing entries
+            auto it = entries_.find(key);
+            if (it != entries_.end()) {
+                if (it->second.state == RockMeshState::Queued ||
+                    it->second.state == RockMeshState::Fetching ||
+                    it->second.state == RockMeshState::Uploaded) {
+                    // Update generation for existing entry
+                    it->second.generation = generation;
+                    alreadyPending = true;
+                    deduped++;
+                }
+            }
+            
+            if (!alreadyPending) {
+                // Create entry first
+                if (it == entries_.end()) {
+                    RockMeshEntry entry;
+                    entry.state = RockMeshState::Queued;
+                    entry.generation = generation;
+                    entry.lastAccessTime = glfwGetTime();
+                    entry.priority = static_cast<int>(visibleLeaves.size()) - requested;  // Simple priority
+                    entries_[key] = std::move(entry);
+                    UpdateLRU(key);
+                }
+                
+                // Add to priority queue
+                MeshRequest req;
+                req.nodeKey = key;
+                req.priority = static_cast<int>(visibleLeaves.size()) - requested;  // Higher = more recent
+                req.lod = 0;  // TODO: Calculate actual LOD
+                req.generation = generation;
+                pendingRequests_.push(req);
+                requested++;
+            }
+        }
     }
     
     // Update stats
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.requestedCount = requested;
+        stats_.requestedCount += requested + deduped;
+        stats_.dedupedCount += deduped;
     }
+}
+
+// Sprint 2: Process priority queue and dispatch to worker
+int RockMeshManager::ProcessPriorityQueue(double budgetMs) {
+    auto start = std::chrono::steady_clock::now();
+    int dispatched = 0;
+    uint64_t currentGen = currentGeneration_.load();
+    
+    while (true) {
+        // Check budget
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(now - start).count();
+        if (elapsed >= budgetMs) {
+            break;
+        }
+        
+        // Check in-flight limit
+        {
+            std::lock_guard<std::mutex> lock(inFlightMutex_);
+            if (static_cast<int>(inFlightSet_.size()) >= config_.geMeshMaxInFlight) {
+                break;
+            }
+        }
+        
+        // Get next request from priority queue
+        MeshRequest req;
+        {
+            std::lock_guard<std::mutex> lock(requestMutex_);
+            if (pendingRequests_.empty()) {
+                break;
+            }
+            req = pendingRequests_.top();
+            pendingRequests_.pop();
+        }
+        
+        // Check generation (skip stale)
+        if (req.generation < currentGen - 1) {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.staleDropCount++;
+            continue;
+        }
+        
+        // Check if still valid in entries
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(req.nodeKey);
+            if (it == entries_.end() || 
+                (it->second.state != RockMeshState::Queued &&
+                 it->second.state != RockMeshState::Stale)) {
+                continue;
+            }
+            
+            // Update state to Fetching
+            it->second.state = RockMeshState::Fetching;
+            it->second.generation = req.generation;
+        }
+        
+        // Try non-blocking push to requestQueue
+        // If full, try to drop oldest stale/low-priority
+        if (!requestQueue_.Push(req.nodeKey)) {
+            // Queue full - mark as failed and update stats
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(req.nodeKey);
+            if (it != entries_.end()) {
+                it->second.state = RockMeshState::Failed;
+                it->second.error = "Request queue full";
+            }
+            std::lock_guard<std::mutex> statsLock(statsMutex_);
+            stats_.droppedFullQueueCount++;
+            continue;
+        }
+        
+        // Track in-flight
+        {
+            std::lock_guard<std::mutex> lock(inFlightMutex_);
+            inFlightSet_.insert(req.nodeKey);
+        }
+        
+        dispatched++;
+    }
+    
+    // Update stats
+    if (dispatched > 0) {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.priorityDispatchedCount += dispatched;
+        stats_.inFlightCount = static_cast<int>(inFlightSet_.size());
+    }
+    
+    return dispatched;
 }
 
 // Sprint 2: Set current viewport generation
@@ -183,6 +311,11 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
                 it->second.state = RockMeshState::Uploaded;
                 uploaded++;
             }
+            // Remove from in-flight (success)
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(cpu.id);
+            }
         } else {
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
@@ -190,6 +323,11 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = "GPU upload failed";
                 failed++;
+            }
+            // Remove from in-flight (failure)
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(cpu.id);
             }
         }
         
@@ -311,6 +449,11 @@ RockMeshManager::Stats RockMeshManager::GetStats() const {
     std::lock_guard<std::mutex> lock(statsMutex_);
     Stats s = stats_;
     s.cachedCount = static_cast<int>(lruList_.size());
+    // Update in-flight count
+    {
+        std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+        s.inFlightCount = static_cast<int>(inFlightSet_.size());
+    }
     return s;
 }
 
@@ -338,8 +481,11 @@ void RockMeshManager::WorkerLoop() {
                     it->second.state = RockMeshState::Stale;
                     {
                         std::lock_guard<std::mutex> statsLock(statsMutex_);
-                        stats_.staleDropCount++;
+                        stats_.generationDrops++;
                     }
+                    // Remove from in-flight
+                    std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                    inFlightSet_.erase(nodeKey);
                     continue;
                 }
                 it->second.state = RockMeshState::Fetching;
@@ -359,6 +505,11 @@ void RockMeshManager::WorkerLoop() {
                 std::lock_guard<std::mutex> statsLock(statsMutex_);
                 stats_.failureCount++;
             }
+            // Remove from in-flight
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
             continue;
         }
         
@@ -371,8 +522,11 @@ void RockMeshManager::WorkerLoop() {
                 it->second.state = RockMeshState::Stale;
                 {
                     std::lock_guard<std::mutex> statsLock(statsMutex_);
-                    stats_.staleDropCount++;
+                    stats_.generationDrops++;
                 }
+                // Remove from in-flight
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
                 continue;
             }
         }
@@ -389,6 +543,11 @@ void RockMeshManager::WorkerLoop() {
             {
                 std::lock_guard<std::mutex> statsLock(statsMutex_);
                 stats_.failureCount++;
+            }
+            // Remove from in-flight
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
             }
             continue;
         }
@@ -407,6 +566,11 @@ void RockMeshManager::WorkerLoop() {
                 std::lock_guard<std::mutex> statsLock(statsMutex_);
                 stats_.failureCount++;
             }
+            // Remove from in-flight
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
             continue;
         }
         
@@ -422,9 +586,16 @@ void RockMeshManager::WorkerLoop() {
             std::cerr << "[RockMesh] Failed to queue upload for " << nodeKey << "\n";
             {
                 std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.uploadQueueDrops++;
                 stats_.failureCount++;
             }
+            // Remove from in-flight
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
         }
+        // Note: Successful uploads will have in-flight removed in ProcessUploads
     }
 }
 
@@ -698,11 +869,6 @@ void RockMeshManager::EvictIfNeeded() {
             ++it;
         }
     }
-}
-
-void RockMeshManager::ProcessPriorityQueue() {
-    // Sprint 2 TODO: Process priority queue for smarter request ordering
-    // For now, requests are FIFO via requestQueue_
 }
 
 } // namespace globe
