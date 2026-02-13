@@ -55,7 +55,8 @@ int RunPrecisionReport() {
         {"P4: West", 0.0, -0.0011}    // ~100m west
     };
     
-    globe::Ellipsoid ellipsoid = globe::Ellipsoid::WGS84();
+    // Use km-scale ellipsoid to match camera's internal units
+    const globe::Ellipsoid& ellipsoid = globe::Ellipsoid::WGS84_KM();
     double maxDeltaAllScenarios = 0.0;
     double maxDelta50mOrLess = 0.0;
     
