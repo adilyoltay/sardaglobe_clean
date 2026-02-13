@@ -42,10 +42,10 @@ struct DemFetchResult {
     
     // Helper to determine if this is a timeout
     bool IsTimeout() const {
-        return errorType == ErrorType::Network && 
-               (curlResult == 28 || // CURLE_OPERATION_TIMEDOUT
-                errorMessage.find("timeout") != std::string::npos ||
-                errorMessage.find("timed out") != std::string::npos);
+        return errorType == ErrorType::Timeout || 
+               (errorType == ErrorType::Network && curlResult == 28) ||
+               errorMessage.find("timed out") != std::string::npos ||
+               errorMessage.find("timeout") != std::string::npos;
     }
     
     // Create success result

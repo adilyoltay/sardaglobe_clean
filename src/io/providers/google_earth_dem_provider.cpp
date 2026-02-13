@@ -132,6 +132,9 @@ bool GoogleEarthDemProvider::FetchDemTile(const TileKey& key, DemGridData& outDa
             case DemFetchResult::ErrorType::HttpError:
                 if (outResult.httpStatusCode == 401 || outResult.httpStatusCode == 403) {
                     healthStatus_.store(DemHealthStatus::AuthFailed);
+                } else {
+                    // Other HTTP errors (4xx/5xx except 401/403)
+                    healthStatus_.store(DemHealthStatus::BadResponse);
                 }
                 break;
             case DemFetchResult::ErrorType::Network:

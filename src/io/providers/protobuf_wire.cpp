@@ -294,7 +294,9 @@ std::vector<double> ParseElevationResponse(const std::vector<uint8_t>& responseD
             // Field 1 is elevations - can be packed or unpacked repeated double
             if (wireType == WireType::LengthDelimited) {
                 // Packed repeated double: length-delimited blob of fixed64 values
-                elevations = decoder.DecodePackedDouble();
+                // Append to existing (don't overwrite - field may appear multiple times)
+                std::vector<double> chunk = decoder.DecodePackedDouble();
+                elevations.insert(elevations.end(), chunk.begin(), chunk.end());
             } else if (wireType == WireType::Fixed64) {
                 // Unpacked: individual fixed64 values
                 // We've already read the tag, so decode the double directly

@@ -141,23 +141,33 @@ DemFetchResult HttpResponseToDemFetchResult(const HttpResponse& response) {
         return DemFetchResult::Success(response.httpCode, response.body.size(), response.elapsedMs);
     }
     
+    // Build result preserving all metadata (curlResult, elapsedMs, bytesReceived)
+    DemFetchResult result;
+    result.success = false;
+    result.httpStatusCode = response.httpCode;
+    result.curlResult = response.curlResult;
+    result.elapsedMs = response.elapsedMs;
+    result.bytesReceived = response.body.size();
+    result.errorMessage = response.errorMessage;
+    
     // Map HTTP errors to DemFetchResult error types
     if (response.httpCode == 401 || response.httpCode == 403) {
-        return DemFetchResult::AuthError(response.httpCode, response.errorMessage);
+        result.errorType = DemFetchResult::ErrorType::Auth;
+    } else if (response.curlResult == 28 ||
+               response.errorMessage.find("timed out") != std::string::npos ||
+               response.errorMessage.find("timeout") != std::string::npos ||
+               response.errorMessage.find("Timeout") != std::string::npos) {
+        // Timeout: curlResult=28 or message contains timeout
+        result.errorType = DemFetchResult::ErrorType::Timeout;
+    } else if (response.curlResult != 0 && response.curlResult != 200) {
+        // CURL network error (not HTTP error)
+        result.errorType = DemFetchResult::ErrorType::Network;
+    } else {
+        // Generic HTTP error (4xx/5xx)
+        result.errorType = DemFetchResult::ErrorType::HttpError;
     }
     
-    // Check for timeout (curlResult=28) or timeout in error message
-    if (response.curlResult == 28 ||
-        response.errorMessage.find("Timeout") != std::string::npos ||
-        response.errorMessage.find("timeout") != std::string::npos ||
-        response.errorMessage.find("timed out") != std::string::npos) {
-        auto result = DemFetchResult::TimeoutError(28, response.errorMessage, response.elapsedMs);
-        result.httpStatusCode = response.httpCode;
-        return result;
-    }
-    
-    // Generic HTTP error
-    return DemFetchResult::HttpError(response.httpCode, response.errorMessage);
+    return result;
 }
 
 } // namespace globe
