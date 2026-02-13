@@ -110,6 +110,105 @@ int main() {
     }
 
     failed += !Expect(decoder.GetDecodedBlobHits() >= 1, "decoded blob fastpath counter should increment");
+
+    // =========================================================================
+    // #5: Black nodata detector false-positive tests (variance guard)
+    // =========================================================================
+
+    // Test 3: Dark textured tile (gradient/noise) - should NOT be flagged as black nodata
+    // This tests that "dark but detailed" imagery doesn't trigger false-positive
+    done = false;
+    DecodeResult darkTexturedResult;
+    const int texturedW = 32;
+    const int texturedH = 32;
+    std::vector<uint8_t> texturedRgba(static_cast<size_t>(texturedW * texturedH * 4), 0);
+    // Create a dark gradient with variation (simulates real dark terrain imagery)
+    for (int y = 0; y < texturedH; ++y) {
+        for (int x = 0; x < texturedW; ++x) {
+            size_t idx = static_cast<size_t>((y * texturedW + x) * 4);
+            // Gradient from 0-20 with noise (variance ensures it's not nodata)
+            uint8_t value = static_cast<uint8_t>((x + y) % 21);  // 0-20 range
+            texturedRgba[idx + 0] = value;
+            texturedRgba[idx + 1] = value;
+            texturedRgba[idx + 2] = static_cast<uint8_t>((value + 5) % 21);  // Slight variation
+            texturedRgba[idx + 3] = 255;  // Opaque
+        }
+    }
+    std::vector<uint8_t> texturedPacked;
+    failed += !Expect(decoded_blob::Pack(texturedW, texturedH, texturedRgba, texturedPacked),
+                      "dark textured decoded blob pack should succeed");
+    DecodeRequest texturedReq;
+    texturedReq.key = TileKey(4, 5, 2);
+    texturedReq.data = std::move(texturedPacked);
+    texturedReq.priority = Priority::Normal;
+    texturedReq.score = 1.0;
+    decoder.SetResultCallback([&](DecodeResult r) {
+        std::lock_guard<std::mutex> lock(mutex);
+        darkTexturedResult = std::move(r);
+        done = true;
+        cv.notify_one();
+    });
+    decoder.Decode(std::move(texturedReq));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        bool signaled = cv.wait_for(lock, std::chrono::seconds(2), [&]() { return done; });
+        failed += !Expect(signaled, "decoder callback should be signaled for dark textured tile");
+    }
+    if (done) {
+        failed += !Expect(darkTexturedResult.success, "dark textured decode result should be successful");
+        // KEY ASSERTION: Dark textured tile should NOT be flagged as black nodata
+        // (variance guard prevents false-positive)
+        failed += !Expect(!darkTexturedResult.mostlyBlackOpaque,
+                          "dark textured tile (with variance) should NOT be flagged mostly black");
+    }
+
+    // Test 4: Black tile with small artefact - should still be flagged as nodata
+    // This tests that small non-black regions don't prevent nodata detection
+    done = false;
+    DecodeResult blackWithArtefactResult;
+    const int artefactW = 32;
+    const int artefactH = 32;
+    std::vector<uint8_t> artefactRgba(static_cast<size_t>(artefactW * artefactH * 4), 0);
+    // 98% black pixels, 2% with value 3 (small artefact)
+    for (int i = 3; i < artefactW * artefactH * 4; i += 4) {
+        artefactRgba[i] = 255;  // Opaque
+    }
+    // Add small artefacts (2% of pixels)
+    for (int i = 0; i < (artefactW * artefactH) / 50; ++i) {
+        size_t idx = static_cast<size_t>(i * 4 * 10);  // Every 10th pixel
+        if (idx + 2 < artefactRgba.size()) {
+            artefactRgba[idx + 0] = 3;
+            artefactRgba[idx + 1] = 3;
+            artefactRgba[idx + 2] = 3;
+        }
+    }
+    std::vector<uint8_t> artefactPacked;
+    failed += !Expect(decoded_blob::Pack(artefactW, artefactH, artefactRgba, artefactPacked),
+                      "black with artefact decoded blob pack should succeed");
+    DecodeRequest artefactReq;
+    artefactReq.key = TileKey(4, 6, 2);
+    artefactReq.data = std::move(artefactPacked);
+    artefactReq.priority = Priority::Normal;
+    artefactReq.score = 1.0;
+    decoder.SetResultCallback([&](DecodeResult r) {
+        std::lock_guard<std::mutex> lock(mutex);
+        blackWithArtefactResult = std::move(r);
+        done = true;
+        cv.notify_one();
+    });
+    decoder.Decode(std::move(artefactReq));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        bool signaled = cv.wait_for(lock, std::chrono::seconds(2), [&]() { return done; });
+        failed += !Expect(signaled, "decoder callback should be signaled for black+artefact tile");
+    }
+    if (done) {
+        failed += !Expect(blackWithArtefactResult.success, "black+artefact decode result should be successful");
+        // KEY ASSERTION: Black tile with small artefacts should still be flagged as nodata
+        failed += !Expect(blackWithArtefactResult.mostlyBlackOpaque,
+                          "black tile with small artefacts should still be flagged mostly black");
+    }
+
     decoder.Shutdown();
 
     if (failed == 0) {
