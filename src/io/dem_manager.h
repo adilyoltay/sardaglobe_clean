@@ -98,6 +98,12 @@ struct DemManagerConfig {
     double failRetryDelaySec = 30.0;  // Retry failed tiles after this delay
     int authBackoffThreshold = 3;     // Consecutive auth fails before backoff
     double authBackoffSec = 30.0;     // Backoff duration after auth failures
+    
+    // Google Earth provider configuration (Phase 4/5)
+    std::string geEndpoint = "https://kh.google.com/rpc/eh";  // Elevation service endpoint
+    std::string geEpoch = "latest";                           // Dataset epoch
+    std::string geChannel = "default";                        // Service channel
+    // GE auth token from environment (NATIVE_GLOBE_GE_TOKEN). Never hardcode.
 };
 
 // DEM Manager - handles elevation data fetching and caching

@@ -34,7 +34,16 @@ int main(int argc, char** argv) {
             config.demUrl = argv[++i];
             config.demEnabled = true;
         } else if (std::strcmp(argv[i], "--dem-provider") == 0 && i + 1 < argc) {
-            config.demProvider = argv[++i];
+            const char* provider = argv[++i];
+            // Strict validation for provider values
+            if (std::strcmp(provider, "terrain-rgb") != 0 && 
+                std::strcmp(provider, "google-earth") != 0) {
+                std::cerr << "Error: Invalid DEM provider '" << provider << "'\n"
+                          << "Valid providers: terrain-rgb, google-earth\n"
+                          << "Note: google-earth provider is not yet implemented (Phase 4/5)\n";
+                return 1;
+            }
+            config.demProvider = provider;
             config.demEnabled = true;
         } else if (std::strcmp(argv[i], "--dem-format") == 0 && i + 1 < argc) {
             std::cerr << "ERROR: --dem-format is deprecated. Use --dem-provider terrain-rgb|google-earth\n";

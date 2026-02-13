@@ -219,8 +219,8 @@ int main() {
 
     if (warned > 0) {
         std::cout << "\n** WARNINGS indicate endpoint access/config issues.\n"
-                  << "   To fix DEM loading, verify your API keys:\n"
-                  << "     export NATIVE_GLOBE_DEM_AUTH=\"your-api-key\"\n"
+                  << "   To fix DEM loading, check your API key or auth:\n"
+                  << "     export NATIVE_GLOBE_DEM_AUTH=\"user:password\"  (for basic auth)\n"
                   << "   Or use a public tile source:\n"
                   << "     ./native_globe --tile-url \"https://tile.openstreetmap.org/{z}/{x}/{y}.png\"\n";
     }

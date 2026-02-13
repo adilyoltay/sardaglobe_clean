@@ -499,8 +499,11 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
             return FetchTerrainRGB(key, outData);
         case DemProviderType::GoogleEarth:
             // TODO(Phase 4/5): Implement Google Earth provider
-            // For now, fall back to TerrainRGB
-            return FetchTerrainRGB(key, outData);
+            // For now, fail-fast with clear error (no silent fallback)
+            std::cerr << "[DEM] ERROR: Google Earth provider not yet implemented (Phase 4/5). "
+                      << "Use --dem-provider terrain-rgb or check back later." << std::endl;
+            healthStatus_.store(DemHealthStatus::BadResponse);
+            return false;
     }
     return false;
 }
