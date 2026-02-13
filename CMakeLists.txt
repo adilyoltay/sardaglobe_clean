@@ -100,7 +100,6 @@ add_executable(native_globe
   src/io/memory_tile_cache.cpp
   src/io/tile_url_template.cpp
   src/io/dem_manager.cpp
-  src/io/providers/dem_fetch_result.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/providers/dem_fetch_result.cpp
   src/io/providers/terrain_rgb_provider.cpp

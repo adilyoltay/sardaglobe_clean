@@ -495,6 +495,8 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
         double prev = stats_.totalFetchMs.load(std::memory_order_relaxed);
         while (!stats_.totalFetchMs.compare_exchange_weak(
                    prev, prev + result.elapsedMs, std::memory_order_relaxed, std::memory_order_relaxed)) {}
+        // Reset auth fail counter on successful fetch
+        consecutiveAuthFails_.store(0);
     } else {
         stats_.fetchFail++;
         

@@ -192,7 +192,11 @@ bool TerrainRGBProvider::FetchDemTile(const TileKey& key, DemGridData& outData,
     }
 
     if (!DecodeTile(pngData, outData)) {
-        outResult = DemFetchResult::DecodeError("Failed to decode PNG/terrain-rgb");
+        // Preserve network fetch metadata, only update error-specific fields
+        outResult.success = false;
+        outResult.errorType = DemFetchResult::ErrorType::Decode;
+        outResult.errorMessage = "Failed to decode PNG/terrain-rgb";
+        // Note: httpStatusCode, bytesReceived, elapsedMs preserved from successful fetch
         healthStatus_.store(DemHealthStatus::BadResponse);
         
         // Record decode failure in network panel
