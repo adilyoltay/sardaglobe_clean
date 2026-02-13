@@ -22,7 +22,9 @@ constexpr float NEAR_PLANE = 0.01f;
 constexpr float FAR_PLANE_FACTOR = 100.0f;            // FAR = EARTH_RADIUS * factor
 
 // LOD Selection
-constexpr float DEFAULT_SSE_THRESHOLD = 1.4f;         // Screen-space error threshold (pixels)
+// Google Earth parity: 2.0f is GE standard quality mode threshold.
+// Lower values = more tiles (1.4f = ~43% more tiles than GE).
+constexpr float DEFAULT_SSE_THRESHOLD = 2.0f;         // Screen-space error threshold (pixels) - GE standard
 
 // Resource limits
 constexpr int MAX_CONCURRENT_FETCHES = 16;

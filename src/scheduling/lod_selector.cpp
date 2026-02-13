@@ -180,11 +180,13 @@ bool LodSelector::TraverseTile(
         }
     }
 
-    // Check if should subdivide (SSE + hysteresis).
+    // Check if should subdivide (SSE + hysteresis + quality + minLodPixels).
     bool subdivide = ShouldSubdivide(
         key, cameraPos, viewportHeight, fovDegrees_,
         settings.sseThreshold, settings.tiltFactor,
-        wasRefinedLastFrame, settings.sseHysteresisRatio
+        wasRefinedLastFrame, settings.sseHysteresisRatio,
+        settings.minLodPixels,      // GE parity: min visible tile size
+        settings.qualityMultiplier  // GE parity: quality mode
     );
 
     // Progressive refinement budget (GE-style smoothness):
@@ -313,7 +315,9 @@ bool LodSelector::ShouldSubdivide(
     float sseThreshold,
     float tiltFactor,
     bool isCurrentlySubdivided,
-    float hysteresisRatio
+    float hysteresisRatio,
+    float minLodPixels,      // GE parity: min visible tile size
+    float qualityMultiplier  // GE parity: quality mode multiplier
 ) {
     glm::vec3 center = TileCenterWorld(key);
     float radius = TileBoundingRadius(key);
@@ -328,9 +332,25 @@ bool LodSelector::ShouldSubdivide(
     // Compute SSE
     float sse = ComputeSSE(key, distanceMeters, viewportHeight, fovDegrees);
     
+    // minLodPixels check: Compute projected tile size at CHILD level
+    // If children would be too small to see, don't subdivide.
+    // NOTE: Set minLodPixels = 0.0f in tests to disable for forced-refine scenarios.
+    if (minLodPixels > 0.0f && key.level < 22) {
+        float childGeometricError = ComputeGeometricError(key.level + 1);
+        float fovRad = fovDegrees * static_cast<float>(M_PI) / 180.0f;
+        float sseFactor = static_cast<float>(viewportHeight) / (2.0f * std::tan(fovRad / 2.0f));
+        float childProjectedSize = (childGeometricError / static_cast<float>(distanceMeters)) * sseFactor;
+        if (childProjectedSize < minLodPixels) {
+            return false;
+        }
+    }
+    
     // Apply tilt factor (reduce detail when tilted)
     // Floor raised to 0.25 (max 4x inflation) to prevent LOD stall at extreme tilt
     float adjustedThreshold = sseThreshold / std::max(0.25f, tiltFactor);
+
+    // Apply quality mode multiplier (GE parity: 1.0/2.0/4.0)
+    adjustedThreshold *= qualityMultiplier;
 
     // Hysteresis: once refined, use a lower collapse threshold to avoid
     // frame-to-frame oscillation near the boundary.

@@ -58,6 +58,14 @@ cmake --build build --config Release
 - A simple in-app UI (ImGui) provides live controls (zoom, tile radius, cache, vector toggle, camera).
 - Tile server usage policies apply. For production, use your own tile service.
 
+### DEM Provider Selection (Terrain Elevation)
+Default DEM provider is MapTiler Terrain-RGB (public, API key required):
+```bash
+./native_globe --dem-provider terrain-rgb --dem-url https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key=YOUR_KEY
+```
+
+**Note:** `--dem-format` is deprecated. Use `--dem-provider terrain-rgb|google-earth`.
+
 ## Automated Test/Debug Modes
 
 ### Visual LOD Screenshot Test (exits automatically)

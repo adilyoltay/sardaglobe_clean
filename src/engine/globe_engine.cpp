@@ -41,21 +41,17 @@ namespace globe {
 
 namespace {
 
-DemSourceType ParseDemSourceType(std::string format) {
-    std::transform(format.begin(), format.end(), format.begin(), [](unsigned char c) {
+// Parse DEM provider string to enum. Default to TerrainRGB for any unknown value.
+DemProviderType ParseDemProvider(std::string provider) {
+    std::transform(provider.begin(), provider.end(), provider.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
 
-    if (format == "pirireis" || format == "batch") {
-        return DemSourceType::PirireisBatch;
+    if (provider == "google-earth" || provider == "google_earth" || provider == "ge") {
+        return DemProviderType::GoogleEarth;
     }
-    if (format == "terrarium") {
-        return DemSourceType::TerrainRGBTerrarium;
-    }
-    if (format == "terrain-rgb" || format == "terrain_rgb" || format == "mapbox") {
-        return DemSourceType::TerrainRGBMapbox;
-    }
-    return DemSourceType::Auto;
+    // Default: terrain-rgb (includes "terrain-rgb", "mapbox", "", or any unknown value)
+    return DemProviderType::TerrainRGB;
 }
 
 } // namespace
@@ -151,7 +147,7 @@ bool GlobeEngine::Init() {
         DemManager::Config demConfig;
         demConfig.baseUrl = config_.demUrl.empty() ? config_.demBaseUrl : config_.demUrl;
         demConfig.basicAuthUserPwd = config_.demAuth;
-        demConfig.sourceType = ParseDemSourceType(config_.demFormat);
+        demConfig.providerType = ParseDemProvider(config_.demProvider);
         demConfig.meshN = config_.demMeshN;
         demConfig.maxZoom = config_.demMaxZoom;
         demConfig.cacheSize = config_.demCacheSize;
@@ -482,6 +478,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
     lodSettings.disableHorizonCull = config_.disableHorizonCull;
     lodSettings.lodChildQuorum = config_.lodChildQuorum;
     lodSettings.maxRefinementsPerFrame = config_.maxRefinementsPerFrame;
+    
+    // GE parity: quality mode multiplier (1.0/2.0/4.0)
+    lodSettings.qualityMultiplier = QualityModeToMultiplier(config_.qualityMode);
+    
+    // GE parity: minLodPixels culling (prevent sub-pixel tiles)
+    // Note: Set to 256.0f for production, 0.0f for tests to avoid breaking forced-refine scenarios
+    lodSettings.minLodPixels = 256.0f;  // GE default (tests use 0.0f)
     
     // TiltFactor: reduce detail when camera is tilted toward horizon
     // tilt=0 (looking down) → tiltFactor=1.0 (full detail)
@@ -1135,7 +1138,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 if (heightmapManager_->HasTexture(key)) continue;
                 DemGridData demData;
                 if (demManager_->GetGridData(key, demData)) {
-                    heightmapManager_->QueueUpload(key, demData, static_cast<float>(config_.demHeightScale));
+                    heightmapManager_->QueueUpload(key, demData, static_cast<float>(config_.demHeightScaleBase * config_.demExaggerationFactor));
                     ++queued;
                 }
             }
@@ -1176,7 +1179,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 }
                 DemGridData demData;
                 if (demManager_->GetGridData(demKey, demData)) {
-                    heightmapManager_->QueueUpload(demKey, demData, static_cast<float>(config_.demHeightScale));
+                    heightmapManager_->QueueUpload(demKey, demData, static_cast<float>(config_.demHeightScaleBase * config_.demExaggerationFactor));
                     ++queued;
                 }
             };
@@ -2597,7 +2600,7 @@ bool GlobeEngine::PickGlobe(double screenX, double screenY, glm::dvec3& outPoint
         for (int iter = 0; iter < 2; ++iter) {
             double heightMeters = 0.0;
             if (sampleWithParentFallback(lon, lat, sampleLevel, heightMeters)) {
-                double heightKm = heightMeters * 0.001 * config_.demHeightScale;
+                double heightKm = heightMeters * 0.001 * config_.demHeightScaleBase * config_.demExaggerationFactor;
                 double terrainR = R + heightKm;
                 
                 // Re-intersect with terrain-adjusted sphere

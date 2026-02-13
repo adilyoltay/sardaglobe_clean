@@ -13,6 +13,25 @@ enum class DisplacementMode {
     GPU_HEIGHTMAP_DISPLACE // Flat mesh + GPU vertex shader displacement
 };
 
+// Google Earth quality modes for LOD selection
+enum class QualityMode {
+    LOW = 0,       // SSE threshold = 4.0 (~25% tiles, battery saver)
+    MEDIUM = 1,    // SSE threshold = 2.0 (GE standard quality)
+    HIGH = 2,      // SSE threshold = 1.4 (higher quality)
+    ULTRA = 3      // SSE threshold = 1.0 (~400% tiles, screenshots)
+};
+
+// Convert quality mode to SSE threshold multiplier
+inline float QualityModeToMultiplier(QualityMode mode) {
+    switch (mode) {
+        case QualityMode::LOW:    return 2.0f;   // 4.0 / 2.0
+        case QualityMode::MEDIUM: return 1.0f;   // 2.0 / 2.0 (GE standard)
+        case QualityMode::HIGH:   return 0.7f;   // 1.4 / 2.0
+        case QualityMode::ULTRA:  return 0.5f;   // 1.0 / 2.0
+    }
+    return 1.0f;
+}
+
 // Adaptive mesh segments based on tile zoom level.
 // Higher zoom tiles cover less geographic area → less spherical curvature → fewer segments needed.
 // DEM grid is small (e.g. 5×5), so excessive segments just oversample bilinear interpolation.
@@ -35,6 +54,12 @@ struct Config {
     std::string demUrl;               // Elevation/DEM URL (optional)
     // Optional HTTP basic auth for DEM endpoint, format: "user:password".
     std::string demAuth;
+    
+    // Google Earth provider configuration (only used when demProvider="google-earth")
+    std::string geEndpoint = "https://kh.google.com/rpc/eh";  // Elevation service endpoint
+    std::string geEpoch = "latest";                           // Dataset epoch
+    std::string geChannel = "default";                        // Service channel
+    // GE auth token from environment (NATIVE_GLOBE_GE_TOKEN). Never hardcode.
     
     // Cache
     std::string cacheDir = "tile_cache";
@@ -97,12 +122,20 @@ struct Config {
     // DEM/Terrain settings
     // Default: MapTiler Terrain-RGB v2 tiles (Mapbox Terrain-RGB encoding).
     std::string demBaseUrl = "https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key=YGPXGCyXf6kh5TO9dJ7l";
-    std::string demFormat = "terrain-rgb"; // auto | pirireis | terrain-rgb | terrarium
+    // DEM Provider: terrain-rgb (default, public) | google-earth (internal, requires auth)
+    std::string demProvider = "terrain-rgb";
     int demMaxZoom = 15;               // Clamp DEM requests above provider max zoom
-    int demMeshN = 5;                 // Grid resolution per tile (5x5 = 25 samples, webglobe parity)
+    int demMeshN = 17;                // Grid resolution per tile (17x17 = 289 samples, GE parity)
+                                      // Old: 5x5 = 25 samples (blocky terrain)
+                                      // New: 17x17 = 289 samples (smooth terrain)
     size_t demCacheSize = 512;        // Max cached DEM tiles
     int demVisiblePinBudget = 1024;   // Max visible/neighbor DEM keys pinned against eviction
-    double demHeightScale = 2.5;      // Height exaggeration (2.5x for visible terrain)
+    // Height scale architecture: separated base scale and exaggeration for GE parity
+    double demHeightScaleBase = 1.0;       // Base scale: Terrain-RGB → meters (true elevation)
+    double demExaggerationFactor = 2.5;    // Visual exaggeration for rendering (2.5x)
+    
+    // DEPRECATED: Use demHeightScaleBase * demExaggerationFactor instead
+    double demHeightScale = 2.5;           // Legacy combined value for backward compatibility
     bool demRasterCoEviction = true;  // Evict DEM cache entries when matching raster tile is evicted
     int demEdgeBlendSegments = 2;     // Edge coherence blend band (in vertex rings). 0 disables blending.
     bool demDebug = false;            // Enable DEM debug logging
@@ -120,6 +153,9 @@ struct Config {
     // Debug culling toggles (for gap diagnosis)
     bool disableFrustumCull = false;   // Skip frustum culling in LOD selection
     bool disableHorizonCull = false;   // Skip horizon culling in LOD selection
+    
+    // Quality mode (GE parity: 1.0/2.0/4.0 multipliers)
+    QualityMode qualityMode = QualityMode::MEDIUM;  // Default: GE standard quality
 };
 
 } // namespace globe

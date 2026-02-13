@@ -77,6 +77,7 @@ int main() {
     settings.minZoom = 0;
     settings.maxZoom = 10;
     settings.sseThreshold = 1.5f;
+    settings.minLodPixels = 0.0f;  // Disable for forced-refine test scenarios
     settings.enforceNeighborDelta = true;
     settings.maxNeighborDelta = 1;
     settings.maxConformPasses = 6;

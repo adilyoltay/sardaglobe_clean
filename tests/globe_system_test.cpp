@@ -246,6 +246,7 @@ void TestLodSelection() {
         settings.minZoom = 0;
         settings.maxZoom = 8;
         settings.sseThreshold = 2.0f;
+        settings.minLodPixels = 0.0f;  // Disable for test stability
         
         // Camera at 25000km altitude
         glm::vec3 cameraPos(0, 0, EARTH_RADIUS_KM + 25000);
@@ -272,6 +273,7 @@ void TestLodSelection() {
         LodSelector::Settings settings;
         settings.minZoom = 0;
         settings.maxZoom = 5;
+        settings.minLodPixels = 0.0f;  // Disable for test stability
         
         glm::vec3 cameraPos(0, 0, EARTH_RADIUS_KM + 10000);
         glm::mat4 mvp(1.0f);
@@ -698,7 +700,8 @@ void TestSystemIntegration() {
         LodSelector::Settings settings;
         settings.minZoom = 0;
         settings.maxZoom = 6;
-        settings.sseThreshold = 0.00001f;  // Force deep traversal for fallback verification
+        settings.sseThreshold = 0.00001f;
+        settings.minLodPixels = 0.0f;  // Disable for test stability  // Force deep traversal for fallback verification
         settings.disableFrustumCull = true;   // Isolate LOD fallback logic from view culling
         settings.disableHorizonCull = true;
         

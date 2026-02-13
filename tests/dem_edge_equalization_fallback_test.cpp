@@ -76,7 +76,6 @@ int main() {
     DemManager::Config demConfig;
     demConfig.meshN = config.demMeshN;
     demConfig.cacheSize = 32;
-    demConfig.maxBatchSize = 1;
     demConfig.baseUrl = "http://invalid.local/test";
 
     DemManager demManager(demConfig);

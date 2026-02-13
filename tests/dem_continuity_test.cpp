@@ -70,7 +70,6 @@ int main() {
     DemManager::Config config;
     config.meshN = 5;
     config.cacheSize = 32;
-    config.maxBatchSize = 1;
     config.baseUrl = "http://invalid.local/test";
 
     DemManager manager(config);

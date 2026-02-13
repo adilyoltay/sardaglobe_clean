@@ -1,6 +1,6 @@
 // Tile server connectivity diagnostic test.
 // Validates that configured tile/DEM endpoints are reachable and return valid data.
-// Also verifies the synthetic (ngrd://) pipeline as a baseline.
+// Tests public Terrain-RGB endpoints (MapTiler) and OSM fallback.
 
 #include <iostream>
 #include <vector>
@@ -61,37 +61,6 @@ std::string ExtractOrigin(const std::string& url) {
     size_t pathStart = url.find('/', hostStart);
     if (pathStart == std::string::npos) return url;
     return url.substr(0, pathStart);
-}
-
-double Tile2Lon(int x, int z) {
-    return x / static_cast<double>(1 << z) * 360.0 - 180.0;
-}
-
-double Tile2Lat(int y, int z) {
-    constexpr double kPi = 3.14159265358979323846;
-    double n = kPi - 2.0 * kPi * y / static_cast<double>(1 << z);
-    return 180.0 / kPi * std::atan(0.5 * (std::exp(n) - std::exp(-n)));
-}
-
-std::string BuildDemBatchUrlForTile(const std::string& baseUrl, int z, int x, int y, int meshN) {
-    double llx = Tile2Lon(x, z);
-    double urx = Tile2Lon(x + 1, z);
-    double ury = Tile2Lat(y, z);
-    double lly = Tile2Lat(y + 1, z);
-
-    std::ostringstream oss;
-    oss.setf(std::ios::fixed);
-    oss.precision(12);
-    // Match DemManager::BuildBatchUrl format exactly: FLOAT=1&MESHN=..&CN=1&C1...
-    oss << baseUrl
-        << "?FLOAT=1"
-        << "&MESHN=" << meshN
-        << "&CN=1"
-        << "&C1LLX=" << llx
-        << "&C1LLY=" << lly
-        << "&C1URX=" << urx
-        << "&C1URY=" << ury;
-    return oss.str();
 }
 
 HttpResult HttpGet(const std::string& url, const std::string& auth = {}) {
@@ -166,47 +135,16 @@ int main() {
 
     std::cout << "\n=== Tile Server Connectivity Diagnostic ===\n\n";
 
-    const char* tileAuthEnv = std::getenv("NATIVE_GLOBE_TILE_AUTH");
     const char* demAuthEnv = std::getenv("NATIVE_GLOBE_DEM_AUTH");
-    const std::string tileAuth = tileAuthEnv ? std::string(tileAuthEnv) : std::string();
     const std::string demAuth = demAuthEnv ? std::string(demAuthEnv) : std::string();
 
     // ---------------------------------------------------------------
-    // 1. Pirireis Tile Server (default config)
+    // 1. Terrain-RGB DEM Server (MapTiler default)
     // ---------------------------------------------------------------
-    std::cout << "--- 1. Pirireis HGM_Orthofoto Tile Server ---\n";
+    std::cout << "--- 1. MapTiler Terrain-RGB DEM Server ---\n";
     {
-        std::string url = "https://goksun.pirireis.com.tr/gorsun/gorsun/tile/HGM_Orthofoto/0/0/0";
-        auto r = HttpGet(url, tileAuth);
-        std::cout << "  URL: " << url << "\n";
-        std::cout << "  Auth: " << (tileAuth.empty() ? "none" : "basic") << "\n";
-        std::cout << "  HTTP Status: " << r.httpStatus << "\n";
-        std::cout << "  Content-Type: " << r.contentType << "\n";
-        std::cout << "  Body Size: " << r.data.size() << " bytes\n";
-
-        if (r.httpStatus == 401 || r.httpStatus == 403) {
-            std::cerr << "  ** AUTH REQUIRED: Server returned " << r.httpStatus
-                      << ". Set NATIVE_GLOBE_TILE_AUTH=user:password **\n";
-        }
-
-        // This is a WARN, not FAIL, because auth may not be configured in CI
-        TEST_WARN(r.httpStatus == 200,
-            "Pirireis tile server returns HTTP 200 (got " + std::to_string(r.httpStatus) + ")");
-
-        if (r.success) {
-            TEST_WARN(LooksLikeImage(r.data),
-                "Pirireis tile response is valid image data");
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // 2. Pirireis DEM Server (default config)
-    // ---------------------------------------------------------------
-    std::cout << "\n--- 2. Pirireis DEM Server ---\n";
-    {
-        // Use the exact URL format emitted by DemManager::BuildBatchUrl to avoid false 400s.
-        std::string baseUrl = "https://goksun.pirireis.com.tr/yersun/yersun/elevation_bbox/DEMGENEL";
-        std::string url = BuildDemBatchUrlForTile(baseUrl, /*z=*/5, /*x=*/18, /*y=*/11, /*meshN=*/5);
+        // Use a known terrain-rgb tile (z=5, x=16, y=11 - covers Turkey/Europe region)
+        std::string url = "https://api.maptiler.com/tiles/terrain-rgb-v2/5/16/11.png?key=YGPXGCyXf6kh5TO9dJ7l";
         auto r = HttpGet(url, demAuth);
         std::cout << "  URL: " << url << "\n";
         std::cout << "  Auth: " << (demAuth.empty() ? "none" : "basic") << "\n";
@@ -220,13 +158,18 @@ int main() {
         }
 
         TEST_WARN(r.httpStatus == 200,
-            "Pirireis DEM server returns HTTP 200 (got " + std::to_string(r.httpStatus) + ")");
+            "Terrain-RGB server returns HTTP 200 (got " + std::to_string(r.httpStatus) + ")");
+
+        if (r.success) {
+            TEST_WARN(LooksLikeImage(r.data),
+                "Terrain-RGB response is valid image data");
+        }
     }
 
     // ---------------------------------------------------------------
-    // 3. Public Tile Source (OSM - no auth needed)
+    // 2. Public Tile Source (OSM - no auth needed)
     // ---------------------------------------------------------------
-    std::cout << "\n--- 3. OpenStreetMap Public Tile Server (fallback reference) ---\n";
+    std::cout << "\n--- 2. OpenStreetMap Public Tile Server (fallback reference) ---\n";
     {
         std::string url = "https://tile.openstreetmap.org/0/0/0.png";
         auto r = HttpGet(url);
@@ -247,9 +190,9 @@ int main() {
     }
 
     // ---------------------------------------------------------------
-    // 4. Multiple zoom levels on OSM (pipeline breadth test)
+    // 3. Multiple zoom levels on OSM (pipeline breadth test)
     // ---------------------------------------------------------------
-    std::cout << "\n--- 4. OSM Multi-Zoom Tile Fetch ---\n";
+    std::cout << "\n--- 3. OSM Multi-Zoom Tile Fetch ---\n";
     {
         struct ZoomTest { int z, x, y; };
         ZoomTest tests[] = {
@@ -275,11 +218,9 @@ int main() {
     std::cout << "  Failed: " << failed << "\n";
 
     if (warned > 0) {
-        std::cout << "\n** WARNINGS indicate Pirireis endpoint access/config issues.\n"
-                  << "   Verify auth and endpoint compatibility:\n"
-                  << "   To fix tile loading:\n"
-                  << "     export NATIVE_GLOBE_TILE_AUTH=\"user:password\"\n"
-                  << "     export NATIVE_GLOBE_DEM_AUTH=\"user:password\"\n"
+        std::cout << "\n** WARNINGS indicate endpoint access/config issues.\n"
+                  << "   To fix DEM loading, verify your API keys:\n"
+                  << "     export NATIVE_GLOBE_DEM_AUTH=\"your-api-key\"\n"
                   << "   Or use a public tile source:\n"
                   << "     ./native_globe --tile-url \"https://tile.openstreetmap.org/{z}/{x}/{y}.png\"\n";
     }

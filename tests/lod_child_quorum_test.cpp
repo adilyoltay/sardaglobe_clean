@@ -31,6 +31,7 @@ int main() {
     settings.disableFrustumCull = true;
     settings.disableHorizonCull = true;
     settings.enforceNeighborDelta = false;
+    settings.minLodPixels = 0.0f;  // Disable for forced-refine test scenarios
 
     glm::vec3 cameraPos(0.0f, 0.0f, 9000.0f);
     glm::mat4 proj = glm::perspective(glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 200000.0f);

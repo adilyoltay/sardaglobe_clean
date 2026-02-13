@@ -94,11 +94,13 @@ add_executable(native_globe
   # IO module
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
+  src/io/stb_image_impl.c
   src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
   src/io/memory_tile_cache.cpp
   src/io/tile_url_template.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
   # Scheduling module
   src/scheduling/tile_scheduler.cpp
   src/scheduling/lod_selector.cpp
@@ -309,6 +311,7 @@ add_test(NAME DecodedTileBlobTest COMMAND decoded_tile_blob_test)
 add_executable(tile_decoder_blob_fastpath_test
   tests/tile_decoder_blob_fastpath_test.cpp
   src/io/tile_decoder.cpp
+  src/io/stb_image_impl.c
   src/io/decoded_tile_blob.cpp
 )
 target_include_directories(tile_decoder_blob_fastpath_test PRIVATE
@@ -348,6 +351,7 @@ add_executable(tile_scheduler_cancel_flow_test
   src/scheduling/tile_state_machine.cpp
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
+  src/io/stb_image_impl.c
   src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
   src/io/memory_tile_cache.cpp
@@ -408,6 +412,8 @@ add_test(NAME AtlasGutterUvTest COMMAND atlas_gutter_uv_test)
 add_executable(dem_fallback_test
   tests/dem_fallback_test.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(dem_fallback_test PRIVATE
   src
@@ -419,6 +425,8 @@ add_test(NAME DemFallbackTest COMMAND dem_fallback_test)
 add_executable(dem_continuity_test
   tests/dem_continuity_test.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(dem_continuity_test PRIVATE
   src
@@ -433,6 +441,8 @@ add_executable(dem_edge_equalization_fallback_test
   src/rendering/mesh_template.cpp
   src/core/ellipsoid.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(dem_edge_equalization_fallback_test PRIVATE
   src
@@ -460,6 +470,8 @@ add_executable(selective_skirt_mask_test
   src/rendering/mesh_template.cpp
   src/core/ellipsoid.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(selective_skirt_mask_test PRIVATE
   src
@@ -509,6 +521,8 @@ add_test(NAME TilePyramidChildReadyTest COMMAND tile_pyramid_child_ready_test)
 add_executable(dem_effective_level_policy_test
   tests/dem_effective_level_policy_test.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(dem_effective_level_policy_test PRIVATE
   src
@@ -516,21 +530,12 @@ target_include_directories(dem_effective_level_policy_test PRIVATE
 target_link_libraries(dem_effective_level_policy_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME DemEffectiveLevelPolicyTest COMMAND dem_effective_level_policy_test)
 
-# DEM batch URL ordering test (ensures C1..CN mapping matches service response order)
-add_executable(dem_batch_url_order_test
-  tests/dem_batch_url_order_test.cpp
-  src/io/dem_manager.cpp
-)
-target_include_directories(dem_batch_url_order_test PRIVATE
-  src
-)
-target_link_libraries(dem_batch_url_order_test PRIVATE glm::glm CURL::libcurl)
-add_test(NAME DemBatchUrlOrderTest COMMAND dem_batch_url_order_test)
-
 # DEM grid row-order test (south->north service ordering)
 add_executable(dem_grid_row_order_test
   tests/dem_grid_row_order_test.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(dem_grid_row_order_test PRIVATE
   src
@@ -542,6 +547,8 @@ add_test(NAME DemGridRowOrderTest COMMAND dem_grid_row_order_test)
 add_executable(dem_co_eviction_test
   tests/dem_co_eviction_test.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(dem_co_eviction_test PRIVATE
   src
@@ -563,6 +570,8 @@ add_test(NAME AdaptiveMeshSegmentsTest COMMAND adaptive_mesh_segments_test)
 add_executable(seam_metric_truth_test
   tests/seam_metric_truth_test.cpp
   src/io/dem_manager.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
 )
 target_include_directories(seam_metric_truth_test PRIVATE
   src

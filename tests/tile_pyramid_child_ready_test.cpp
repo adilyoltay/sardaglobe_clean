@@ -27,7 +27,8 @@ int main() {
     auto settings = pyramid.GetSettings();
     settings.minZoom = 0;
     settings.maxZoom = 1;
-    settings.sseThreshold = 0.01f;  // Force subdivision at root.
+    settings.sseThreshold = 0.01f;
+    settings.minLodPixels = 0.0f;  // Disable for forced-refine test scenarios  // Force subdivision at root.
     settings.disableFrustumCull = true;
     settings.disableHorizonCull = true;
     settings.enforceNeighborDelta = false;

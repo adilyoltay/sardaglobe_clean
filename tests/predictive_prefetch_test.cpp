@@ -59,7 +59,10 @@ int main() {
         glm::mat4 view = glm::lookAt(scenario.cameraPos, glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         glm::mat4 mvp = proj * view;
 
-        LodSelection base = selector.Select(
+        // Stateless comparison: use separate selector instances for base vs tiny
+        // to avoid previousLeafSet_ hysteresis affecting the comparison.
+        LodSelector selectorBase;
+        LodSelection base = selectorBase.Select(
             scenario.cameraPos,
             glm::vec3(0.0f),
             mvp,
@@ -70,7 +73,8 @@ int main() {
             isReady,
             settings);
 
-        LodSelection tinyVelocity = selector.Select(
+        LodSelector selectorTiny;
+        LodSelection tinyVelocity = selectorTiny.Select(
             scenario.cameraPos,
             scenario.velocity * 0.01f,  // < 0.05 km/s threshold
             mvp,
@@ -85,7 +89,8 @@ int main() {
         std::unordered_set<TileKey> tinySet = ToSet(tinyVelocity.prefetch);
         failed += !Expect(baseSet == tinySet, "tiny velocity should not change prefetch set");
 
-        LodSelection predictive = selector.Select(
+        // For predictive expansion test, use the same selector as base for valid comparison
+        LodSelection predictive = selectorBase.Select(
             scenario.cameraPos,
             scenario.velocity,  // >= 0.05 km/s threshold
             mvp,

@@ -48,7 +48,6 @@ int main() {
     config.baseUrl = "http://invalid.local/dem";
     config.meshN = 5;
     config.cacheSize = 16;
-    config.maxBatchSize = 1;
 
     DemManager manager(config);
 

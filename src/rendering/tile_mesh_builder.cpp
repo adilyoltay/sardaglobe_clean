@@ -1,6 +1,7 @@
 #include "tile_mesh_builder.h"
 #include "mesh_template.h"
 #include "../core/ellipsoid.h"
+#include "../math/tile_math.h"  // GE parity: ComputeGeometricError for skirt depth
 #include <glad/glad.h>
 #include <cmath>
 #include <array>
@@ -258,7 +259,8 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         if (!SampleDemMeters(sampler, lonDeg, latDeg, meters)) {
             return false;
         }
-        outHeightKm = static_cast<float>(meters * 0.001 * config.demHeightScale);
+        // GE parity: separated base scale and exaggeration
+        outHeightKm = static_cast<float>(meters * 0.001 * config.demHeightScaleBase * config.demExaggerationFactor);
         outSourceLevel = sampler.key.level;
         return true;
     };
@@ -537,7 +539,8 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         if (!SampleDemMeters(*sampler, lonDeg, latDeg, meters)) {
             return false;
         }
-        float hKm = static_cast<float>(meters * 0.001 * config.demHeightScale);
+        // GE parity: separated base scale and exaggeration
+        float hKm = static_cast<float>(meters * 0.001 * config.demHeightScaleBase * config.demExaggerationFactor);
         outPos = ellipsoid.GeodeticToCartesian(lonDeg, latDeg, hKm);
         return true;
     };
@@ -722,18 +725,31 @@ void TileMeshBuilder::GenerateSkirts(
 ) {
     const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
     
-    // Calculate skirt depth based on tile size at this zoom level
-    double tileArcKm = 40075.0 / (1 << level);
-    double minDepth = std::max(0.001, static_cast<double>(config.skirtDepthNearKm));
+    // Calculate skirt depth based on geometric error (GE parity)
+    // Tie skirt depth to geometric error for consistent gap hiding across zoom levels
+    float geometricErrorM = ComputeGeometricError(level);  // meters per pixel at equator
+    
+    // Base skirt depth: ~50 pixels worth of geometric error
+    double baseSkirtDepthKm = (geometricErrorM * 50.0) * 0.001;
+    
+    // Apply LOD-based range from config
+    double minDepth = std::max(baseSkirtDepthKm, static_cast<double>(config.skirtDepthNearKm));
     double farDepth = std::max(minDepth, static_cast<double>(config.skirtDepthFarKm));
     double clampMaxDepth = std::max(farDepth, static_cast<double>(config.skirtMaxDepthKm));
+    
+    // Interpolate based on tile arc length (zoom level)
+    double tileArcKm = 40075.0 / (1 << level);
     double lodT = std::clamp(tileArcKm / 2500.0, 0.0, 1.0);
     double skirtDepth = minDepth + (farDepth - minDepth) * lodT;
+    
+    // Terrain-aware: scale by height range for mountain regions
     if (heightRange > 0.0) {
         // Keep skirts proportional to relief, but avoid excessive "wall" silhouettes.
         skirtDepth = std::max(skirtDepth, heightRange * 0.15);
     }
-    skirtDepth = std::clamp(skirtDepth, minDepth, clampMaxDepth);
+    
+    // Final clamp within configured bounds
+    skirtDepth = std::clamp(skirtDepth, static_cast<double>(config.skirtMinDepthKm), clampMaxDepth);
     
     // Lambda to add a skirt vertex
     auto addSkirtVertex = [&](int mainIdx) {

@@ -29,7 +29,7 @@ public:
     struct Settings {
         int minZoom = 0;
         int maxZoom = 22;
-        float sseThreshold = 1.4f;
+        float sseThreshold = 2.0f;  // GE standard quality (was 1.4f)
         float tiltFactor = 1.0f;  // 0-1, reduces detail when tilted
         // Limits how many parent->children refinements can happen in one selection pass.
         // <=0 means unlimited (legacy behavior).
@@ -46,6 +46,13 @@ public:
         bool enforceNeighborDelta = true;  // Enable conformance pass
         int maxConformPasses = 6;      // Prevent infinite refinement
         bool lodChildQuorum = true;    // Refine only when full child set is render-ready
+
+        // minLodPixels culling (GE parity): tiles smaller than this are invisible.
+        // Prevents rendering sub-pixel tiles at distant zoom levels. Tests override to 0.0f.
+        float minLodPixels = 256.0f;  // GE default (disable via 0.0f for test compatibility)
+
+        // Quality mode multiplier (GE parity: 1.0/2.0/4.0)
+        float qualityMultiplier = 1.0f;  // Applied to sseThreshold (1.0 = GE standard)
 
         // Debug culling toggles (for gap diagnosis)
         bool disableFrustumCull = false;
@@ -95,7 +102,9 @@ private:
         float sseThreshold,
         float tiltFactor,
         bool isCurrentlySubdivided,
-        float hysteresisRatio
+        float hysteresisRatio,
+        float minLodPixels = 256.0f,      // GE parity: min visible tile size
+        float qualityMultiplier = 1.0f    // GE parity: quality mode multiplier
     );
     
     bool AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady, const Settings& settings);

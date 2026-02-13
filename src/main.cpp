@@ -33,9 +33,12 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--dem-url") == 0 && i + 1 < argc) {
             config.demUrl = argv[++i];
             config.demEnabled = true;
-        } else if (std::strcmp(argv[i], "--dem-format") == 0 && i + 1 < argc) {
-            config.demFormat = argv[++i];
+        } else if (std::strcmp(argv[i], "--dem-provider") == 0 && i + 1 < argc) {
+            config.demProvider = argv[++i];
             config.demEnabled = true;
+        } else if (std::strcmp(argv[i], "--dem-format") == 0 && i + 1 < argc) {
+            std::cerr << "ERROR: --dem-format is deprecated. Use --dem-provider terrain-rgb|google-earth\n";
+            return 1;
         } else if (std::strcmp(argv[i], "--dem-auth") == 0 && i + 1 < argc) {
             config.demAuth = argv[++i];
         } else if (std::strcmp(argv[i], "--dem-max-zoom") == 0 && i + 1 < argc) {
@@ -70,13 +73,25 @@ int main(int argc, char** argv) {
             runPanProfile = true;
         } else if (std::strcmp(argv[i], "--gpu-terrain") == 0) {
             config.terrainDisplacementMode = globe::DisplacementMode::GPU_HEIGHTMAP_DISPLACE;
+        } else if (std::strcmp(argv[i], "--quality") == 0 && i + 1 < argc) {
+            const char* q = argv[++i];
+            if (std::strcmp(q, "low") == 0) config.qualityMode = globe::QualityMode::LOW;
+            else if (std::strcmp(q, "medium") == 0) config.qualityMode = globe::QualityMode::MEDIUM;
+            else if (std::strcmp(q, "high") == 0) config.qualityMode = globe::QualityMode::HIGH;
+            else if (std::strcmp(q, "ultra") == 0) config.qualityMode = globe::QualityMode::ULTRA;
+            else {
+                std::cerr << "Error: Invalid quality mode '" << q << "'\n"
+                          << "Valid modes: low, medium, high, ultra\n"
+                          << "Default: medium (GE standard quality)\n";
+                return 1;
+            }
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::cout << "Usage: native_globe [options]\n"
                       << "Options:\n"
                       << "  --tile-url URL    Tile server URL template\n"
                       << "  --tile-auth U:P   Tile HTTP basic auth (user:password)\n"
                       << "  --dem-url URL     DEM server URL (elevation)\n"
-                      << "  --dem-format FMT  DEM format: auto | pirireis | terrain-rgb | terrarium\n"
+                      << "  --dem-provider P  DEM provider: terrain-rgb | google-earth (default: terrain-rgb)\n"
                       << "  --dem-auth U:P    DEM HTTP basic auth (user:password)\n"
                       << "  --dem-max-zoom N  Max DEM source zoom level (default 15)\n"
                       << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
@@ -93,6 +108,7 @@ int main(int argc, char** argv) {
                       << "  --smoke           Run smoke test (zoom in/out + terrain) and exit\n"
                       << "  --profile-pan     Run zoom/pan profiler and print per-frame CSV\n"
                       << "  --gpu-terrain     Use GPU heightmap displacement (default: CPU mesh bake)\n"
+                      << "  --quality MODE    Render quality: low | medium | high | ultra (default: medium)\n"
                       << "  --help            Show this help\n"
                       << "\nEnvironment:\n"
                       << "  NATIVE_GLOBE_TILE_AUTH  Tile HTTP basic auth (user:password)\n"
@@ -105,7 +121,7 @@ int main(int argc, char** argv) {
     std::cout << "Native Globe - Clean Architecture\n";
     std::cout << "Tile URL: " << config.tileUrl << "\n";
     std::cout << "DEM URL: " << (config.demUrl.empty() ? config.demBaseUrl : config.demUrl) << "\n";
-    std::cout << "DEM Format: " << config.demFormat << "\n";
+    std::cout << "DEM Provider: " << config.demProvider << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";
     std::cout << "DEM Auth: " << (config.demAuth.empty() ? "none" : "basic") << "\n";
     
