@@ -127,6 +127,14 @@ int main(int argc, char** argv) {
         }
     }
     
+    // Validate --dem-url is not used with google-earth provider
+    if (config.demProvider == "google-earth" && !config.demUrl.empty()) {
+        std::cerr << "Error: --dem-url cannot be used with --dem-provider google-earth\n"
+                  << "google-earth provider uses its own elevation/mesh endpoints.\n"
+                  << "Use --ge-elevation-endpoint and --ge-mesh-endpoint (Phase 4/5).\n";
+        return 1;
+    }
+    
     std::cout << "Native Globe - Clean Architecture\n";
     std::cout << "Tile URL: " << config.tileUrl << "\n";
     std::cout << "DEM URL: " << (config.demUrl.empty() ? config.demBaseUrl : config.demUrl) << "\n";

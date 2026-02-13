@@ -121,6 +121,10 @@ public:
     // Get current health status
     DemHealthStatus GetHealthStatus() const { return healthStatus_.load(); }
     
+    // True if provider is in terminal error state (e.g., not implemented)
+    // When terminal, Request() is a no-op to prevent log spam
+    bool IsTerminalError() const { return terminalError_.load(); }
+    
     // Get telemetry stats
     const DemStats& GetStats() const { return stats_; }
     
@@ -235,6 +239,10 @@ private:
     // Health status and telemetry
     std::atomic<DemHealthStatus> healthStatus_{DemHealthStatus::Unknown};
     DemStats stats_;
+    
+    // Terminal error state (for google-earth provider not implemented)
+    // When true, Request() becomes a no-op to prevent log spam and queue churn
+    std::atomic<bool> terminalError_{false};
     
     // Helper functions
     void WorkerLoop();

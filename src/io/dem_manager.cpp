@@ -107,6 +107,12 @@ void DemManager::TouchLru(const TileKey& key) const {
 }
 
 void DemManager::Request(const TileKey& key, int priority, double score) {
+    // Terminal error gate - silently drop requests when provider is not functional
+    // This prevents log spam and queue churn for unimplemented providers
+    if (terminalError_.load()) {
+        return;
+    }
+    
     // Auth backoff check - skip all DEM requests during backoff period
     if (authBackoff_.load()) {
         auto now = std::chrono::steady_clock::now();
@@ -503,6 +509,7 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
             std::cerr << "[DEM] ERROR: Google Earth provider not yet implemented (Phase 4/5). "
                       << "Use --dem-provider terrain-rgb or check back later." << std::endl;
             healthStatus_.store(DemHealthStatus::BadResponse);
+            terminalError_.store(true);  // Gate future requests to prevent log spam
             return false;
     }
     return false;

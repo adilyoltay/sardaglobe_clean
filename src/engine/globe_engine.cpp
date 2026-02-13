@@ -41,16 +41,25 @@ namespace globe {
 
 namespace {
 
-// Parse DEM provider string to enum. Default to TerrainRGB for any unknown value.
-DemProviderType ParseDemProvider(std::string provider) {
-    std::transform(provider.begin(), provider.end(), provider.begin(), [](unsigned char c) {
+// Parse DEM provider string to enum. Strict: throws on unknown value.
+// Caller (main.cpp CLI) must validate before calling. Unknown values indicate
+// programmatic API misuse or config drift.
+DemProviderType ParseDemProvider(const std::string& provider) {
+    std::string lower = provider;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
 
-    if (provider == "google-earth" || provider == "google_earth" || provider == "ge") {
+    if (lower == "google-earth") {
         return DemProviderType::GoogleEarth;
     }
-    // Default: terrain-rgb (includes "terrain-rgb", "mapbox", "", or any unknown value)
+    if (lower == "terrain-rgb" || lower == "terrain_rgb" || lower == "mapbox") {
+        return DemProviderType::TerrainRGB;
+    }
+    // Strict: unknown values are an error (CLI should have validated)
+    std::cerr << "[DEM] ERROR: Unknown provider '" << provider << "'. "
+              << "Expected: terrain-rgb, google-earth" << std::endl;
+    // Default to TerrainRGB to avoid crash, but log error for visibility
     return DemProviderType::TerrainRGB;
 }
 
@@ -163,6 +172,14 @@ bool GlobeEngine::Init() {
         // Startup health check
         auto health = demManager_->CheckHealth();
         if (health != DemHealthStatus::Healthy) {
+            // google-earth provider requires hard-fail on init
+            if (demConfig.providerType == DemProviderType::GoogleEarth) {
+                std::cerr << "[DEM] ERROR: google-earth provider initialization failed (" 
+                          << DemHealthStatusToString(health) << "). "
+                          << "Use --dem-provider terrain-rgb or check configuration." << std::endl;
+                return false;
+            }
+            // terrain-rgb can continue with flat terrain
             std::cerr << "[DEM] WARNING: DEM endpoint not healthy (" 
                       << DemHealthStatusToString(health) 
                       << "). Terrain will be flat until DEM becomes available." << std::endl;
