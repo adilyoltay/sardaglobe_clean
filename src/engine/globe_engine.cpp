@@ -24,6 +24,7 @@
 #include <numeric>
 #include <limits>
 #include <cctype>
+#include <optional>
 
 // ImGui
 #include <imgui.h>
@@ -41,10 +42,10 @@ namespace globe {
 
 namespace {
 
-// Parse DEM provider string to enum. Strict: throws on unknown value.
+// Parse DEM provider string to enum. Strict: returns nullopt on unknown value.
 // Caller (main.cpp CLI) must validate before calling. Unknown values indicate
 // programmatic API misuse or config drift.
-DemProviderType ParseDemProvider(const std::string& provider) {
+std::optional<DemProviderType> ParseDemProvider(const std::string& provider) {
     std::string lower = provider;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -56,11 +57,8 @@ DemProviderType ParseDemProvider(const std::string& provider) {
     if (lower == "terrain-rgb" || lower == "terrain_rgb" || lower == "mapbox") {
         return DemProviderType::TerrainRGB;
     }
-    // Strict: unknown values are an error (CLI should have validated)
-    std::cerr << "[DEM] ERROR: Unknown provider '" << provider << "'. "
-              << "Expected: terrain-rgb, google-earth" << std::endl;
-    // Default to TerrainRGB to avoid crash, but log error for visibility
-    return DemProviderType::TerrainRGB;
+    // Strict: unknown values are an error
+    return std::nullopt;
 }
 
 } // namespace
@@ -156,7 +154,13 @@ bool GlobeEngine::Init() {
         DemManager::Config demConfig;
         demConfig.baseUrl = config_.demUrl.empty() ? config_.demBaseUrl : config_.demUrl;
         demConfig.basicAuthUserPwd = config_.demAuth;
-        demConfig.providerType = ParseDemProvider(config_.demProvider);
+        auto providerOpt = ParseDemProvider(config_.demProvider);
+        if (!providerOpt.has_value()) {
+            std::cerr << "[DEM] ERROR: Unknown provider '" << config_.demProvider << "'. "
+                      << "Expected: terrain-rgb, google-earth" << std::endl;
+            return false;
+        }
+        demConfig.providerType = providerOpt.value();
         demConfig.meshN = config_.demMeshN;
         demConfig.maxZoom = config_.demMaxZoom;
         demConfig.cacheSize = config_.demCacheSize;

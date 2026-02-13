@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     if (config.demProvider == "google-earth" && !config.demUrl.empty()) {
         std::cerr << "Error: --dem-url cannot be used with --dem-provider google-earth\n"
                   << "google-earth provider uses its own elevation/mesh endpoints.\n"
-                  << "Use --ge-elevation-endpoint and --ge-mesh-endpoint (Phase 4/5).\n";
+                  << "Note: google-earth provider is not yet implemented (Phase 4/5).\n";
         return 1;
     }
     
