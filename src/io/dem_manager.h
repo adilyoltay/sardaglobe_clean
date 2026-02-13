@@ -110,6 +110,9 @@ struct DemManagerConfig {
     // GE auth token from environment (NATIVE_GLOBE_GE_TOKEN). Never hardcode.
 };
 
+// Forward declaration for test injection
+class ITerrainDemProvider;
+
 // DEM Manager - handles elevation data fetching and caching
 // Phase 3: Now uses ITerrainDemProvider interface for provider-specific logic
 class DemManager {
@@ -117,6 +120,11 @@ public:
     using Config = DemManagerConfig;
     
     explicit DemManager(const Config& config);
+    
+    // Test constructor - allows injection of mock/test provider
+    // Note: This constructor is primarily for testing; config_ is still populated
+    DemManager(const Config& config, std::unique_ptr<ITerrainDemProvider> testProvider);
+    
     ~DemManager();
     
     // Startup health check - tests endpoint accessibility
@@ -179,6 +187,13 @@ public:
     
     // Shutdown
     void Shutdown();
+
+    // Test helper: Direct fetch for testing (not for production use)
+    // Returns the fetch result directly without queueing
+    bool TestFetchDirect(const TileKey& key, DemGridData& outData);
+
+    // Test helper: Get consecutive auth fail count
+    int GetConsecutiveAuthFailsForTest() const;
 
 private:
     Config config_;

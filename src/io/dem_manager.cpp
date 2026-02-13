@@ -61,6 +61,17 @@ DemManager::DemManager(const Config& config) : config_(config) {
     }
 }
 
+DemManager::DemManager(const Config& config, std::unique_ptr<ITerrainDemProvider> testProvider) 
+    : config_(config), provider_(std::move(testProvider)) {
+    // Test constructor - uses injected provider instead of creating one
+    // Start worker threads
+    int numWorkers = 4;
+    workers_.reserve(numWorkers);
+    for (int i = 0; i < numWorkers; ++i) {
+        workers_.emplace_back([this]() { WorkerLoop(); });
+    }
+}
+
 DemManager::~DemManager() {
     Shutdown();
 }
@@ -523,6 +534,15 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
     }
     
     return success;
+}
+
+// Test helper implementations
+bool DemManager::TestFetchDirect(const TileKey& key, DemGridData& outData) {
+    return FetchTile(key, outData);
+}
+
+int DemManager::GetConsecutiveAuthFailsForTest() const {
+    return consecutiveAuthFails_.load();
 }
 
 DemHealthStatus DemManager::CheckHealth() {
