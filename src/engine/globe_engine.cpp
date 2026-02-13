@@ -199,6 +199,21 @@ bool GlobeEngine::Init() {
 
     meshScheduler_ = std::make_unique<TileMeshScheduler>(config_, demManager_.get());
     
+    // Init RockMesh manager for NodeData meshes (Phase 5 Sprint 1)
+    if (config_.geMeshEnabled()) {
+        rockMeshManager_ = std::make_unique<RockMeshManager>(config_);
+        if (!rockMeshManager_->Init()) {
+            std::cerr << "[RockMesh] Failed to initialize manager\n";
+            rockMeshManager_.reset();
+        } else {
+            // Queue all configured quadkeys for loading
+            for (const auto& qk : config_.geMeshQuadKeys) {
+                std::cout << "[RockMesh] Requesting mesh: " << qk << "\n";
+                rockMeshManager_->Request(qk);
+            }
+        }
+    }
+    
     // Set scheduler upload callback
     scheduler_->SetUploadCallback([this](Tile& tile) {
         textureManager_->QueueUpload(tile);
@@ -296,6 +311,12 @@ void GlobeEngine::Shutdown() {
     if (demManager_) demManager_->Shutdown();
     if (meshScheduler_) meshScheduler_->Shutdown();
     if (heightmapManager_) heightmapManager_->Clear();
+    
+    // Shutdown RockMeshManager before GL context teardown (Phase 5)
+    if (rockMeshManager_) {
+        rockMeshManager_->Shutdown();
+        rockMeshManager_.reset();
+    }
 
     // Ensure a current GL context while destructing GL-owning subsystems/resources.
     if (window_) {
@@ -1883,6 +1904,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
     
     // Process completed mesh builds with frame budget
     int meshUploadsThisFrame = ProcessMeshResults();
+    
+    // Process RockMesh uploads (Phase 5)
+    if (rockMeshManager_) {
+        bool rockUploaded = rockMeshManager_->ProcessUploads(config_.meshUploadBudgetMs);
+        if (rockUploaded) {
+            frameRequested_ = true;  // Request render frame for new mesh
+        }
+    }
+    
     frameTimings_.meshBuildMs = (glfwGetTime() * 1000.0) - meshStartMs;
 
     // Cleanup stale unloaded/failed tiles to prevent eviction churn/loops
@@ -2416,6 +2446,55 @@ void GlobeEngine::Render() {
     
     // Render pivot gizmo (Google Earth style target icon)
     RenderPivot(mvp);
+    
+    // Render RockTree meshes (Phase 5 Sprint 1)
+    if (rockMeshManager_ && rockMeshManager_->GetUploadedCount() > 0) {
+        // Enable polygon offset to prevent z-fighting with base terrain
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -1.0f);
+        
+        // Disable culling for first bring-up (helps debug visibility)
+        bool cullWasEnabled = glIsEnabled(GL_CULL_FACE);
+        glDisable(GL_CULL_FACE);
+        
+        // Bind tile shader with neutral uniforms
+        GLuint tileProgram = shaderManager_->GetTileProgram();
+        if (tileProgram != 0) {
+            glUseProgram(tileProgram);
+            
+            // Set uniforms for rockmesh rendering
+            // uHasHeightmap = 0 (no heightmap displacement)
+            GLint hasHeightmapLoc = glGetUniformLocation(tileProgram, "uHasHeightmap");
+            if (hasHeightmapLoc >= 0) glUniform1i(hasHeightmapLoc, 0);
+            
+            // uTerrainMorph = 1.0 (fully morphed)
+            GLint morphLoc = glGetUniformLocation(tileProgram, "uTerrainMorph");
+            if (morphLoc >= 0) glUniform1f(morphLoc, 1.0f);
+            
+            // uFade = 1.0 (fully visible)
+            GLint fadeLoc = glGetUniformLocation(tileProgram, "uFade");
+            if (fadeLoc >= 0) glUniform1f(fadeLoc, 1.0f);
+            
+            // Texture scale/offset = identity
+            GLint texScaleLoc = glGetUniformLocation(tileProgram, "uTexScale");
+            GLint texOffsetLoc = glGetUniformLocation(tileProgram, "uTexOffset");
+            if (texScaleLoc >= 0) glUniform2f(texScaleLoc, 1.0f, 1.0f);
+            if (texOffsetLoc >= 0) glUniform2f(texOffsetLoc, 0.0f, 0.0f);
+            
+            // MVP matrix
+            GLint mvpLoc = glGetUniformLocation(tileProgram, "uMVP");
+            if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+        }
+        
+        // Draw all rockmeshes
+        rockMeshManager_->Render();
+        
+        // Restore state
+        if (cullWasEnabled) {
+            glEnable(GL_CULL_FACE);
+        }
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    }
     
     // Update debug stats
     debugStats_.fps = fps_;

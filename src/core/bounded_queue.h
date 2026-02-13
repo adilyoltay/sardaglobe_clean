@@ -36,6 +36,17 @@ public:
         notFull_.notify_one();
         return true;
     }
+    
+    // Blocking pop - waits until item available or closed
+    bool Pop(T& item) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        notEmpty_.wait(lock, [this]() { return !queue_.empty() || closed_.load(); });
+        if (queue_.empty()) return false;
+        item = std::move(queue_.front());
+        queue_.pop();
+        notFull_.notify_one();
+        return true;
+    }
 
     size_t Size() const {
         std::lock_guard<std::mutex> lock(mutex_);

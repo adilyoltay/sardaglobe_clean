@@ -18,7 +18,8 @@ enum class RequestType {
 
 // Single network request record
 struct NetworkRequest {
-    TileKey key;
+    TileKey key;                  // Tile coordinate (for tile-based requests)
+    std::string id;               // String identifier (for NodeData/non-tile requests)
     RequestType type = RequestType::RasterTile;
     std::string url;
     
@@ -37,6 +38,9 @@ struct NetworkRequest {
     
     // State
     bool complete = false;
+    
+    // Get display identifier (id if set, otherwise key string)
+    std::string GetDisplayId() const;
 };
 
 // Network debug panel - browser-style network inspector
@@ -48,9 +52,13 @@ public:
     
     // Record a new request (call when starting fetch)
     void RecordStart(const TileKey& key, RequestType type, const std::string& url);
+    void RecordStart(const std::string& id, RequestType type, const std::string& url);
     
     // Record completion (call when fetch completes)
     void RecordComplete(const TileKey& key, RequestType type, bool success, 
+                        long httpStatus, size_t bytes, double durationMs,
+                        bool cacheHit = false, const std::string& error = "");
+    void RecordComplete(const std::string& id, RequestType type, bool success, 
                         long httpStatus, size_t bytes, double durationMs,
                         bool cacheHit = false, const std::string& error = "");
     
@@ -74,6 +82,7 @@ public:
     // Filter state
     bool showRaster = true;
     bool showDem = true;
+    bool showTerrainMesh = true;  // Phase 5: RockTree/NodeData mesh requests
     bool showOnlyFailed = false;
     bool autoscroll = true;
     bool panelOpen = false;
@@ -86,8 +95,9 @@ private:
     double appStartTime_ = 0.0;
     bool initialized_ = false;
     
-    // Find pending request by key+type
+    // Find pending request by key+type or id+type
     NetworkRequest* FindPending(const TileKey& key, RequestType type);
+    NetworkRequest* FindPending(const std::string& id, RequestType type);
 };
 
 } // namespace globe

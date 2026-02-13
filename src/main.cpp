@@ -1,6 +1,7 @@
 #include "engine/globe_engine.h"
 #include "camera/earth_camera.h"
 #include "core/ellipsoid.h"
+#include "io/ge_mesh_url_template.h"
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
@@ -209,6 +210,28 @@ int main(int argc, char** argv) {
                           << "Valid types: ellipsoid, terrain, sea_level\n";
                 return 1;
             }
+        } else if (std::strcmp(argv[i], "--ge-mesh-quadkey") == 0 && i + 1 < argc) {
+            const char* qk = argv[++i];
+            // Sprint 1 validation: non-empty, only digits 0-7 (NodeData key space)
+            if (qk[0] == '\0') {
+                std::cerr << "Error: Empty quadkey not allowed\n";
+                return 1;
+            }
+            bool valid = true;
+            for (const char* p = qk; *p; ++p) {
+                if (*p < '0' || *p > '7') {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) {
+                std::cerr << "Error: Invalid quadkey '" << qk << "'\n"
+                          << "Sprint 1 NodeData keys use digits 0-7 only\n";
+                return 1;
+            }
+            config.geMeshQuadKeys.push_back(qk);
+        } else if (std::strcmp(argv[i], "--ge-mesh-no-flip-v") == 0) {
+            config.geMeshFlipV = false;
         } else if (std::strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             config.cacheDir = argv[++i];
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
@@ -265,6 +288,8 @@ int main(int argc, char** argv) {
                       << "  --ge-mesh-endpoint URL       Google Earth mesh endpoint (Phase 5)\n"
                       << "  --ge-header K:V              GE custom header (allowlist: Authorization, X-Custom-Auth)\n"
                       << "  --ge-elevation-type TYPE     Elevation type: ellipsoid | terrain | sea_level\n"
+                      << "  --ge-mesh-quadkey QK         RockTree NodeData quadkey (Sprint 1, repeatable, digits 0-7)\n"
+                      << "  --ge-mesh-no-flip-v          Disable V coordinate flip for texture (default: flip enabled)\n"
                       << "  --cache-dir DIR   Tile cache directory\n"
                       << "  --no-cache        Disable disk cache\n"
                       << "  --no-dem          Disable DEM\n"
@@ -296,6 +321,17 @@ int main(int argc, char** argv) {
                   << "google-earth provider uses its own elevation/mesh endpoints.\n"
                   << "Use --ge-elevation-endpoint and set " << config.geTokenEnv << " env var.\n";
         return 1;
+    }
+    
+    // Sprint 1: mesh quadkey requires valid endpoint template
+    if (!config.geMeshQuadKeys.empty()) {
+        std::string err;
+        if (!globe::ValidateGeMeshEndpointTemplate(config.geMeshEndpoint, err)) {
+            std::cerr << "Error: Invalid --ge-mesh-endpoint: " << err << "\n"
+                      << "Usage: --ge-mesh-endpoint URL with {quadkey} placeholder\n"
+                      << "Example: https://example.com/mesh/{quadkey}\n";
+            return 1;
+        }
     }
     
     std::cout << "Native Globe - Clean Architecture\n";

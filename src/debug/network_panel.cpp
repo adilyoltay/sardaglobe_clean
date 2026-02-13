@@ -3,8 +3,18 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 namespace globe {
+
+std::string NetworkRequest::GetDisplayId() const {
+    if (!id.empty()) {
+        return id;
+    }
+    std::ostringstream oss;
+    oss << "z" << key.level << "/" << key.x << "/" << key.y;
+    return oss.str();
+}
 
 NetworkPanel& NetworkPanel::Instance() {
     static NetworkPanel instance;
@@ -21,6 +31,29 @@ void NetworkPanel::RecordStart(const TileKey& key, RequestType type, const std::
     
     NetworkRequest req;
     req.key = key;
+    req.type = type;
+    req.url = url;
+    req.startTimeMs = glfwGetTime() * 1000.0 - appStartTime_;
+    req.complete = false;
+    
+    requests_.push_back(req);
+    
+    // Trim old requests
+    while (requests_.size() > MAX_REQUESTS) {
+        requests_.pop_front();
+    }
+}
+
+void NetworkPanel::RecordStart(const std::string& id, RequestType type, const std::string& url) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!initialized_) {
+        appStartTime_ = glfwGetTime() * 1000.0;
+        initialized_ = true;
+    }
+    
+    NetworkRequest req;
+    req.id = id;
     req.type = type;
     req.url = url;
     req.startTimeMs = glfwGetTime() * 1000.0 - appStartTime_;
@@ -52,10 +85,38 @@ void NetworkPanel::RecordComplete(const TileKey& key, RequestType type, bool suc
     }
 }
 
+void NetworkPanel::RecordComplete(const std::string& id, RequestType type, bool success,
+                                   long httpStatus, size_t bytes, double durationMs,
+                                   bool cacheHit, const std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Find the pending request
+    NetworkRequest* req = FindPending(id, type);
+    if (req) {
+        req->success = success;
+        req->httpStatus = httpStatus;
+        req->bytesReceived = bytes;
+        req->durationMs = durationMs;
+        req->cacheHit = cacheHit;
+        req->error = error;
+        req->complete = true;
+    }
+}
+
 NetworkRequest* NetworkPanel::FindPending(const TileKey& key, RequestType type) {
     // Search from end (most recent) to find pending request
     for (auto it = requests_.rbegin(); it != requests_.rend(); ++it) {
         if (!it->complete && it->key == key && it->type == type) {
+            return &(*it);
+        }
+    }
+    return nullptr;
+}
+
+NetworkRequest* NetworkPanel::FindPending(const std::string& id, RequestType type) {
+    // Search from end (most recent) to find pending request
+    for (auto it = requests_.rbegin(); it != requests_.rend(); ++it) {
+        if (!it->complete && it->id == id && it->type == type) {
             return &(*it);
         }
     }
@@ -109,6 +170,8 @@ void NetworkPanel::Render() {
     ImGui::SameLine();
     ImGui::Checkbox("DEM", &showDem);
     ImGui::SameLine();
+    ImGui::Checkbox("Mesh", &showTerrainMesh);
+    ImGui::SameLine();
     ImGui::Checkbox("Failed Only", &showOnlyFailed);
     ImGui::SameLine();
     ImGui::Checkbox("Auto-scroll", &autoscroll);
@@ -145,6 +208,7 @@ void NetworkPanel::Render() {
             // Filtering
             if (req.type == RequestType::RasterTile && !showRaster) continue;
             if (req.type == RequestType::DemMesh && !showDem) continue;
+            if (req.type == RequestType::TerrainMesh && !showTerrainMesh) continue;
             if (showOnlyFailed && (req.success || !req.complete)) continue;
             
             ImGui::TableNextRow();
@@ -153,8 +217,10 @@ void NetworkPanel::Render() {
             ImGui::TableNextColumn();
             if (req.type == RequestType::RasterTile) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Raster");
-            } else {
+            } else if (req.type == RequestType::DemMesh) {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "DEM");
+            } else if (req.type == RequestType::TerrainMesh) {
+                ImGui::TextColored(ImVec4(0.8f, 0.4f, 1.0f, 1.0f), "Mesh");
             }
             
             // Status column
@@ -167,9 +233,13 @@ void NetworkPanel::Render() {
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%ld", req.httpStatus);
             }
             
-            // Tile column
+            // Tile/Id column
             ImGui::TableNextColumn();
-            ImGui::Text("z%d/%d/%d", req.key.level, req.key.x, req.key.y);
+            if (!req.id.empty()) {
+                ImGui::Text("%s", req.id.c_str());
+            } else {
+                ImGui::Text("z%d/%d/%d", req.key.level, req.key.x, req.key.y);
+            }
             
             // Time column
             ImGui::TableNextColumn();

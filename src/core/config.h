@@ -65,6 +65,16 @@ struct Config {
     std::string geEpoch = "latest";                           // Dataset epoch
     std::string geChannel = "default";                        // Service channel
     
+    // Phase 5 Sprint 1: RockTree/NodeData mesh (single quadkey mode)
+    std::vector<std::string> geMeshQuadKeys;                  // Manual quadkey list for Sprint 1
+    bool geMeshFlipV = true;                                  // Flip V coordinate for texture
+    bool geMeshEnabled() const { 
+        // Sprint 1: requires both quadkeys AND endpoint with {quadkey} placeholder
+        return !geMeshQuadKeys.empty() && 
+               !geMeshEndpoint.empty() && 
+               geMeshEndpoint.find("{quadkey}") != std::string::npos;
+    }
+    
     // Cache
     std::string cacheDir = "tile_cache";
     bool useDiskCache = true;

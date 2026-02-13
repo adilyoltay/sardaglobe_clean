@@ -99,10 +99,13 @@ add_executable(native_globe
   src/io/providers/protobuf_wire.cpp
   src/io/providers/google_earth_elevation_provider.cpp
   src/io/providers/google_earth_dem_provider.cpp
+  src/io/providers/google_earth_nodedata_client.cpp
+  src/io/providers/rocktree_node_data_parser.cpp
   src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
   src/io/memory_tile_cache.cpp
   src/io/tile_url_template.cpp
+  src/io/ge_mesh_url_template.cpp
   src/io/dem_manager.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/providers/dem_fetch_result.cpp
@@ -123,6 +126,8 @@ add_executable(native_globe
   src/rendering/tile_mesh_scheduler.cpp
   src/rendering/render_frame.cpp
   src/rendering/heightmap_manager.cpp
+  src/rendering/rockmesh_manager.cpp
+  src/rendering/rockmesh_runtime.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
   src/core/layer_manager.cpp
@@ -731,9 +736,40 @@ add_test(NAME TileKeyQuadKeyTest COMMAND tile_key_quadkey_test)
 # GE Mesh URL template test (Track B: #9)
 add_executable(ge_mesh_url_template_test
   tests/ge_mesh_url_template_test.cpp
+  src/io/ge_mesh_url_template.cpp
 )
 target_include_directories(ge_mesh_url_template_test PRIVATE
   src
 )
 target_link_libraries(ge_mesh_url_template_test PRIVATE glm::glm)
 add_test(NAME GeMeshUrlTemplateTest COMMAND ge_mesh_url_template_test)
+
+# GE NodeData client test (Phase 5 Sprint 1)
+add_executable(ge_nodedata_client_test
+  tests/ge_nodedata_client_test.cpp
+  src/io/providers/google_earth_nodedata_client.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/dem_fetch_result.cpp
+  src/io/ge_mesh_url_template.cpp
+  tests/stubs/network_panel_stub.cpp
+)
+target_include_directories(ge_nodedata_client_test PRIVATE
+  src
+  ${CURL_INCLUDE_DIRS}
+)
+target_link_libraries(ge_nodedata_client_test PRIVATE 
+  glm::glm
+  CURL::libcurl
+)
+add_test(NAME GeNodeDataClientTest COMMAND ge_nodedata_client_test)
+
+# GE NodeData parser test (Phase 5 Sprint 1)
+add_executable(ge_nodedata_parser_test
+  tests/ge_nodedata_parser_test.cpp
+  src/io/providers/rocktree_node_data_parser.cpp
+)
+target_include_directories(ge_nodedata_parser_test PRIVATE
+  src
+)
+target_link_libraries(ge_nodedata_parser_test PRIVATE glm::glm)
+add_test(NAME GeNodeDataParserTest COMMAND ge_nodedata_parser_test)

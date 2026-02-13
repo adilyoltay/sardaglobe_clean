@@ -12,6 +12,7 @@
 #include "../rendering/tile_mesh_scheduler.h"
 #include "../rendering/render_frame.h"
 #include "../rendering/heightmap_manager.h"
+#include "../rendering/rockmesh_manager.h"
 #include "../io/dem_manager.h"
 #include "../core/frame_time_tracker.h"
 #include "../camera/earth_camera.h"
@@ -109,6 +110,7 @@ private:
     std::unique_ptr<TileMeshScheduler> meshScheduler_;
     std::unique_ptr<DemManager> demManager_;
     std::unique_ptr<HeightmapManager> heightmapManager_;
+    std::unique_ptr<RockMeshManager> rockMeshManager_;
     TilePyramid tilePyramid_;
     JobSystem jobSystem_;
     std::unique_ptr<RenderFrame> renderFrame_;
