@@ -121,9 +121,11 @@ public:
     
     explicit DemManager(const Config& config);
     
+#ifdef NATIVE_GLOBE_TESTING
     // Test constructor - allows injection of mock/test provider
     // Note: This constructor is primarily for testing; config_ is still populated
     DemManager(const Config& config, std::unique_ptr<ITerrainDemProvider> testProvider);
+#endif
     
     ~DemManager();
     
@@ -188,12 +190,19 @@ public:
     // Shutdown
     void Shutdown();
 
-    // Test helper: Direct fetch for testing (not for production use)
-    // Returns the fetch result directly without queueing
+#ifdef NATIVE_GLOBE_TESTING
+    // =======================================================================
+    // TEST ONLY API - Not for production use
+    // These helpers are compiled only when NATIVE_GLOBE_TESTING is defined.
+    // Test targets should add: target_compile_definitions(... NATIVE_GLOBE_TESTING)
+    // =======================================================================
+    
+    // Direct fetch for testing (returns result directly without queueing)
     bool TestFetchDirect(const TileKey& key, DemGridData& outData);
 
-    // Test helper: Get consecutive auth fail count
+    // Get consecutive auth fail count for testing
     int GetConsecutiveAuthFailsForTest() const;
+#endif
 
 private:
     Config config_;

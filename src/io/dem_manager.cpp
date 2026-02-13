@@ -61,6 +61,7 @@ DemManager::DemManager(const Config& config) : config_(config) {
     }
 }
 
+#ifdef NATIVE_GLOBE_TESTING
 DemManager::DemManager(const Config& config, std::unique_ptr<ITerrainDemProvider> testProvider) 
     : config_(config), provider_(std::move(testProvider)) {
     // Test constructor - uses injected provider instead of creating one
@@ -71,6 +72,15 @@ DemManager::DemManager(const Config& config, std::unique_ptr<ITerrainDemProvider
         workers_.emplace_back([this]() { WorkerLoop(); });
     }
 }
+
+bool DemManager::TestFetchDirect(const TileKey& key, DemGridData& outData) {
+    return FetchTile(key, outData);
+}
+
+int DemManager::GetConsecutiveAuthFailsForTest() const {
+    return consecutiveAuthFails_.load();
+}
+#endif
 
 DemManager::~DemManager() {
     Shutdown();
@@ -534,15 +544,6 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
     }
     
     return success;
-}
-
-// Test helper implementations
-bool DemManager::TestFetchDirect(const TileKey& key, DemGridData& outData) {
-    return FetchTile(key, outData);
-}
-
-int DemManager::GetConsecutiveAuthFailsForTest() const {
-    return consecutiveAuthFails_.load();
 }
 
 DemHealthStatus DemManager::CheckHealth() {

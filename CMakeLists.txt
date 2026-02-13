@@ -632,6 +632,7 @@ add_executable(auth_backoff_reset_test
 target_include_directories(auth_backoff_reset_test PRIVATE
   src
 )
+target_compile_definitions(auth_backoff_reset_test PRIVATE NATIVE_GLOBE_TESTING)
 target_link_libraries(auth_backoff_reset_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME AuthBackoffResetTest COMMAND auth_backoff_reset_test)
 
