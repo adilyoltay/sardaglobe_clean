@@ -1,9 +1,11 @@
 #include "terrain_rgb_provider.h"
 #include "../terrain_rgb_decoder.h"
+#include "../../debug/network_panel.h"
 #include <curl/curl.h>
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include <chrono>
 
 namespace globe {
 
@@ -68,11 +70,15 @@ std::string TerrainRGBProvider::BuildUrl(const TileKey& key, int effectiveLevel)
     return url;
 }
 
-bool TerrainRGBProvider::HttpFetch(const std::string& url, std::vector<uint8_t>& outData) {
+bool TerrainRGBProvider::HttpFetch(const std::string& url, std::vector<uint8_t>& outData, 
+                                   DemFetchResult& outResult) {
     outData.clear();
+    
+    const auto startTime = std::chrono::high_resolution_clock::now();
     
     CURL* curl = curl_easy_init();
     if (!curl) {
+        outResult = DemFetchResult::NetworkError(0, "curl_easy_init failed", 0.0);
         return false;
     }
 
@@ -108,10 +114,34 @@ bool TerrainRGBProvider::HttpFetch(const std::string& url, std::vector<uint8_t>&
     }
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || responseCode != 200) {
+    const auto endTime = std::chrono::high_resolution_clock::now();
+    const double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+
+    // Determine result type
+    if (res != CURLE_OK) {
+        // CURL error
+        std::string errorMsg = curl_easy_strerror(res);
+        outResult = DemFetchResult::NetworkError(static_cast<int>(res), errorMsg, elapsedMs);
+        outResult.bytesReceived = outData.size();
         return false;
     }
     
+    if (responseCode == 401 || responseCode == 403) {
+        outResult = DemFetchResult::AuthError(responseCode, "Authentication failed");
+        outResult.elapsedMs = elapsedMs;
+        outResult.bytesReceived = outData.size();
+        return false;
+    }
+    
+    if (responseCode != 200) {
+        outResult = DemFetchResult::HttpError(responseCode, "HTTP error " + std::to_string(responseCode));
+        outResult.elapsedMs = elapsedMs;
+        outResult.bytesReceived = outData.size();
+        return false;
+    }
+    
+    // Success
+    outResult = DemFetchResult::Success(responseCode, outData.size(), elapsedMs);
     return true;
 }
 
@@ -125,7 +155,8 @@ bool TerrainRGBProvider::DecodeTile(const std::vector<uint8_t>& pngData, DemGrid
         &decodeError);
 }
 
-bool TerrainRGBProvider::FetchDemTile(const TileKey& key, DemGridData& outData) {
+bool TerrainRGBProvider::FetchDemTile(const TileKey& key, DemGridData& outData, 
+                                      DemFetchResult& outResult) {
     const int effectiveLevel = std::min(key.level, std::max(0, config_.maxZoom));
     const std::string url = BuildUrl(key, effectiveLevel);
 
@@ -133,18 +164,55 @@ bool TerrainRGBProvider::FetchDemTile(const TileKey& key, DemGridData& outData) 
         std::cerr << "[TerrainRGB] Fetch: " << url << std::endl;
     }
 
+    // Record start in network panel
+    NetworkPanel::Instance().RecordStart(key, RequestType::DemMesh, url);
+
     std::vector<uint8_t> pngData;
-    if (!HttpFetch(url, pngData)) {
-        healthStatus_.store(DemHealthStatus::Unreachable);
+    bool fetchOk = HttpFetch(url, pngData, outResult);
+    
+    if (!fetchOk) {
+        // Update health status based on error type
+        if (outResult.IsAuthFailure()) {
+            healthStatus_.store(DemHealthStatus::AuthFailed);
+        } else if (outResult.IsTimeout()) {
+            healthStatus_.store(DemHealthStatus::Unreachable);
+        } else if (outResult.errorType == DemFetchResult::ErrorType::Network) {
+            healthStatus_.store(DemHealthStatus::Unreachable);
+        } else {
+            healthStatus_.store(DemHealthStatus::BadResponse);
+        }
+        
+        // Record failure in network panel
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, false, 
+            outResult.httpStatusCode, outResult.bytesReceived, 
+            outResult.elapsedMs, false, outResult.errorMessage);
+        
         return false;
     }
 
     if (!DecodeTile(pngData, outData)) {
+        outResult = DemFetchResult::DecodeError("Failed to decode PNG/terrain-rgb");
         healthStatus_.store(DemHealthStatus::BadResponse);
+        
+        // Record decode failure in network panel
+        NetworkPanel::Instance().RecordComplete(
+            key, RequestType::DemMesh, false, 
+            outResult.httpStatusCode, outResult.bytesReceived, 
+            outResult.elapsedMs, false, outResult.errorMessage);
+        
         return false;
     }
 
+    // Success
     healthStatus_.store(DemHealthStatus::Healthy);
+    
+    // Record success in network panel
+    NetworkPanel::Instance().RecordComplete(
+        key, RequestType::DemMesh, true, 
+        outResult.httpStatusCode, outResult.bytesReceived, 
+        outResult.elapsedMs, false, "");
+    
     return true;
 }
 
@@ -152,8 +220,9 @@ DemHealthStatus TerrainRGBProvider::CheckHealth() {
     // Use a known tile (z=1, x=1, y=0) as probe
     TileKey probeKey(1, 1, 0);
     DemGridData probeData;
+    DemFetchResult result;
     
-    if (FetchDemTile(probeKey, probeData) && probeData.valid) {
+    if (FetchDemTile(probeKey, probeData, result) && probeData.valid) {
         healthStatus_.store(DemHealthStatus::Healthy);
         return DemHealthStatus::Healthy;
     }

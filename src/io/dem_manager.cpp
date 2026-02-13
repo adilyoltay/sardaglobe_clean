@@ -484,13 +484,40 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
         return false;
     }
     
-    bool success = provider_->FetchDemTile(key, outData);
+    DemFetchResult result;
+    bool success = provider_->FetchDemTile(key, outData, result);
     
     // Update telemetry
     if (success) {
         stats_.fetchSuccess++;
+        stats_.parseSuccess++;
+        // Accumulate timing
+        double prev = stats_.totalFetchMs.load(std::memory_order_relaxed);
+        while (!stats_.totalFetchMs.compare_exchange_weak(
+                   prev, prev + result.elapsedMs, std::memory_order_relaxed, std::memory_order_relaxed)) {}
     } else {
         stats_.fetchFail++;
+        
+        // Categorize failure
+        if (result.IsAuthFailure()) {
+            stats_.fetchAuth++;
+            // Trigger auth backoff
+            int fails = consecutiveAuthFails_.fetch_add(1) + 1;
+            if (fails >= config_.authBackoffThreshold) {
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                authBackoff_.store(true);
+                backoffUntil_ = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(static_cast<int>(config_.authBackoffSec));
+                std::cerr << "[DEM] Auth failed " << fails << " times, backoff " 
+                          << config_.authBackoffSec << "s" << std::endl;
+            }
+        } else if (result.IsTimeout()) {
+            stats_.fetchTimeout++;
+        }
+        
+        if (result.errorType == DemFetchResult::ErrorType::Decode) {
+            stats_.parseFail++;
+        }
     }
     
     return success;

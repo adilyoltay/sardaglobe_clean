@@ -3,6 +3,8 @@
 #include "i_terrain_dem_provider.h"
 #include <string>
 #include <atomic>
+#include <vector>
+#include <cstdint>
 
 struct CURL_slist;
 
@@ -28,7 +30,8 @@ public:
     ~TerrainRGBProvider() override;
 
     // ITerrainDemProvider interface
-    bool FetchDemTile(const TileKey& key, DemGridData& outData) override;
+    bool FetchDemTile(const TileKey& key, DemGridData& outData, 
+                      DemFetchResult& outResult) override;
     DemHealthStatus CheckHealth() override;
     DemHealthStatus GetHealthStatus() const override { return healthStatus_.load(); }
     bool IsTerminalError() const override { return false; }  // Terrain-RGB never terminal
@@ -41,8 +44,9 @@ private:
     // Build URL for a tile
     std::string BuildUrl(const TileKey& key, int effectiveLevel) const;
     
-    // Perform HTTP fetch
-    bool HttpFetch(const std::string& url, std::vector<uint8_t>& outData);
+    // Perform HTTP fetch with detailed result
+    bool HttpFetch(const std::string& url, std::vector<uint8_t>& outData, 
+                   DemFetchResult& outResult);
     
     // Decode PNG to DemGridData
     bool DecodeTile(const std::vector<uint8_t>& pngData, DemGridData& outData);

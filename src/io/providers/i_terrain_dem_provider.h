@@ -2,6 +2,7 @@
 
 #include "../../core/tile_key.h"
 #include "../dem_manager.h"
+#include "dem_fetch_result.h"
 #include <string>
 
 namespace globe {
@@ -16,7 +17,9 @@ public:
     // Fetch DEM data for a tile. Returns true on success, false on failure.
     // On success, outData is populated with valid height grid.
     // On failure, outData should be left unchanged or marked invalid.
-    virtual bool FetchDemTile(const TileKey& key, DemGridData& outData) = 0;
+    // outResult is populated with detailed outcome for telemetry/backoff.
+    virtual bool FetchDemTile(const TileKey& key, DemGridData& outData, 
+                              DemFetchResult& outResult) = 0;
 
     // Perform a startup health check. Returns Healthy if the provider
     // is functional and can serve requests.
