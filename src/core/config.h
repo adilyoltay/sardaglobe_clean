@@ -66,12 +66,20 @@ struct Config {
     std::string geChannel = "default";                        // Service channel
     
     // Phase 5 Sprint 1: RockTree/NodeData mesh (single quadkey mode)
-    std::vector<std::string> geMeshQuadKeys;                  // Manual quadkey list for Sprint 1
+    // Phase 5 Sprint 2: LOD-aware mesh management (geMeshQuadKeys acts as seed set)
+    std::vector<std::string> geMeshQuadKeys;                  // Seed quadkeys for mesh loading
     bool geMeshFlipV = true;                                  // Flip V coordinate for texture
+    
+    // Sprint 2: LOD-aware mesh configuration
+    int geMeshMaxLodMargin = 1;                               // Extra LOD levels around visible tiles
+    int geMeshMaxInFlight = 8;                                // Max concurrent mesh requests
+    double geMeshRequestBudgetMs = 5.0;                       // Per-frame request budget
+    int geMeshCacheSize = 64;                                 // Max cached meshes (LRU eviction)
+    
     bool geMeshEnabled() const { 
-        // Sprint 1: requires both quadkeys AND endpoint with {quadkey} placeholder
-        return !geMeshQuadKeys.empty() && 
-               !geMeshEndpoint.empty() && 
+        // Sprint 2: requires endpoint with {quadkey} placeholder
+        // geMeshQuadKeys is optional seed set (can be empty for camera-driven loading)
+        return !geMeshEndpoint.empty() && 
                geMeshEndpoint.find("{quadkey}") != std::string::npos;
     }
     

@@ -773,3 +773,29 @@ target_include_directories(ge_nodedata_parser_test PRIVATE
 )
 target_link_libraries(ge_nodedata_parser_test PRIVATE glm::glm)
 add_test(NAME GeNodeDataParserTest COMMAND ge_nodedata_parser_test)
+
+# RockMesh Manager test (Phase 5 Sprint 2)
+add_executable(rockmesh_manager_test
+  tests/rockmesh_manager_test.cpp
+  src/rendering/rockmesh_manager.cpp
+  src/rendering/rockmesh_runtime.cpp
+  src/io/providers/google_earth_nodedata_client.cpp
+  src/io/providers/rocktree_node_data_parser.cpp
+  src/io/ge_mesh_url_template.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/dem_fetch_result.cpp
+  src/io/stb_image_impl.c
+  tests/stubs/network_panel_stub.cpp
+)
+target_include_directories(rockmesh_manager_test PRIVATE
+  src
+  third_party
+  ${CURL_INCLUDE_DIRS}
+)
+target_link_libraries(rockmesh_manager_test PRIVATE 
+  glm::glm
+  glad
+  glfw
+  CURL::libcurl
+)
+add_test(NAME RockMeshManagerTest COMMAND rockmesh_manager_test)

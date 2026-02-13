@@ -1905,6 +1905,22 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Process completed mesh builds with frame budget
     int meshUploadsThisFrame = ProcessMeshResults();
     
+    // Sprint 2: Update RockMeshManager with visible quadkeys
+    if (rockMeshManager_) {
+        // Update generation counter
+        static uint64_t viewportVersion = 0;
+        viewportVersion++;
+        rockMeshManager_->SetViewportVersion(viewportVersion);
+        
+        // Convert visible leaves to TileKeys and update
+        std::vector<TileKey> visibleLeaves;
+        visibleLeaves.reserve(renderLeafSet_.size());
+        for (const auto& key : renderLeafSet_) {
+            visibleLeaves.push_back(key);
+        }
+        rockMeshManager_->UpdateVisibleQuadKeys(visibleLeaves);
+    }
+    
     // Process RockMesh uploads (Phase 5)
     if (rockMeshManager_) {
         bool rockUploaded = rockMeshManager_->ProcessUploads(config_.meshUploadBudgetMs);

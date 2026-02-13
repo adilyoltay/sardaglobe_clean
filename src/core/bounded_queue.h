@@ -52,6 +52,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.size();
     }
+    
+    bool Empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
 
     bool IsClosed() const {
         return closed_.load();

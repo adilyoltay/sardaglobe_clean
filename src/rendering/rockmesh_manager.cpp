@@ -1,19 +1,22 @@
 // RockMesh Manager Implementation
+// Sprint 1: Single quadkey vertical slice
+// Sprint 2: LOD-aware mesh management
 
 #include "rockmesh_manager.h"
-#include "../io/providers/rocktree_node_data_parser.h"
 #include "../core/ellipsoid.h"
+#include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <stb_image.h>
 #include <chrono>
 #include <iostream>
+#include <algorithm>
 
 namespace globe {
 
 RockMeshManager::RockMeshManager(const Config& config)
     : config_(config),
-      requestQueue_(32),
+      requestQueue_(config.geMeshMaxInFlight),
       uploadQueue_(8) {
 }
 
@@ -61,14 +64,20 @@ void RockMeshManager::Request(const std::string& nodeKey) {
         
         auto it = entries_.find(nodeKey);
         if (it != entries_.end()) {
-            // Already known
+            // Already known - update generation and access time
+            it->second.generation = currentGeneration_.load();
+            it->second.lastAccessTime = glfwGetTime();
+            UpdateLRU(nodeKey);
             return;
         }
         
         // New entry
         RockMeshEntry entry;
         entry.state = RockMeshState::Queued;
+        entry.generation = currentGeneration_.load();
+        entry.lastAccessTime = glfwGetTime();
         entries_[nodeKey] = std::move(entry);
+        UpdateLRU(nodeKey);
         shouldQueue = true;
     }
     
@@ -87,9 +96,52 @@ void RockMeshManager::Request(const std::string& nodeKey) {
     }
 }
 
+// Sprint 2: Update visible tile set and generate mesh requests
+void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleLeaves) {
+    uint64_t generation = currentGeneration_.load();
+    std::unordered_set<std::string> visibleKeys;
+    visibleKeys.reserve(visibleLeaves.size() * 2);  // Parent + self
+    
+    // Generate candidate keys from visible leaves plus margin
+    for (const auto& leaf : visibleLeaves) {
+        // Add the leaf itself
+        visibleKeys.insert(TileKeyToNodeKey(leaf));
+        
+        // Add parent if within margin
+        if (leaf.level > 0 && config_.geMeshMaxLodMargin > 0) {
+            visibleKeys.insert(TileKeyToNodeKey(leaf.Parent()));
+        }
+        
+        // Sprint 2 TODO: Add children if camera is close (LOD selection)
+    }
+    
+    // Mark entries not in visible set as stale
+    MarkStaleEntries(visibleKeys);
+    
+    // Request all visible keys
+    int requested = 0;
+    for (const auto& key : visibleKeys) {
+        Request(key);
+        requested++;
+    }
+    
+    // Update stats
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.requestedCount = requested;
+    }
+}
+
+// Sprint 2: Set current viewport generation
+void RockMeshManager::SetViewportVersion(uint64_t version) {
+    currentGeneration_.store(version);
+}
+
 bool RockMeshManager::ProcessUploads(double budgetMs) {
     auto start = std::chrono::steady_clock::now();
     bool didWork = false;
+    int uploaded = 0;
+    int failed = 0;
     
     RockMeshCpu cpu;
     while (uploadQueue_.TryPop(cpu)) {
@@ -100,8 +152,25 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = cpu.error.empty() ? "Build failed" : cpu.error;
             }
+            failed++;
             didWork = true;
             continue;
+        }
+        
+        // Check generation - drop stale uploads
+        uint64_t currentGen = currentGeneration_.load();
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(cpu.id);
+            if (it != entries_.end() && it->second.generation < currentGen - 2) {
+                // Stale - drop silently
+                it->second.state = RockMeshState::Stale;
+                {
+                    std::lock_guard<std::mutex> statsLock(statsMutex_);
+                    stats_.staleDropCount++;
+                }
+                continue;
+            }
         }
         
         // Create GPU mesh
@@ -112,6 +181,7 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             if (it != entries_.end()) {
                 it->second.gpu = std::move(gpu);
                 it->second.state = RockMeshState::Uploaded;
+                uploaded++;
             }
         } else {
             std::lock_guard<std::mutex> lock(stateMutex_);
@@ -119,6 +189,7 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             if (it != entries_.end()) {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = "GPU upload failed";
+                failed++;
             }
         }
         
@@ -132,17 +203,54 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
         }
     }
     
+    // Update stats
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.uploadedCount += uploaded;
+        stats_.failureCount += failed;
+    }
+    
     return didWork;
 }
 
 void RockMeshManager::Render() {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    // Sprint 2: Snapshot pattern - copy GPU handles under lock, draw outside
+    struct DrawCmd {
+        GLuint vao;
+        GLuint texture;
+        uint32_t indexCount;
+    };
+    std::vector<DrawCmd> cmds;
     
-    for (const auto& [id, entry] : entries_) {
-        if (entry.state == RockMeshState::Uploaded && entry.gpu.valid) {
-            entry.gpu.Draw();
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        cmds.reserve(entries_.size());
+        
+        for (const auto& [id, entry] : entries_) {
+            if (entry.state == RockMeshState::Uploaded && entry.gpu.valid) {
+                cmds.push_back({
+                    entry.gpu.vao,
+                    entry.gpu.texture,
+                    entry.gpu.indexCount
+                });
+                // Update access time for LRU
+                const_cast<RockMeshEntry&>(entry).lastAccessTime = glfwGetTime();
+            }
         }
     }
+    
+    // Draw outside lock
+    for (const auto& cmd : cmds) {
+        if (cmd.vao == 0 || cmd.indexCount == 0) continue;
+        
+        glBindVertexArray(cmd.vao);
+        if (cmd.texture) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, cmd.texture);
+        }
+        glDrawElements(GL_TRIANGLES, cmd.indexCount, GL_UNSIGNED_INT, nullptr);
+    }
+    glBindVertexArray(0);
 }
 
 bool RockMeshManager::HasPendingWork() const {
@@ -158,6 +266,18 @@ bool RockMeshManager::HasPendingWork() const {
     return false;
 }
 
+// Sprint 2: Check inflight work
+bool RockMeshManager::HasInflightWork() const {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    
+    for (const auto& [id, entry] : entries_) {
+        if (entry.state == RockMeshState::Fetching) {
+            return true;
+        }
+    }
+    return !requestQueue_.Empty() || !uploadQueue_.Empty();
+}
+
 size_t RockMeshManager::GetUploadedCount() const {
     std::lock_guard<std::mutex> lock(stateMutex_);
     
@@ -168,6 +288,30 @@ size_t RockMeshManager::GetUploadedCount() const {
         }
     }
     return count;
+}
+
+// Sprint 2: Get active node keys snapshot
+std::vector<std::string> RockMeshManager::GetActiveNodeKeysSnapshot() const {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    
+    std::vector<std::string> keys;
+    keys.reserve(entries_.size());
+    
+    for (const auto& [id, entry] : entries_) {
+        if (entry.state != RockMeshState::None && 
+            entry.state != RockMeshState::Stale) {
+            keys.push_back(id);
+        }
+    }
+    return keys;
+}
+
+// Sprint 2: Get debug stats
+RockMeshManager::Stats RockMeshManager::GetStats() const {
+    std::lock_guard<std::mutex> lock(statsMutex_);
+    Stats s = stats_;
+    s.cachedCount = static_cast<int>(lruList_.size());
+    return s;
 }
 
 void RockMeshManager::WorkerLoop() {
@@ -183,11 +327,21 @@ void RockMeshManager::WorkerLoop() {
     while (requestQueue_.Pop(nodeKey)) {
         if (shutdown_) break;
         
-        // Update state
+        // Check generation - skip stale requests
+        uint64_t currentGen = currentGeneration_.load();
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
+                if (it->second.generation < currentGen - 2) {
+                    // Stale - mark and skip
+                    it->second.state = RockMeshState::Stale;
+                    {
+                        std::lock_guard<std::mutex> statsLock(statsMutex_);
+                        stats_.staleDropCount++;
+                    }
+                    continue;
+                }
                 it->second.state = RockMeshState::Fetching;
             }
         }
@@ -201,7 +355,26 @@ void RockMeshManager::WorkerLoop() {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = fetchResult.errorMessage;
             }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.failureCount++;
+            }
             continue;
+        }
+        
+        // Check generation again after fetch
+        currentGen = currentGeneration_.load();
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end() && it->second.generation < currentGen - 2) {
+                it->second.state = RockMeshState::Stale;
+                {
+                    std::lock_guard<std::mutex> statsLock(statsMutex_);
+                    stats_.staleDropCount++;
+                }
+                continue;
+            }
         }
         
         // Parse
@@ -212,6 +385,10 @@ void RockMeshManager::WorkerLoop() {
             if (it != entries_.end()) {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = parsed.error;
+            }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.failureCount++;
             }
             continue;
         }
@@ -226,6 +403,10 @@ void RockMeshManager::WorkerLoop() {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = cpu.error.empty() ? "BuildMesh failed" : cpu.error;
             }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.failureCount++;
+            }
             continue;
         }
         
@@ -239,6 +420,10 @@ void RockMeshManager::WorkerLoop() {
                 it->second.error = "Upload queue full or closed";
             }
             std::cerr << "[RockMesh] Failed to queue upload for " << nodeKey << "\n";
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.failureCount++;
+            }
         }
     }
 }
@@ -428,6 +613,96 @@ bool RockMeshManager::CreateFallbackTexture() {
     
     glBindTexture(GL_TEXTURE_2D, 0);
     return true;
+}
+
+// Sprint 2: Helper methods
+std::string RockMeshManager::TileKeyToNodeKey(const TileKey& key) const {
+    // Convert TileKey to quadkey string (Bing style: 0=NW, 1=NE, 2=SW, 3=SE)
+    if (key.level == 0) return "";
+    
+    std::string digits;
+    digits.reserve(key.level);
+    int tx = key.x, ty = key.y;
+    
+    for (int z = key.level; z > 0; --z) {
+        int digit = ((tx & 1) << 1) | (ty & 1);  // 0=NW, 1=NE, 2=SW, 3=SE
+        digits.push_back('0' + digit);
+        tx >>= 1;
+        ty >>= 1;
+    }
+    
+    std::reverse(digits.begin(), digits.end());
+    return digits;
+}
+
+void RockMeshManager::MarkStaleEntries(const std::unordered_set<std::string>& visibleKeys) {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    
+    for (auto& [nodeKey, entry] : entries_) {
+        if (visibleKeys.find(nodeKey) == visibleKeys.end()) {
+            // Not in visible set
+            if (entry.state == RockMeshState::Uploaded) {
+                // Mark as stale for LRU eviction
+                entry.state = RockMeshState::Stale;
+            } else if (entry.state == RockMeshState::Queued || 
+                       entry.state == RockMeshState::Fetching) {
+                // Will be dropped by generation check in worker
+            }
+        }
+    }
+    
+    // Evict old stale entries if over cache size limit
+    EvictIfNeeded();
+}
+
+void RockMeshManager::UpdateLRU(const std::string& nodeKey) {
+    // Assumes stateMutex_ is held by caller
+    auto it = lruMap_.find(nodeKey);
+    if (it != lruMap_.end()) {
+        // Move to front (most recently used)
+        lruList_.erase(it->second);
+        lruList_.push_front(nodeKey);
+        it->second = lruList_.begin();
+    } else {
+        // Add new entry
+        lruList_.push_front(nodeKey);
+        lruMap_[nodeKey] = lruList_.begin();
+    }
+}
+
+void RockMeshManager::EvictIfNeeded() {
+    // Assumes stateMutex_ is held by caller
+    if (entries_.size() <= static_cast<size_t>(config_.geMeshCacheSize)) {
+        return;
+    }
+    
+    // Evict oldest stale entries first
+    int toEvict = static_cast<int>(entries_.size()) - config_.geMeshCacheSize;
+    auto it = lruList_.rbegin();
+    
+    while (toEvict > 0 && it != lruList_.rend()) {
+        const std::string& nodeKey = *it;
+        auto entryIt = entries_.find(nodeKey);
+        
+        if (entryIt != entries_.end() && entryIt->second.state == RockMeshState::Stale) {
+            // Destroy GPU resources
+            entryIt->second.gpu.Destroy();
+            // Remove from maps
+            lruMap_.erase(nodeKey);
+            entries_.erase(entryIt);
+            // Remove from LRU list (need to convert reverse iterator)
+            it = std::reverse_iterator<std::list<std::string>::iterator>(
+                lruList_.erase(std::next(it).base()));
+            toEvict--;
+        } else {
+            ++it;
+        }
+    }
+}
+
+void RockMeshManager::ProcessPriorityQueue() {
+    // Sprint 2 TODO: Process priority queue for smarter request ordering
+    // For now, requests are FIFO via requestQueue_
 }
 
 } // namespace globe
