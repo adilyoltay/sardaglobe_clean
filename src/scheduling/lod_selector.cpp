@@ -339,7 +339,9 @@ bool LodSelector::ShouldSubdivide(
         float childGeometricError = ComputeGeometricError(key.level + 1);
         float fovRad = fovDegrees * static_cast<float>(M_PI) / 180.0f;
         float sseFactor = static_cast<float>(viewportHeight) / (2.0f * std::tan(fovRad / 2.0f));
-        float childProjectedSize = (childGeometricError / static_cast<float>(distanceMeters)) * sseFactor;
+        // Fix: Multiply by 256 (tile size) because ComputeGeometricError returns meters/pixel,
+        // but we want to compare the full tile's screen size against minLodPixels.
+        float childProjectedSize = (childGeometricError * 256.0f / static_cast<float>(distanceMeters)) * sseFactor;
         if (childProjectedSize < minLodPixels) {
             return false;
         }
