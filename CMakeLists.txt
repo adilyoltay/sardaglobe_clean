@@ -619,3 +619,29 @@ target_include_directories(visual_parity_presets_test PRIVATE
 )
 target_link_libraries(visual_parity_presets_test PRIVATE glm::glm)
 add_test(NAME VisualParityPresetsTest COMMAND visual_parity_presets_test)
+
+# Auth backoff reset behavior test
+add_executable(auth_backoff_reset_test
+  tests/auth_backoff_reset_test.cpp
+  src/io/dem_manager.cpp
+  src/io/providers/dem_fetch_result.cpp
+  src/io/providers/terrain_rgb_provider.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
+)
+target_include_directories(auth_backoff_reset_test PRIVATE
+  src
+)
+target_link_libraries(auth_backoff_reset_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME AuthBackoffResetTest COMMAND auth_backoff_reset_test)
+
+# Decode metadata preservation test
+add_executable(decode_metadata_preserve_test
+  tests/decode_metadata_preserve_test.cpp
+  src/io/providers/dem_fetch_result.cpp
+)
+target_include_directories(decode_metadata_preserve_test PRIVATE
+  src
+)
+target_link_libraries(decode_metadata_preserve_test PRIVATE glm::glm)
+add_test(NAME DecodeMetadataPreserveTest COMMAND decode_metadata_preserve_test)
