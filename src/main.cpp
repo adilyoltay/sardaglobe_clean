@@ -1,14 +1,138 @@
 #include "engine/globe_engine.h"
+#include "camera/earth_camera.h"
+#include "core/ellipsoid.h"
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
+#include <cmath>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <iomanip>
+
+// Track A: #8 Precision Baseline Report
+// Compares double vs float projection accuracy without GPU/OpenGL
+int RunPrecisionReport() {
+    std::cout << "=== Precision Baseline Report (Track A: #8) ===\n\n";
+    
+    // Camera setup
+    earth::PerspectiveCamera camera;
+    camera.SetFov(60.0);
+    camera.SetAspectRatio(1280.0 / 720.0);
+    camera.SetRoll(0.0);
+    
+    // Fixed test point ( away from poles to avoid singularities)
+    const double testLat = 40.0;  // Istanbul-ish latitude
+    const double testLon = 29.0;  // Istanbul-ish longitude
+    
+    // Test scenarios: altitude 5000m, 500m, 50m, 5m
+    struct Scenario {
+        const char* name;
+        double altitude;
+    };
+    Scenario scenarios[] = {
+        {"S1: Alt=5000m", 5000.0},
+        {"S2: Alt=500m", 500.0},
+        {"S3: Alt=50m", 50.0},
+        {"S4: Alt=5m", 5.0}
+    };
+    
+    const int windowWidth = 1280;
+    const int windowHeight = 720;
+    const double tilt = 80.0;      // Near-horizontal view
+    const double heading = 45.0;   // Diagonal
+    
+    // Sample points around center (N/E/S/W at ~100m radius)
+    struct SamplePoint {
+        const char* name;
+        double dLat, dLon;  // Degrees offset (~100m)
+    };
+    SamplePoint samples[] = {
+        {"P0: Center", 0.0, 0.0},
+        {"P1: North", 0.0009, 0.0},   // ~100m north
+        {"P2: East", 0.0, 0.0011},    // ~100m east
+        {"P3: South", -0.0009, 0.0},  // ~100m south
+        {"P4: West", 0.0, -0.0011}    // ~100m west
+    };
+    
+    globe::Ellipsoid ellipsoid = globe::Ellipsoid::WGS84();
+    double maxDeltaAllScenarios = 0.0;
+    double maxDelta50mOrLess = 0.0;
+    
+    for (const auto& scenario : scenarios) {
+        // Set camera position
+        camera.SetLatLonAlt(testLat, testLon, scenario.altitude);
+        camera.SetTilt(tilt);
+        camera.SetHeading(heading);
+        
+        // Get matrices (double precision)
+        glm::dmat4 projD = camera.GetProjectionMatrix();
+        glm::dmat4 viewD = camera.GetViewMatrix();
+        glm::dmat4 mvpD = projD * viewD;
+        
+        // Float simulation (cast to float)
+        glm::mat4 mvpF = glm::mat4(mvpD);
+        
+        double scenarioMaxDelta = 0.0;
+        double scenarioSumDelta = 0.0;
+        int sampleCount = 0;
+        
+        for (const auto& sample : samples) {
+            // World position (ECEF double)
+            double lat = testLat + sample.dLat;
+            double lon = testLon + sample.dLon;
+            glm::dvec3 posD = ellipsoid.GeodeticToCartesian(lon, lat, 0.0);
+            
+            // Double precision projection
+            glm::dvec4 clipD = mvpD * glm::dvec4(posD, 1.0);
+            glm::dvec3 ndcD = glm::dvec3(clipD) / clipD.w;
+            
+            // Float simulation
+            glm::vec4 clipF = mvpF * glm::vec4(glm::vec3(posD), 1.0f);
+            glm::vec3 ndcF = glm::vec3(clipF) / clipF.w;
+            
+            // Pixel delta
+            double deltaPxX = std::abs(ndcD.x - static_cast<double>(ndcF.x)) * 0.5 * windowWidth;
+            double deltaPxY = std::abs(ndcD.y - static_cast<double>(ndcF.y)) * 0.5 * windowHeight;
+            double deltaPx = std::max(deltaPxX, deltaPxY);
+            
+            scenarioMaxDelta = std::max(scenarioMaxDelta, deltaPx);
+            scenarioSumDelta += deltaPx;
+            sampleCount++;
+        }
+        
+        double scenarioMeanDelta = scenarioSumDelta / sampleCount;
+        maxDeltaAllScenarios = std::max(maxDeltaAllScenarios, scenarioMaxDelta);
+        
+        if (scenario.altitude <= 50.0) {
+            maxDelta50mOrLess = std::max(maxDelta50mOrLess, scenarioMaxDelta);
+        }
+        
+        std::cout << scenario.name << ":\n";
+        std::cout << "  maxDeltaPx = " << std::fixed << std::setprecision(4) << scenarioMaxDelta << "\n";
+        std::cout << "  meanDeltaPx = " << scenarioMeanDelta << "\n\n";
+    }
+    
+    // Final recommendation
+    std::cout << "=== Summary ===\n";
+    std::cout << "Overall maxDeltaPx = " << maxDeltaAllScenarios << "\n";
+    std::cout << "Max delta at alt<=50m = " << maxDelta50mOrLess << "\n\n";
+    
+    if (maxDelta50mOrLess > 0.5) {
+        std::cout << "RECOMMEND_RTE=YES (float precision insufficient at street level)\n";
+        return 1;  // RTE recommended
+    } else {
+        std::cout << "RECOMMEND_RTE=NO (float precision adequate)\n";
+        return 0;  // Float OK
+    }
+}
 
 int main(int argc, char** argv) {
     globe::Config config;
     bool runVisualTest = false;
     bool runSmokeTest = false;
     bool runPanProfile = false;
+    bool runPrecisionReport = false;
     
     // Default tile URL: open satellite imagery (EOX Sentinel-2 cloudless mosaic).
     // OSM fallback:
@@ -110,6 +234,8 @@ int main(int argc, char** argv) {
             config.demDebug = true;
         } else if (std::strcmp(argv[i], "--profile-pan") == 0) {
             runPanProfile = true;
+        } else if (std::strcmp(argv[i], "--precision-report") == 0) {
+            runPrecisionReport = true;
         } else if (std::strcmp(argv[i], "--gpu-terrain") == 0) {
             config.terrainDisplacementMode = globe::DisplacementMode::GPU_HEIGHTMAP_DISPLACE;
         } else if (std::strcmp(argv[i], "--quality") == 0 && i + 1 < argc) {
@@ -150,6 +276,7 @@ int main(int argc, char** argv) {
                       << "  --test            Run visual LOD test and exit\n"
                       << "  --smoke           Run smoke test (zoom in/out + terrain) and exit\n"
                       << "  --profile-pan     Run zoom/pan profiler and print per-frame CSV\n"
+                      << "  --precision-report  CPU-only precision baseline (Track A: #8)\n"
                       << "  --gpu-terrain     Use GPU heightmap displacement (default: CPU mesh bake)\n"
                       << "  --quality MODE    Render quality: low | medium | high | ultra (default: medium)\n"
                       << "  --help            Show this help\n"
@@ -181,6 +308,11 @@ int main(int argc, char** argv) {
     std::cout << "DEM Provider: " << config.demProvider << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";
     std::cout << "DEM Auth: " << (config.demAuth.empty() ? "none" : "basic") << "\n";
+    
+    // Handle precision report first (CPU-only, no GPU/GUI needed)
+    if (runPrecisionReport) {
+        return RunPrecisionReport();
+    }
     
     int runModeCount = (runVisualTest ? 1 : 0) + (runSmokeTest ? 1 : 0) + (runPanProfile ? 1 : 0);
     if (runModeCount > 1) {

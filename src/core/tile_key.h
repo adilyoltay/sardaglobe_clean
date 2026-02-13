@@ -78,6 +78,26 @@ struct TileKey {
         return std::to_string(level) + "/" + std::to_string(x) + "/" + std::to_string(y);
     }
 
+    // QuadKey conversion (Bing/GE compatible)
+    // Digit mapping: 0=NW, 1=NE, 2=SW, 3=SE
+    // Level 0 returns empty string
+    std::string ToQuadKey() const {
+        if (level <= 0) return "";
+        std::string quadkey;
+        quadkey.reserve(level);
+        int tx = x;
+        int ty = y;
+        for (int i = 0; i < level; ++i) {
+            int digit = ((tx & 1) << 0) | ((ty & 1) << 1);
+            quadkey.push_back('0' + digit);
+            tx >>= 1;
+            ty >>= 1;
+        }
+        // Reverse to get MSB first (root to leaf)
+        std::reverse(quadkey.begin(), quadkey.end());
+        return quadkey;
+    }
+
     static TileKey FromString(const std::string& s) {
         TileKey key;
         if (std::sscanf(s.c_str(), "%d/%d/%d", &key.level, &key.x, &key.y) != 3) {

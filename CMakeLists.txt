@@ -717,3 +717,23 @@ target_include_directories(ge_dem_grid_order_test PRIVATE
 )
 target_link_libraries(ge_dem_grid_order_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME GeDemGridOrderTest COMMAND ge_dem_grid_order_test)
+
+# TileKey QuadKey conversion test (Track B: #9)
+add_executable(tile_key_quadkey_test
+  tests/tile_key_quadkey_test.cpp
+)
+target_include_directories(tile_key_quadkey_test PRIVATE
+  src
+)
+target_link_libraries(tile_key_quadkey_test PRIVATE glm::glm)
+add_test(NAME TileKeyQuadKeyTest COMMAND tile_key_quadkey_test)
+
+# GE Mesh URL template test (Track B: #9)
+add_executable(ge_mesh_url_template_test
+  tests/ge_mesh_url_template_test.cpp
+)
+target_include_directories(ge_mesh_url_template_test PRIVATE
+  src
+)
+target_link_libraries(ge_mesh_url_template_test PRIVATE glm::glm)
+add_test(NAME GeMeshUrlTemplateTest COMMAND ge_mesh_url_template_test)

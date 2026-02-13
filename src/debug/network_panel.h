@@ -12,7 +12,8 @@ namespace globe {
 // Network request type
 enum class RequestType {
     RasterTile,   // Image tile fetch
-    DemMesh       // DEM/elevation mesh fetch
+    DemMesh,      // DEM/elevation mesh fetch (terrain-rgb)
+    TerrainMesh   // NodeData/RockTree 3D terrain mesh fetch (Phase 5)
 };
 
 // Single network request record
