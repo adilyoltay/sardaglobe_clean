@@ -54,6 +54,37 @@ int main(int argc, char** argv) {
             config.demMaxZoom = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--dem-mesh-n") == 0 && i + 1 < argc) {
             config.demMeshN = std::max(2, std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--ge-elevation-endpoint") == 0 && i + 1 < argc) {
+            config.geElevationEndpoint = argv[++i];
+        } else if (std::strcmp(argv[i], "--ge-mesh-endpoint") == 0 && i + 1 < argc) {
+            config.geMeshEndpoint = argv[++i];
+        } else if (std::strcmp(argv[i], "--ge-header") == 0 && i + 1 < argc) {
+            // Parse K:V format for GE headers
+            std::string header = argv[++i];
+            size_t colonPos = header.find(':');
+            if (colonPos != std::string::npos) {
+                std::string key = header.substr(0, colonPos);
+                std::string value = header.substr(colonPos + 1);
+                // Allowlist check: only specific headers allowed
+                if (key == "Authorization" || key == "X-Custom-Auth") {
+                    config.geHeaders.push_back({key, value});
+                } else {
+                    std::cerr << "Warning: Header '" << key << "' not in GE allowlist. Ignored.\n";
+                }
+            } else {
+                std::cerr << "Error: --ge-header format must be 'Key:Value'\n";
+                return 1;
+            }
+        } else if (std::strcmp(argv[i], "--ge-elevation-type") == 0 && i + 1 < argc) {
+            const char* type = argv[++i];
+            if (std::strcmp(type, "ellipsoid") == 0) config.geElevationType = 0;
+            else if (std::strcmp(type, "terrain") == 0) config.geElevationType = 1;
+            else if (std::strcmp(type, "sea_level") == 0) config.geElevationType = 2;
+            else {
+                std::cerr << "Error: Invalid elevation type '" << type << "'\n"
+                          << "Valid types: ellipsoid, terrain, sea_level\n";
+                return 1;
+            }
         } else if (std::strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             config.cacheDir = argv[++i];
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
@@ -104,6 +135,10 @@ int main(int argc, char** argv) {
                       << "  --dem-auth U:P    DEM HTTP basic auth (user:password)\n"
                       << "  --dem-max-zoom N  Max DEM source zoom level (default 15)\n"
                       << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
+                      << "  --ge-elevation-endpoint URL  Google Earth elevation endpoint\n"
+                      << "  --ge-mesh-endpoint URL       Google Earth mesh endpoint (Phase 5)\n"
+                      << "  --ge-header K:V              GE custom header (allowlist: Authorization, X-Custom-Auth)\n"
+                      << "  --ge-elevation-type TYPE     Elevation type: ellipsoid | terrain | sea_level\n"
                       << "  --cache-dir DIR   Tile cache directory\n"
                       << "  --no-cache        Disable disk cache\n"
                       << "  --no-dem          Disable DEM\n"

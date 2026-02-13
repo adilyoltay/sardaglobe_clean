@@ -1,5 +1,6 @@
 #include "dem_manager.h"
 #include "providers/terrain_rgb_provider.h"
+#include "providers/google_earth_dem_provider.h"
 #include <curl/curl.h>
 #include <cmath>
 #include <sstream>
@@ -47,10 +48,19 @@ DemManager::DemManager(const Config& config) : config_(config) {
             provider_ = std::make_unique<TerrainRGBProvider>(trConfig);
             break;
         }
-        case DemProviderType::GoogleEarth:
-            // Phase 4/5: Will create GoogleEarthProvider here
-            // For now, provider_ remains null and FetchTile will handle
+        case DemProviderType::GoogleEarth: {
+            // Create Google Earth DEM provider
+            GoogleEarthDemConfig geConfig;
+            geConfig.elevationEndpoint = config_.geElevationEndpoint;
+            geConfig.headers = config_.geHeaders;
+            geConfig.authToken = std::getenv(config_.geTokenEnv.c_str()) ? 
+                                 std::getenv(config_.geTokenEnv.c_str()) : "";
+            geConfig.elevationType = config_.geElevationType;
+            geConfig.meshN = config_.meshN;
+            geConfig.timeoutSec = config_.timeoutSec;
+            provider_ = std::make_unique<GoogleEarthDemProvider>(geConfig);
             break;
+        }
     }
 
     // Start worker threads
@@ -496,12 +506,6 @@ void DemManager::WorkerLoop() {
 
 bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
     if (!provider_) {
-        // google-earth not yet implemented
-        if (config_.providerType == DemProviderType::GoogleEarth) {
-            std::cerr << "[DEM] ERROR: Google Earth provider not yet implemented (Phase 4/5). "
-                      << "Use --dem-provider terrain-rgb or check back later." << std::endl;
-            terminalError_.store(true);
-        }
         return false;
     }
     

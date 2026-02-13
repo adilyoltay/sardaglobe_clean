@@ -2,6 +2,7 @@
 
 #include "constants.h"
 #include <string>
+#include <vector>
 #include <cstddef>
 #include <algorithm>
 
@@ -56,10 +57,13 @@ struct Config {
     std::string demAuth;
     
     // Google Earth provider configuration (only used when demProvider="google-earth")
-    std::string geEndpoint = "https://kh.google.com/rpc/eh";  // Elevation service endpoint
+    std::string geElevationEndpoint;                          // Elevation service endpoint (empty = GE disabled)
+    std::string geMeshEndpoint;                               // Mesh/NodeData endpoint (Phase 5)
+    std::vector<std::pair<std::string, std::string>> geHeaders; // GE-only headers (allowlisted)
+    std::string geTokenEnv = "NATIVE_GLOBE_GE_TOKEN";         // Env var for auth token
+    int geElevationType = 0;                                  // 0=ELLIPSOID, 1=TERRAIN, 2=SEA_LEVEL
     std::string geEpoch = "latest";                           // Dataset epoch
     std::string geChannel = "default";                        // Service channel
-    // GE auth token from environment (NATIVE_GLOBE_GE_TOKEN). Never hardcode.
     
     // Cache
     std::string cacheDir = "tile_cache";

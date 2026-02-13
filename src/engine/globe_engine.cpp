@@ -167,8 +167,11 @@ bool GlobeEngine::Init() {
         demConfig.debug = config_.demDebug;
         demConfig.timeoutSec = 30;
         demConfig.connectTimeoutSec = 10;
-        // Wire GE config fields (Phase 4/5 implementation will use these)
-        demConfig.geEndpoint = config_.geEndpoint;
+        // Wire GE config fields
+        demConfig.geElevationEndpoint = config_.geElevationEndpoint;
+        demConfig.geHeaders = config_.geHeaders;
+        demConfig.geTokenEnv = config_.geTokenEnv;
+        demConfig.geElevationType = config_.geElevationType;
         demConfig.geEpoch = config_.geEpoch;
         demConfig.geChannel = config_.geChannel;
         demManager_ = std::make_unique<DemManager>(demConfig);

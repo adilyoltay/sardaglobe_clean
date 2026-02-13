@@ -95,6 +95,10 @@ add_executable(native_globe
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
   src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
   src/io/memory_tile_cache.cpp
@@ -103,6 +107,10 @@ add_executable(native_globe
   src/io/terrain_rgb_decoder.cpp
   src/io/providers/dem_fetch_result.cpp
   src/io/providers/terrain_rgb_provider.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
   # Scheduling module
   src/scheduling/tile_scheduler.cpp
   src/scheduling/lod_selector.cpp
@@ -314,13 +322,18 @@ add_executable(tile_decoder_blob_fastpath_test
   tests/tile_decoder_blob_fastpath_test.cpp
   src/io/tile_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/dem_fetch_result.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
   src/io/decoded_tile_blob.cpp
 )
 target_include_directories(tile_decoder_blob_fastpath_test PRIVATE
   src
   third_party
 )
-target_link_libraries(tile_decoder_blob_fastpath_test PRIVATE glm::glm)
+target_link_libraries(tile_decoder_blob_fastpath_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME TileDecoderBlobFastpathTest COMMAND tile_decoder_blob_fastpath_test)
 
 # TileFetcher cancel -> re-request regression test
@@ -328,6 +341,7 @@ add_executable(tile_fetcher_cancel_rerequest_test
   tests/tile_fetcher_cancel_rerequest_test.cpp
   src/io/tile_fetcher.cpp
   src/io/decoded_tile_blob.cpp
+  src/io/providers/dem_fetch_result.cpp
 )
 target_include_directories(tile_fetcher_cancel_rerequest_test PRIVATE
   src
@@ -354,6 +368,11 @@ add_executable(tile_scheduler_cancel_flow_test
   src/io/tile_fetcher.cpp
   src/io/tile_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/dem_fetch_result.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
   src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
   src/io/memory_tile_cache.cpp
@@ -418,6 +437,10 @@ add_executable(dem_fallback_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(dem_fallback_test PRIVATE
   src
@@ -433,6 +456,10 @@ add_executable(dem_continuity_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(dem_continuity_test PRIVATE
   src
@@ -451,6 +478,10 @@ add_executable(dem_edge_equalization_fallback_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(dem_edge_equalization_fallback_test PRIVATE
   src
@@ -482,6 +513,10 @@ add_executable(selective_skirt_mask_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(selective_skirt_mask_test PRIVATE
   src
@@ -535,6 +570,10 @@ add_executable(dem_effective_level_policy_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(dem_effective_level_policy_test PRIVATE
   src
@@ -550,6 +589,10 @@ add_executable(dem_grid_row_order_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(dem_grid_row_order_test PRIVATE
   src
@@ -565,6 +608,10 @@ add_executable(dem_co_eviction_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(dem_co_eviction_test PRIVATE
   src
@@ -590,6 +637,10 @@ add_executable(seam_metric_truth_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(seam_metric_truth_test PRIVATE
   src
@@ -628,6 +679,10 @@ add_executable(auth_backoff_reset_test
   src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
 )
 target_include_directories(auth_backoff_reset_test PRIVATE
   src
@@ -646,3 +701,32 @@ target_include_directories(decode_metadata_preserve_test PRIVATE
 )
 target_link_libraries(decode_metadata_preserve_test PRIVATE glm::glm)
 add_test(NAME DecodeMetadataPreserveTest COMMAND decode_metadata_preserve_test)
+
+# Google Earth Elevation Provider unit test (network-isolated)
+add_executable(ge_elevation_provider_test
+  tests/ge_elevation_provider_test.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/dem_fetch_result.cpp
+)
+target_include_directories(ge_elevation_provider_test PRIVATE
+  src
+)
+target_link_libraries(ge_elevation_provider_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME GeElevationProviderTest COMMAND ge_elevation_provider_test)
+
+# Google Earth DEM Grid Order test
+add_executable(ge_dem_grid_order_test
+  tests/ge_dem_grid_order_test.cpp
+  src/io/providers/google_earth_dem_provider.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/dem_fetch_result.cpp
+)
+target_include_directories(ge_dem_grid_order_test PRIVATE
+  src
+)
+target_link_libraries(ge_dem_grid_order_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME GeDemGridOrderTest COMMAND ge_dem_grid_order_test)
