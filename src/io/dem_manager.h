@@ -14,8 +14,12 @@
 #include <list>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 
 namespace globe {
+
+// Forward declarations
+class ITerrainDemProvider;
 
 // DEM grid data for a tile
 struct DemGridData {
@@ -107,6 +111,7 @@ struct DemManagerConfig {
 };
 
 // DEM Manager - handles elevation data fetching and caching
+// Phase 3: Now uses ITerrainDemProvider interface for provider-specific logic
 class DemManager {
 public:
     using Config = DemManagerConfig;
@@ -119,11 +124,11 @@ public:
     DemHealthStatus CheckHealth();
     
     // Get current health status
-    DemHealthStatus GetHealthStatus() const { return healthStatus_.load(); }
+    DemHealthStatus GetHealthStatus() const;
     
     // True if provider is in terminal error state (e.g., not implemented)
     // When terminal, Request() is a no-op to prevent log spam
-    bool IsTerminalError() const { return terminalError_.load(); }
+    bool IsTerminalError() const;
     
     // Get telemetry stats
     const DemStats& GetStats() const { return stats_; }
@@ -178,6 +183,9 @@ public:
 private:
     Config config_;
     
+    // Provider implementation (Phase 3 abstraction)
+    std::unique_ptr<ITerrainDemProvider> provider_;
+    
     // Cache: TileKey -> DemGridData with O(1) LRU eviction.
     mutable std::mutex cacheMutex_;
     std::unordered_map<TileKey, DemGridData> cache_;
@@ -231,31 +239,25 @@ private:
     std::unordered_map<TileKey, std::chrono::steady_clock::time_point> failedUntil_;  // TTL cache
     static constexpr double FAIL_RETRY_SEC = 30.0;  // Retry failed tiles after 30s
     
-    // Auth backoff (401/403)
+    // Auth backoff (401/403) - currently only for TerrainRGB
     std::atomic<int> consecutiveAuthFails_{0};
     std::atomic<bool> authBackoff_{false};
     std::chrono::steady_clock::time_point backoffUntil_;
     
-    // Health status and telemetry
-    std::atomic<DemHealthStatus> healthStatus_{DemHealthStatus::Unknown};
+    // DemStats for telemetry
     DemStats stats_;
     
-    // Terminal error state (for google-earth provider not implemented)
-    // When true, Request() becomes a no-op to prevent log spam and queue churn
+    // Terminal error state (set when provider reports unrecoverable error)
     std::atomic<bool> terminalError_{false};
     
     // Helper functions
     void WorkerLoop();
     bool FetchTile(const TileKey& key, DemGridData& outData);
-    bool FetchTerrainRGB(const TileKey& key, DemGridData& outData);
-    std::string BuildTerrainRGBUrl(const TileKey& key, int effectiveLevel) const;
     double SampleBilinear(const DemGridData& data, double u, double v) const;
 
     // Tile bounds calculation (WGS84)
     static double Tile2Lon(int x, int z);
     static double Tile2Lat(int y, int z);
-
-    DemProviderType providerType_ = DemProviderType::TerrainRGB;
 };
 
 } // namespace globe

@@ -100,7 +100,9 @@ add_executable(native_globe
   src/io/memory_tile_cache.cpp
   src/io/tile_url_template.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   # Scheduling module
   src/scheduling/tile_scheduler.cpp
   src/scheduling/lod_selector.cpp
@@ -412,6 +414,7 @@ add_test(NAME AtlasGutterUvTest COMMAND atlas_gutter_uv_test)
 add_executable(dem_fallback_test
   tests/dem_fallback_test.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
@@ -425,6 +428,7 @@ add_test(NAME DemFallbackTest COMMAND dem_fallback_test)
 add_executable(dem_continuity_test
   tests/dem_continuity_test.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
@@ -441,6 +445,7 @@ add_executable(dem_edge_equalization_fallback_test
   src/rendering/mesh_template.cpp
   src/core/ellipsoid.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
@@ -470,6 +475,7 @@ add_executable(selective_skirt_mask_test
   src/rendering/mesh_template.cpp
   src/core/ellipsoid.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
@@ -521,6 +527,7 @@ add_test(NAME TilePyramidChildReadyTest COMMAND tile_pyramid_child_ready_test)
 add_executable(dem_effective_level_policy_test
   tests/dem_effective_level_policy_test.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
@@ -534,6 +541,7 @@ add_test(NAME DemEffectiveLevelPolicyTest COMMAND dem_effective_level_policy_tes
 add_executable(dem_grid_row_order_test
   tests/dem_grid_row_order_test.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
@@ -547,6 +555,7 @@ add_test(NAME DemGridRowOrderTest COMMAND dem_grid_row_order_test)
 add_executable(dem_co_eviction_test
   tests/dem_co_eviction_test.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
@@ -570,6 +579,7 @@ add_test(NAME AdaptiveMeshSegmentsTest COMMAND adaptive_mesh_segments_test)
 add_executable(seam_metric_truth_test
   tests/seam_metric_truth_test.cpp
   src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
   src/io/terrain_rgb_decoder.cpp
   src/io/stb_image_impl.c
 )
