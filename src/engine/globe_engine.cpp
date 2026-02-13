@@ -695,7 +695,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
             return RenderBlockReason::NoMesh;
         }
         const bool hasRealTexture = tile.textureId != 0 && tile.textureId != loadingTextureId;
-        if (!hasRealTexture) {
+        // Black nodata tiles should not be considered renderable (consistency with RenderFrame)
+        if (!hasRealTexture || tile.mostlyBlackOpaqueRaster) {
             return RenderBlockReason::NoTexture;
         }
         if (requireTerrainForQuorum) {
@@ -1514,7 +1515,17 @@ void GlobeEngine::Update(double dt, double currentTime) {
             newSkirtMask |= tile.latchedSeamSkirtMask;
         }
 
-        uint8_t stitchedMask = config_.edgeStitching ? newEdgeCoarserMask : 0;
+        // Stitch only for delta=1; delta>1 uses skirt (safety fallback)
+        static const uint8_t kEdgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
+                                            Tile::EDGE_SOUTH, Tile::EDGE_WEST};
+        uint8_t stitchedMask = 0;
+        if (config_.edgeStitching) {
+            for (int dir = 0; dir < 4; ++dir) {
+                if ((newEdgeCoarserMask & kEdgeBits[dir]) != 0 && edgeCoarserDelta[dir] == 1.0f) {
+                    stitchedMask |= kEdgeBits[dir];
+                }
+            }
+        }
         uint8_t resolvedSkirtMask = config_.selectiveSkirts
             ? newSkirtMask
             : static_cast<uint8_t>(Tile::EDGE_NORTH | Tile::EDGE_EAST | Tile::EDGE_SOUTH | Tile::EDGE_WEST);
