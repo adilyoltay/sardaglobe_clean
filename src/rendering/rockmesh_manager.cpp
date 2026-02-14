@@ -32,7 +32,7 @@ bool RockMeshManager::Init() {
         std::cerr << "[RockMesh] Failed to create fallback texture\n";
         return false;
     }
-    
+
     // Sprint 2.2: Initialize disk cache if enabled
     if (config_.useDiskCache && !config_.cacheDir.empty()) {
         cacheDir_ = config_.cacheDir + "/ge_mesh";
@@ -44,7 +44,24 @@ bool RockMeshManager::Init() {
             std::cout << "[RockMesh] Disk cache initialized at " << cacheDir_ << "\n";
         }
     }
-    
+
+    // Create rate limiter
+    rateLimiter_ = std::make_unique<GeRateLimiter>(config_.geRateLimitMs);
+
+    // Initialize octree index asynchronously (non-blocking)
+    // Octree init makes HTTP requests to kh.google.com which can be slow
+    if (config_.geOctreeEnabled) {
+        octreeIndex_ = std::make_shared<RockTreeOctreeIndex>(config_, rateLimiter_.get());
+        std::cout << "[RockMesh] Starting octree discovery (async)...\n";
+        octreeWorkerThread_ = std::thread(&RockMeshManager::OctreeWorkerLoop, this);
+    }
+
+    // Use config epoch as initial fallback (will be updated after octree init)
+    if (!config_.geEpoch.empty()) {
+        std::lock_guard<std::mutex> lock(epochMutex_);
+        resolvedEpoch_ = config_.geEpoch;
+    }
+
     workerThread_ = std::thread(&RockMeshManager::WorkerLoop, this);
     return true;
 }
@@ -53,9 +70,14 @@ void RockMeshManager::Shutdown() {
     shutdown_ = true;
     requestQueue_.Close();
     uploadQueue_.Close();
-    
+
     if (workerThread_.joinable()) {
         workerThread_.join();
+    }
+
+    // Join octree worker
+    if (octreeWorkerThread_.joinable()) {
+        octreeWorkerThread_.join();
     }
     
     // Phase 6.4: Cleanup any remaining entries in non-terminal states
@@ -142,39 +164,83 @@ void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleL
     
     // Generate candidate keys from visible leaves plus margin
     int childRequestsThisFrame = 0;
-    for (const auto& leaf : visibleLeaves) {
-        // Add the leaf itself
-        visibleKeys.insert(TileKeyToNodeKey(leaf));
-        
-        // Add parent if within margin
-        if (leaf.level > 0 && config_.geMeshMaxLodMargin > 0) {
-            visibleKeys.insert(TileKeyToNodeKey(leaf.Parent()));
-        }
-        
-        // Sprint 3: Child-LOD proximity selection with distance check
-        // Request children for high-detail tiles near camera
-        // Phase 6: Clamp to max zoom bounds to prevent over-expansion
-        if (config_.geMeshEnableChildLod && 
-            leaf.level >= 10 &&  // Only for detailed tiles
-            leaf.level < config_.maxZoom &&  // Don't expand beyond max zoom
-            childRequestsThisFrame < config_.geMeshMaxChildRequestsPerFrame) {
-            
-            // Calculate distance from camera to tile center
-            // Phase 6 Fix: Both cameraPosEcef and CenterEcef() are in km
-            bool isNearCamera = true;  // Default to true if no camera position
-            if (cameraPosEcef != glm::dvec3(0.0)) {
-                glm::dvec3 tileCenter = leaf.CenterEcef();  // km
-                double distMeters = glm::length(tileCenter - cameraPosEcef) * 1000.0;  // km -> m
-                isNearCamera = distMeters <= config_.geMeshChildLodDistance;
+
+    // Octree mode: use octree index for node key mapping
+    if (octreeIndex_ && octreeIndex_->IsInitialized()) {
+        for (const auto& leaf : visibleLeaves) {
+            // Map TMS tile to approximate octree paths
+            std::string tileQK = TileKeyToNodeKey(leaf);
+            auto candidates = octreeIndex_->TileQuadKeyToOctreePaths(tileQK);
+            for (const auto& path : candidates) {
+                if (octreeIndex_->HasNodeData(path)) {
+                    visibleKeys.insert(path);
+                }
+
+                // Request BulkMetadata for deeper exploration if not yet fetched
+                if (!octreeIndex_->IsBulkMetadataFetched(path) &&
+                    path.length() >= 2) {
+                    // Request BulkMetadata for the parent prefix that covers this depth
+                    std::string prefix = path.substr(0, std::min(path.length(), size_t(4)));
+                    octreeIndex_->RequestBulkMetadata(prefix);
+                }
+
+                // Get children with data for close tiles
+                if (config_.geMeshEnableChildLod &&
+                    leaf.level >= 10 &&
+                    childRequestsThisFrame < config_.geMeshMaxChildRequestsPerFrame) {
+                    auto children = octreeIndex_->GetChildrenWithData(path);
+                    for (const auto& childPath : children) {
+                        if (visibleKeys.find(childPath) == visibleKeys.end()) {
+                            visibleKeys.insert(childPath);
+                            childRequestsThisFrame++;
+                        }
+                    }
+                }
             }
-            
-            if (isNearCamera) {
-                auto children = leaf.Children();
-                for (const auto& child : children) {
-                    std::string childKey = TileKeyToNodeKey(child);
-                    if (visibleKeys.find(childKey) == visibleKeys.end()) {
-                        visibleKeys.insert(childKey);
-                        childRequestsThisFrame++;
+
+            // Also add parent-level octree nodes
+            if (leaf.level > 0 && config_.geMeshMaxLodMargin > 0) {
+                std::string parentQK = TileKeyToNodeKey(leaf.Parent());
+                auto parentCandidates = octreeIndex_->TileQuadKeyToOctreePaths(parentQK);
+                for (const auto& path : parentCandidates) {
+                    if (octreeIndex_->HasNodeData(path)) {
+                        visibleKeys.insert(path);
+                    }
+                }
+            }
+        }
+    } else {
+        // Legacy mode: direct TMS quadkey mapping
+        for (const auto& leaf : visibleLeaves) {
+            // Add the leaf itself
+            visibleKeys.insert(TileKeyToNodeKey(leaf));
+
+            // Add parent if within margin
+            if (leaf.level > 0 && config_.geMeshMaxLodMargin > 0) {
+                visibleKeys.insert(TileKeyToNodeKey(leaf.Parent()));
+            }
+
+            // Sprint 3: Child-LOD proximity selection with distance check
+            if (config_.geMeshEnableChildLod &&
+                leaf.level >= 10 &&
+                leaf.level < config_.maxZoom &&
+                childRequestsThisFrame < config_.geMeshMaxChildRequestsPerFrame) {
+
+                bool isNearCamera = true;
+                if (cameraPosEcef != glm::dvec3(0.0)) {
+                    glm::dvec3 tileCenter = leaf.CenterEcef();
+                    double distMeters = glm::length(tileCenter - cameraPosEcef) * 1000.0;
+                    isNearCamera = distMeters <= config_.geMeshChildLodDistance;
+                }
+
+                if (isNearCamera) {
+                    auto children = leaf.Children();
+                    for (const auto& child : children) {
+                        std::string childKey = TileKeyToNodeKey(child);
+                        if (visibleKeys.find(childKey) == visibleKeys.end()) {
+                            visibleKeys.insert(childKey);
+                            childRequestsThisFrame++;
+                        }
                     }
                 }
             }
@@ -507,13 +573,16 @@ void RockMeshManager::UpdateFades(float deltaTime) {
 }
 
 // Phase 6: Added shaderProgram parameter for per-mesh fade
-void RockMeshManager::Render(GLuint shaderProgram) {
+void RockMeshManager::Render(GLuint shaderProgram, bool useRte) {
     // Sprint 3: Snapshot pattern with fade support
+    // Faz 1C: Added RTE origin for jitter-free rendering
     struct DrawCmd {
         GLuint vao;
         GLuint texture;
         uint32_t indexCount;
         float fade;
+        glm::vec3 originHi;
+        glm::vec3 originLo;
     };
     std::vector<DrawCmd> cmds;
     
@@ -529,7 +598,9 @@ void RockMeshManager::Render(GLuint shaderProgram) {
                     entry.gpu.vao,
                     entry.gpu.texture,
                     entry.gpu.indexCount,
-                    entry.fade
+                    entry.fade,
+                    entry.gpu.originEcefHi,
+                    entry.gpu.originEcefLo
                 });
                 // Update access time for LRU
                 const_cast<RockMeshEntry&>(entry).lastAccessTime = glfwGetTime();
@@ -537,10 +608,19 @@ void RockMeshManager::Render(GLuint shaderProgram) {
         }
     }
     
-    // Phase 6: Get fade uniform location if shader program provided
+    // Phase 6: Get uniform locations if shader program provided
     GLint fadeLoc = -1;
+    GLint originHiLoc = -1;
+    GLint originLoLoc = -1;
+    GLint useRteLoc = -1;
+    GLint texScaleOffsetLoc = -1;
     if (shaderProgram != 0) {
         fadeLoc = glGetUniformLocation(shaderProgram, "uFade");
+        // Faz 1C: RTE uniforms (same as tile shader)
+        originHiLoc = glGetUniformLocation(shaderProgram, "uTileOriginECEFHi");
+        originLoLoc = glGetUniformLocation(shaderProgram, "uTileOriginECEFLo");
+        useRteLoc = glGetUniformLocation(shaderProgram, "uUseRTE");
+        texScaleOffsetLoc = glGetUniformLocation(shaderProgram, "uTexScaleOffsetMain");
     }
     
     // Draw outside lock
@@ -550,6 +630,21 @@ void RockMeshManager::Render(GLuint shaderProgram) {
         // Phase 6: Set per-mesh fade uniform
         if (fadeLoc >= 0) {
             glUniform1f(fadeLoc, cmd.fade);
+        }
+        
+        // Faz 1C: Set RTE uniforms for jitter-free rendering
+        if (originHiLoc >= 0) {
+            glUniform3f(originHiLoc, cmd.originHi.x, cmd.originHi.y, cmd.originHi.z);
+        }
+        if (originLoLoc >= 0) {
+            glUniform3f(originLoLoc, cmd.originLo.x, cmd.originLo.y, cmd.originLo.z);
+        }
+        if (useRteLoc >= 0) {
+            glUniform1i(useRteLoc, useRte ? 1 : 0);  // Respect config flag
+        }
+        // Texture scale/offset = identity (rockmesh UVs are already correct)
+        if (texScaleOffsetLoc >= 0) {
+            glUniform4f(texScaleOffsetLoc, 1.0f, 1.0f, 0.0f, 0.0f);
         }
         
         glBindVertexArray(cmd.vao);
@@ -634,17 +729,98 @@ RockMeshManager::Stats RockMeshManager::GetStats() const {
     return s;
 }
 
+void RockMeshManager::OctreeWorkerLoop() {
+    // Phase 1: Initialize octree with retry + exponential backoff
+    // PlanetoidMetadata or BulkMetadata may fail due to CAPTCHA block (403)
+    const int maxRetries = 5;
+    int retryDelaySec = 2;  // Start at 2s, double each retry
+
+    if (octreeIndex_ && !octreeIndex_->IsInitialized()) {
+        bool initOk = false;
+        for (int attempt = 0; attempt < maxRetries && !shutdown_.load(); attempt++) {
+            if (attempt > 0) {
+                std::cout << "[RockMesh] Octree init retry " << attempt << "/" << maxRetries
+                          << " in " << retryDelaySec << "s...\n";
+                // Sleep in small increments so we can check shutdown
+                for (int i = 0; i < retryDelaySec * 10 && !shutdown_.load(); i++) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (shutdown_.load()) break;
+            }
+
+            if (octreeIndex_->Init()) {
+                {
+                    std::lock_guard<std::mutex> lock(epochMutex_);
+                    resolvedEpoch_ = octreeIndex_->GetEpochString();
+                }
+                std::cout << "[RockMesh] Octree initialized: epoch=" << resolvedEpoch_
+                          << " earthRadius=" << octreeIndex_->GetEarthRadiusM() << "m"
+                          << " nodes=" << octreeIndex_->GetKnownNodeCount()
+                          << " meshNodes=" << octreeIndex_->GetMeshNodeCount() << "\n";
+                initOk = true;
+                break;
+            }
+
+            retryDelaySec = std::min(retryDelaySec * 2, 30);  // Cap at 30s
+        }
+
+        if (!initOk) {
+            std::cerr << "[RockMesh] Octree init failed after " << maxRetries
+                      << " attempts, falling back to legacy mode\n";
+            octreeIndex_.reset();
+        }
+    }
+
+    // Phase 2: Process pending BulkMetadata fetches
+    while (!shutdown_.load()) {
+        if (octreeIndex_) {
+            int fetched = octreeIndex_->ProcessPendingFetches();
+            if (fetched > 0) {
+                std::cout << "[Octree] Fetched " << fetched << " BulkMetadata, "
+                          << octreeIndex_->GetKnownNodeCount() << " nodes known\n";
+            }
+        }
+        // Sleep between iterations when no pending work
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
 void RockMeshManager::WorkerLoop() {
     // Create client for this thread
     GoogleEarthNodeDataClient client(config_);
-    
+
+    // Set resolved epoch on client (from octree or config)
+    {
+        std::lock_guard<std::mutex> lock(epochMutex_);
+        if (!resolvedEpoch_.empty()) {
+            client.SetEpoch(resolvedEpoch_);
+        }
+    }
+
     if (!client.IsEnabled()) {
         std::cerr << "[RockMesh] Worker: client not enabled\n";
         return;
     }
-    
+
+    std::string lastEpoch;
+    {
+        std::lock_guard<std::mutex> lock(epochMutex_);
+        lastEpoch = resolvedEpoch_;
+    }
+
     std::string nodeKey;
     while (requestQueue_.Pop(nodeKey)) {
+        // Check if octree resolved a new epoch (async init race fix)
+        std::string currentEpoch;
+        {
+            std::lock_guard<std::mutex> lock(epochMutex_);
+            currentEpoch = resolvedEpoch_;
+        }
+        if (currentEpoch != lastEpoch && !currentEpoch.empty()) {
+            lastEpoch = currentEpoch;
+            client.SetEpoch(lastEpoch);
+            std::cout << "[RockMesh] Worker updated epoch to " << lastEpoch << "\n";
+        }
         // Phase 6.4: Handle shutdown immediately with proper cleanup
         if (shutdown_) {
             std::lock_guard<std::mutex> lock(stateMutex_);
@@ -712,8 +888,9 @@ void RockMeshManager::WorkerLoop() {
             }
         }
         
-        // Fetch from network if cache miss
+        // Fetch from network if cache miss (with rate limiting)
         if (!cacheHit) {
+            if (rateLimiter_) rateLimiter_->WaitForSlot();
             fetchResult = client.FetchNodeData(nodeKey);
         }
         if (!fetchResult.success) {
@@ -875,7 +1052,10 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
     cpu.indices = parsed.indices;
     cpu.triangleCount = T;
     
-    // Build positions
+    // Build positions (world space, then convert to relative for RTE)
+    std::vector<glm::dvec3> worldPositions(V);
+    glm::dvec3 bboxMin(1e18), bboxMax(-1e18);
+    
     for (int i = 0; i < V; ++i) {
         // Local position (int16 / 32768)
         double lx = parsed.positions[i * 3 + 0] / 32768.0;
@@ -885,10 +1065,24 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         // Transform to world (km)
         glm::dvec4 local(lx, ly, lz, 1.0);
         glm::dvec3 world = glm::dvec3(M * local) * kmPerRockUnit;
+        worldPositions[i] = world;
         
-        cpu.vertices[i * 9 + 0] = static_cast<float>(world.x);
-        cpu.vertices[i * 9 + 1] = static_cast<float>(world.y);
-        cpu.vertices[i * 9 + 2] = static_cast<float>(world.z);
+        // Track bounding box for origin selection
+        bboxMin = glm::min(bboxMin, world);
+        bboxMax = glm::max(bboxMax, world);
+    }
+    
+    // Compute RTE origin (center of bounding box)
+    glm::dvec3 originEcef = (bboxMin + bboxMax) * 0.5;
+    cpu.originEcefHi = glm::vec3(originEcef);
+    cpu.originEcefLo = glm::vec3(originEcef - glm::dvec3(cpu.originEcefHi));
+    
+    // Store relative positions (RTE/RTC for jitter-free rendering)
+    for (int i = 0; i < V; ++i) {
+        glm::vec3 relativePos = glm::vec3(worldPositions[i] - originEcef);
+        cpu.vertices[i * 9 + 0] = relativePos.x;
+        cpu.vertices[i * 9 + 1] = relativePos.y;
+        cpu.vertices[i * 9 + 2] = relativePos.z;
     }
     
     // Build UVs

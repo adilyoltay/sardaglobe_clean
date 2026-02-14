@@ -8,12 +8,13 @@ namespace globe {
 
 // Shader feature flags (GE-style variants)
 enum class ShaderFlags : uint32_t {
-    None        = 0,
-    Wireframe   = 1 << 0,  // Render as wireframe
-    DebugSeams  = 1 << 1,  // Highlight tile seams
-    NoLighting  = 1 << 2,  // Disable lighting (flat shading)
-    DebugLOD    = 1 << 3,  // Color-code by LOD level
-    Terrain     = 1 << 4,  // GPU terrain displacement
+    None            = 0,
+    Wireframe       = 1 << 0,  // Render as wireframe
+    DebugSeams      = 1 << 1,  // Highlight tile seams
+    NoLighting      = 1 << 2,  // Disable lighting (flat shading)
+    DebugLOD        = 1 << 3,  // Color-code by LOD level
+    Terrain         = 1 << 4,  // GPU terrain displacement
+    UseTextureArray = 1 << 5,  // Faz 2B: Use GL_TEXTURE_2D_ARRAY instead of atlas/individual textures
 };
 
 inline ShaderFlags operator|(ShaderFlags a, ShaderFlags b) {
@@ -47,10 +48,19 @@ public:
     int GetTextureUnpopLocation() const { return texUnpopLoc_; }
     int GetUnpopBlendLocation() const { return unpopBlendLoc_; }
     int GetTexScaleOffsetUnpopLocation() const { return texScaleOffsetUnpopLoc_; }
+    
+    // Faz 2B: Texture array uniforms
+    int GetTextureArrayLocation() const { return texArrayLoc_; }
+    int GetTextureLayerLocation() const { return texLayerLoc_; }
+    int GetPhotoTileTextureUnpopArrayLocation() const { return photoTileTextureUnpopArrayLoc_; }
+    int GetUnpopTextureLayerLocation() const { return unpopTextureLayerLoc_; }
+    int GetUnpopUsesArrayLocation() const { return unpopUsesArrayLoc_; }
     int GetRasterCrossfadeLocation() const { return rasterCrossfadeLoc_; }
     int GetCornerLodsLocation() const { return cornerLodsLoc_; }
     int GetUseLogDepthLocation() const { return useLogDepthLoc_; }
     int GetLogDepthFarLocation() const { return logDepthFarLoc_; }
+    
+    int GetUseTexture2DLocation() const { return useTexture2DLoc_; }
     
     // Terrain uniforms
     int GetHeightmapLocation() const { return heightmapLoc_; }
@@ -60,6 +70,11 @@ public:
     int GetHasHeightmapLocation() const { return hasHeightmapLoc_; }
     int GetHeightmapUvTransformLocation() const { return heightmapUvTransformLoc_; }
     int GetTerrainMorphLocation() const { return terrainMorphLoc_; }
+    
+    // RTE uniforms
+    int GetTileOriginHiLocation() const { return tileOriginHiLoc_; }
+    int GetTileOriginLoLocation() const { return tileOriginLoLoc_; }
+    int GetUseRteLocation() const { return useRteLoc_; }
     
     // Use tile shader (default or with flags)
     void UseTileShader();
@@ -103,6 +118,19 @@ private:
     int heightmapUvTransformLoc_ = -1;
     int terrainMorphLoc_ = -1;
     
+    // RTE uniforms
+    int tileOriginHiLoc_ = -1;
+    int tileOriginLoLoc_ = -1;
+    int useRteLoc_ = -1;
+    
+    // Faz 2B: Texture array uniforms
+    int texArrayLoc_ = -1;
+    int texLayerLoc_ = -1;
+    int useTexture2DLoc_ = -1;  // 0=array, 1=2D placeholder
+    int photoTileTextureUnpopArrayLoc_ = -1;
+    int unpopTextureLayerLoc_ = -1;
+    int unpopUsesArrayLoc_ = -1;
+    
     ShaderFlags activeFlags_ = ShaderFlags::None;
 };
 
@@ -111,7 +139,7 @@ namespace shaders {
 
 const char* const TILE_VERTEX = R"(
 #version 330 core
-layout(location = 0) in vec3 aPos;
+layout(location = 0) in vec3 aPos;          // RTE: position relative to tile origin
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in float aHeightKm;
@@ -128,14 +156,28 @@ uniform float uTerrainMorph;  // 0=flat, 1=full displacement
 uniform int uUseLogDepth;
 uniform float uLogDepthFar;
 
+// RTE (Relative-to-Center) uniforms for jitter-free rendering
+uniform vec3 uTileOriginECEFHi;  // High 16 bits of tile origin
+uniform vec3 uTileOriginECEFLo;  // Low 16 bits of tile origin
+uniform int uUseRTE;             // 0=absolute positions, 1=RTE relative
+
 out vec2 vTexCoord;
 out vec3 vNormal;
 out vec3 vWorldPos;
 
 void main() {
-    vec3 pos = aPos;
+    // RTE: Reconstruct absolute world position from relative input
+    vec3 worldPos;
+    if (uUseRTE == 1) {
+        vec3 tileOrigin = uTileOriginECEFHi + uTileOriginECEFLo;
+        worldPos = tileOrigin + aPos;
+    } else {
+        worldPos = aPos;  // Legacy: absolute positions in vertex buffer
+    }
+    
+    vec3 pos = worldPos;
     vec3 normal = aNormal;
-    vec3 radialDir = normalize(aPos);
+    vec3 radialDir = normalize(worldPos);
     
     if (uHasHeightmap == 1) {
         // Bilinear LOD interpolation from tile corners.
@@ -195,7 +237,7 @@ void main() {
     }
     vTexCoord = aTexCoord;
     vNormal = normal;
-    vWorldPos = pos;
+    vWorldPos = worldPos;
 }
 )";
 
@@ -212,6 +254,67 @@ out vec4 fragColor;
 
 void main() {
     vec4 texColor = texture(uTexture, vTexCoord);
+    
+    // Simple lighting
+    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+    vec3 normal = normalize(vNormal);
+    float diff = max(dot(normal, lightDir), 0.3);
+    
+    vec3 color = texColor.rgb * diff;
+    fragColor = vec4(color, texColor.a * uFade);
+}
+)";
+
+// Faz 2B: Texture2DArray variant (prevents bleeding)
+const char* const TILE_FRAGMENT_ARRAY = R"(
+#version 330 core
+in vec2 vTexCoord;
+in vec3 vNormal;
+in vec3 vWorldPos;
+
+uniform sampler2DArray uTextureArray;
+uniform int uTextureLayer;           // Layer index in the array
+uniform sampler2D uPhotoTileTextureUnpop;
+uniform sampler2DArray uPhotoTileTextureUnpopArray;
+uniform int uUnpopTextureLayer;      // Ancestor array layer index
+uniform int uUnpopUsesArray;         // 1=sample unpop from array, 0=2D
+uniform float uUnpopBlend;
+uniform int uRasterCrossfade;
+uniform vec4 uTexScaleOffsetUnpop;   // xy=scale, zw=offset for unpop
+uniform sampler2D uTexture;
+uniform int uUseTexture2D;           // 0=array mode, 1=2D fallback
+uniform float uFade;
+uniform vec4 uCornerLods;
+uniform int uHasHeightmap;
+uniform sampler2D uHeightmap;
+uniform float uHeightScale;
+uniform float uHeightMin;
+uniform float uHeightMax;
+uniform float uTerrainMorph;
+uniform int uUseLogDepth;
+uniform float uLogDepthFar;
+
+out vec4 fragColor;
+
+void main() {
+    vec4 texColor;
+    if (uUseTexture2D == 1) {
+        texColor = texture(uTexture, vTexCoord);
+    } else {
+        texColor = texture(uTextureArray, vec3(vTexCoord, float(uTextureLayer)));
+    }
+    
+    if (uRasterCrossfade == 1) {
+        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;
+        vec4 unpopColor;
+        if (uUnpopUsesArray == 1) {
+            unpopColor = texture(uPhotoTileTextureUnpopArray, vec3(uvUnpop, float(uUnpopTextureLayer)));
+        } else {
+            unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);
+        }
+        float blend = clamp(uUnpopBlend, 0.0, 1.0);
+        texColor = mix(unpopColor, texColor, blend);
+    }
     
     // Simple lighting
     vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));

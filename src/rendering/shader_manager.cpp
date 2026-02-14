@@ -95,17 +95,41 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     std::ostringstream ss;
     
     ss << "#version 330 core\n";
+    
+    // Faz 2B: Texture array support
+    bool useArray = HasFlag(flags, ShaderFlags::UseTextureArray);
+    if (useArray) {
+        // GL 330 core contains sampler2DArray natively; extension pragma is unnecessary.
+    }
+    
     ss << "in vec2 vTexCoord;\n";
     ss << "in vec3 vNormal;\n";
     ss << "in vec3 vWorldPos;\n";
     ss << "\n";
-    ss << "uniform sampler2D uTexture;\n";
-    ss << "uniform sampler2D uPhotoTileTextureUnpop;\n";
+    
+    if (useArray) {
+        ss << "uniform sampler2DArray uTextureArray;\n";
+        ss << "uniform int uTextureLayer;\n";
+        // Crossfade support for array mode with optional ancestor array texture
+        ss << "uniform sampler2D uPhotoTileTextureUnpop;\n";
+        ss << "uniform sampler2DArray uPhotoTileTextureUnpopArray;\n";
+        ss << "uniform int uUnpopTextureLayer;\n";
+        ss << "uniform int uUnpopUsesArray;\n";
+        ss << "uniform float uUnpopBlend;\n";
+        ss << "uniform int uRasterCrossfade;\n";       // 0=single texture, 1=crossfade
+        ss << "uniform vec4 uTexScaleOffsetUnpop;\n"; // xy=scale, zw=offset for unpop
+        // Placeholder fallback (2D texture for loading/placeholder tiles)
+        ss << "uniform sampler2D uTexture;\n";
+        ss << "uniform int uUseTexture2D;\n";          // 0=array, 1=2D placeholder
+    } else {
+        ss << "uniform sampler2D uTexture;\n";
+        ss << "uniform sampler2D uPhotoTileTextureUnpop;\n";
+        ss << "uniform float uUnpopBlend;\n";
+        ss << "uniform vec4 uTexScaleOffsetMain;\n";   // xy=scale, zw=offset
+        ss << "uniform vec4 uTexScaleOffsetUnpop;\n";  // xy=scale, zw=offset
+        ss << "uniform int uRasterCrossfade;\n";       // 0=single texture, 1=crossfade
+    }
     ss << "uniform float uFade;\n";
-    ss << "uniform float uUnpopBlend;\n";
-    ss << "uniform vec4 uTexScaleOffsetMain;\n";   // xy=scale, zw=offset
-    ss << "uniform vec4 uTexScaleOffsetUnpop;\n";  // xy=scale, zw=offset
-    ss << "uniform int uRasterCrossfade;\n";       // 0=single texture, 1=crossfade
     
     if (HasFlag(flags, ShaderFlags::DebugLOD)) {
         ss << "uniform int uLodLevel;\n";
@@ -115,14 +139,37 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     ss << "out vec4 fragColor;\n";
     ss << "\n";
     ss << "void main() {\n";
-    ss << "    vec2 uvMain = vTexCoord * uTexScaleOffsetMain.xy + uTexScaleOffsetMain.zw;\n";
-    ss << "    vec4 texColor = texture(uTexture, uvMain);\n";
-    ss << "    if (uRasterCrossfade == 1) {\n";
-    ss << "        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;\n";
-    ss << "        vec4 unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);\n";
-    ss << "        float blend = clamp(uUnpopBlend, 0.0, 1.0);\n";
-    ss << "        texColor = mix(unpopColor, texColor, blend);\n";
-    ss << "    }\n";
+    
+    if (useArray) {
+        // Texture array path - supports both array and 2D placeholder
+        ss << "    vec4 texColor;\n";
+        ss << "    if (uUseTexture2D == 1) {\n";
+        ss << "        texColor = texture(uTexture, vTexCoord);\n";
+        ss << "    } else {\n";
+        ss << "        texColor = texture(uTextureArray, vec3(vTexCoord, float(uTextureLayer)));\n";
+        ss << "    }\n";
+        ss << "    if (uRasterCrossfade == 1) {\n";
+        ss << "        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;\n";
+        ss << "        vec4 unpopColor;\n";
+        ss << "        if (uUnpopUsesArray == 1) {\n";
+        ss << "            unpopColor = texture(uPhotoTileTextureUnpopArray, vec3(uvUnpop, float(uUnpopTextureLayer)));\n";
+        ss << "        } else {\n";
+        ss << "            unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);\n";
+        ss << "        }\n";
+        ss << "        float blend = clamp(uUnpopBlend, 0.0, 1.0);\n";
+        ss << "        texColor = mix(unpopColor, texColor, blend);\n";
+        ss << "    }\n";
+    } else {
+        // Standard atlas/individual texture path
+        ss << "    vec2 uvMain = vTexCoord * uTexScaleOffsetMain.xy + uTexScaleOffsetMain.zw;\n";
+        ss << "    vec4 texColor = texture(uTexture, uvMain);\n";
+        ss << "    if (uRasterCrossfade == 1) {\n";
+        ss << "        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;\n";
+        ss << "        vec4 unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);\n";
+        ss << "        float blend = clamp(uUnpopBlend, 0.0, 1.0);\n";
+        ss << "        texColor = mix(unpopColor, texColor, blend);\n";
+        ss << "    }\n";
+    }
     
     if (HasFlag(flags, ShaderFlags::DebugSeams)) {
         // Highlight tile edges
@@ -177,6 +224,19 @@ void ShaderManager::CacheUniformLocations(uint32_t program) {
     hasHeightmapLoc_ = glGetUniformLocation(program, "uHasHeightmap");
     heightmapUvTransformLoc_ = glGetUniformLocation(program, "uHeightmapUvTransform");
     terrainMorphLoc_ = glGetUniformLocation(program, "uTerrainMorph");
+    
+    // RTE uniforms
+    tileOriginHiLoc_ = glGetUniformLocation(program, "uTileOriginECEFHi");
+    tileOriginLoLoc_ = glGetUniformLocation(program, "uTileOriginECEFLo");
+    useRteLoc_ = glGetUniformLocation(program, "uUseRTE");
+    
+    // Faz 2B: Texture array uniforms
+    texArrayLoc_ = glGetUniformLocation(program, "uTextureArray");
+    texLayerLoc_ = glGetUniformLocation(program, "uTextureLayer");
+    useTexture2DLoc_ = glGetUniformLocation(program, "uUseTexture2D");
+    photoTileTextureUnpopArrayLoc_ = glGetUniformLocation(program, "uPhotoTileTextureUnpopArray");
+    unpopTextureLayerLoc_ = glGetUniformLocation(program, "uUnpopTextureLayer");
+    unpopUsesArrayLoc_ = glGetUniformLocation(program, "uUnpopUsesArray");
 }
 
 void ShaderManager::UseTileShader() {

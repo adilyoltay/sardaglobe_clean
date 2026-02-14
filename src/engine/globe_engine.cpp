@@ -236,7 +236,15 @@ bool GlobeEngine::Init() {
     
     // GL state
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);  // Use LEQUAL for better z-fighting handling
+    if (config_.reversedZEnabled) {
+        // Reversed-Z: 0 = far, 1 = near, greater Z = closer
+        glDepthFunc(GL_GEQUAL);
+        glClearDepth(0.0f);
+    } else {
+        // Standard: 0 = near, 1 = far, smaller Z = closer
+        glDepthFunc(GL_LEQUAL);
+        glClearDepth(1.0f);
+    }
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     
@@ -528,6 +536,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
     lodSettings.disableHorizonCull = config_.disableHorizonCull;
     lodSettings.lodChildQuorum = config_.lodChildQuorum;
     lodSettings.maxRefinementsPerFrame = config_.maxRefinementsPerFrame;
+    
+    // Faz 3A: Horizon Culling settings
+    lodSettings.useHorizonCulling = config_.useHorizonCulling;
+    lodSettings.horizonSafetyMarginRad = static_cast<float>(config_.horizonCullingSafetyMargin);
     
     // GE parity: quality mode multiplier (1.0/2.0/4.0)
     lodSettings.qualityMultiplier = QualityModeToMultiplier(config_.qualityMode);
@@ -2165,7 +2177,9 @@ void GlobeEngine::Render() {
         sceneSnapshot_.useLogDepth, sceneSnapshot_.logDepthFarKm,
         sceneSnapshot_.wireframe, sceneSnapshot_.loadingTexture,
         hmForRender,
-        demManager_.get()
+        demManager_.get(),
+        config_.useRteRender,
+        config_.useTexture2DArray  // Faz 2B: Texture array support
     );
     const auto& renderStats = tileRenderer_->GetStats();
 
@@ -2483,11 +2497,12 @@ void GlobeEngine::Render() {
         glDisable(GL_CULL_FACE);
         
         // Bind tile shader with neutral uniforms
+        // Faz 1C: RockMeshManager now handles per-mesh RTE uniforms internally
         GLuint tileProgram = shaderManager_->GetTileProgram();
         if (tileProgram != 0) {
             glUseProgram(tileProgram);
             
-            // Set uniforms for rockmesh rendering
+            // Set global uniforms for rockmesh rendering
             // uHasHeightmap = 0 (no heightmap displacement)
             GLint hasHeightmapLoc = glGetUniformLocation(tileProgram, "uHasHeightmap");
             if (hasHeightmapLoc >= 0) glUniform1i(hasHeightmapLoc, 0);
@@ -2496,24 +2511,15 @@ void GlobeEngine::Render() {
             GLint morphLoc = glGetUniformLocation(tileProgram, "uTerrainMorph");
             if (morphLoc >= 0) glUniform1f(morphLoc, 1.0f);
             
-            // uFade = 1.0 (fully visible)
-            GLint fadeLoc = glGetUniformLocation(tileProgram, "uFade");
-            if (fadeLoc >= 0) glUniform1f(fadeLoc, 1.0f);
-            
-            // Texture scale/offset = identity
-            GLint texScaleLoc = glGetUniformLocation(tileProgram, "uTexScale");
-            GLint texOffsetLoc = glGetUniformLocation(tileProgram, "uTexOffset");
-            if (texScaleLoc >= 0) glUniform2f(texScaleLoc, 1.0f, 1.0f);
-            if (texOffsetLoc >= 0) glUniform2f(texOffsetLoc, 0.0f, 0.0f);
-            
-            // MVP matrix
+            // MVP matrix (per-mesh uniforms like uFade, uTexScaleOffsetMain, RTE are set by RockMeshManager)
             GLint mvpLoc = glGetUniformLocation(tileProgram, "uMVP");
             if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
         }
         
         // Draw all rockmeshes
         // Phase 6: Pass shader program for per-mesh fade
-        rockMeshManager_->Render(tileProgram);
+        // Faz 1C: Pass RTE flag for consistent behavior with tile path
+        rockMeshManager_->Render(tileProgram, config_.useRteRender);
         
         // Restore state
         if (cullWasEnabled) {

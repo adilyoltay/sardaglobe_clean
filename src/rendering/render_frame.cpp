@@ -57,7 +57,9 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     bool wireframe,
     uint32_t loadingTexture,
     HeightmapManager* heightmapManager,
-    DemManager* demManager
+    DemManager* demManager,
+    bool useRte,
+    bool useTextureArray
 ) {
     TileDrawStats stats;
     const float fadeDurationSec = ComputeUnpopDurationSec(cameraSpeedKmPerSec);
@@ -69,6 +71,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         float alpha = 1.0f;                // Used for legacy fade-only path
         Tile* unpopAncestor = nullptr;     // Used in shader-level crossfade
         glm::vec4 unpopUvTransform{1.0f};  // scale.xy + offset.zw
+        int unpopTextureLayer = -1;
+        bool unpopUsesArray = false;
         bool useShaderCrossfade = false;
     };
     
@@ -227,6 +231,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                     leaf.unpopAncestor = ancestor;
                     glm::vec4 relativeUnpopUv = ComputeUnpopUvTransform(tile.key, ancestor->key);
                     leaf.unpopUvTransform = ComposeUvTransform(ancestor->texScaleOffset, relativeUnpopUv);
+                    leaf.unpopTextureLayer = ancestor->textureArrayLayer;
+                    leaf.unpopUsesArray = useTextureArray && ancestor->textureArrayLayer >= 0;
                 } else {
                     // No parent available -> avoid temporary transparency holes.
                     leaf.alpha = 1.0f;
@@ -327,7 +333,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
               });
     
     // Begin batch rendering
-    tileRenderer_.BeginBatch(mvp, wireframe, useLogDepth, logDepthFarKm);
+    tileRenderer_.BeginBatch(mvp, wireframe, useLogDepth, logDepthFarKm, useRte, useTextureArray);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -423,6 +429,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             tileRenderer_.RenderTileWithCrossfade(
                 *leaf.tile,
                 leaf.unpopAncestor->textureId,
+                leaf.unpopTextureLayer,
+                leaf.unpopUsesArray,
                 leaf.unpopUvTransform,
                 leaf.alpha,
                 hasHeightmap ? hmTex.textureId : 0,

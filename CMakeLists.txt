@@ -101,6 +101,10 @@ add_executable(native_globe
   src/io/providers/google_earth_dem_provider.cpp
   src/io/providers/google_earth_nodedata_client.cpp
   src/io/providers/rocktree_node_data_parser.cpp
+  src/io/providers/planetoid_metadata_parser.cpp
+  src/io/providers/bulk_metadata_parser.cpp
+  src/io/providers/ge_rate_limiter.cpp
+  src/io/providers/rocktree_octree_index.cpp
   src/io/decoded_tile_blob.cpp
   src/io/tile_cache.cpp
   src/io/memory_tile_cache.cpp
@@ -128,6 +132,8 @@ add_executable(native_globe
   src/rendering/heightmap_manager.cpp
   src/rendering/rockmesh_manager.cpp
   src/rendering/rockmesh_runtime.cpp
+  src/rendering/pbo_upload_manager.cpp
+  src/rendering/texture_array_manager.cpp
   src/io/node_data_cache.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
@@ -782,8 +788,13 @@ add_executable(rockmesh_manager_test
   src/rendering/rockmesh_runtime.cpp
   src/io/providers/google_earth_nodedata_client.cpp
   src/io/providers/rocktree_node_data_parser.cpp
+  src/io/providers/planetoid_metadata_parser.cpp
+  src/io/providers/bulk_metadata_parser.cpp
+  src/io/providers/ge_rate_limiter.cpp
+  src/io/providers/rocktree_octree_index.cpp
   src/io/ge_mesh_url_template.cpp
   src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
   src/io/providers/dem_fetch_result.cpp
   src/io/node_data_cache.cpp
   src/io/stb_image_impl.c
@@ -801,6 +812,150 @@ target_link_libraries(rockmesh_manager_test PRIVATE
   CURL::libcurl
 )
 add_test(NAME RockMeshManagerTest COMMAND rockmesh_manager_test)
+
+# ============================================================================
+# GE Parity Stabilization Tests (Faz 1)
+# ============================================================================
+
+# Reversed-Z precision test
+add_executable(reversed_z_precision_test
+  tests/reversed_z_precision_test.cpp
+  src/camera/earth_camera.cpp
+  src/core/ellipsoid.cpp
+)
+target_include_directories(reversed_z_precision_test PRIVATE
+  src
+)
+target_link_libraries(reversed_z_precision_test PRIVATE glm::glm)
+add_test(NAME ReversedZPrecisionTest COMMAND reversed_z_precision_test)
+set_tests_properties(ReversedZPrecisionTest PROPERTIES LABELS "known-failing")
+
+# RTE/RTC Tile regression test (standalone, no GL/DEM dependencies)
+add_executable(rte_rtc_tile_regression_test
+  tests/rte_rtc_tile_regression_test.cpp
+)
+target_include_directories(rte_rtc_tile_regression_test PRIVATE
+  src
+)
+target_link_libraries(rte_rtc_tile_regression_test PRIVATE glm::glm)
+add_test(NAME RteRtcTileRegressionTest COMMAND rte_rtc_tile_regression_test)
+
+# RTE/RTC RockMesh regression test
+add_executable(rte_rtc_rockmesh_regression_test
+  tests/rte_rtc_rockmesh_regression_test.cpp
+)
+target_include_directories(rte_rtc_rockmesh_regression_test PRIVATE
+  src
+)
+target_link_libraries(rte_rtc_rockmesh_regression_test PRIVATE glm::glm)
+add_test(NAME RteRtcRockmeshRegressionTest COMMAND rte_rtc_rockmesh_regression_test)
+set_tests_properties(RteRtcRockmeshRegressionTest PROPERTIES LABELS "known-failing")
+
+# Shader uniform parity test
+add_executable(shader_uniform_parity_test
+  tests/shader_uniform_parity_test.cpp
+)
+target_include_directories(shader_uniform_parity_test PRIVATE
+  src
+)
+target_link_libraries(shader_uniform_parity_test PRIVATE glm::glm)
+add_test(NAME ShaderUniformParityTest COMMAND shader_uniform_parity_test)
+
+# PBO Upload Manager test (Faz 2A)
+add_executable(pbo_upload_manager_test
+  tests/pbo_upload_manager_test.cpp
+  src/rendering/pbo_upload_manager.cpp
+)
+target_include_directories(pbo_upload_manager_test PRIVATE
+  src
+  _deps/glad-src/include
+)
+target_link_libraries(pbo_upload_manager_test PRIVATE glad glm::glm)
+if(APPLE)
+  target_link_libraries(pbo_upload_manager_test PRIVATE "-framework OpenGL")
+elseif(WIN32)
+  target_link_libraries(pbo_upload_manager_test PRIVATE opengl32)
+else()
+  target_link_libraries(pbo_upload_manager_test PRIVATE GL)
+endif()
+add_test(NAME PboUploadManagerTest COMMAND pbo_upload_manager_test)
+
+# PBO + TextureManager integration test
+add_executable(pbo_texture_manager_integration_test
+  tests/pbo_texture_manager_integration_test.cpp
+  src/rendering/pbo_upload_manager.cpp
+)
+target_include_directories(pbo_texture_manager_integration_test PRIVATE
+  src
+  _deps/glad-src/include
+)
+target_link_libraries(pbo_texture_manager_integration_test PRIVATE glad glm::glm)
+if(APPLE)
+  target_link_libraries(pbo_texture_manager_integration_test PRIVATE "-framework OpenGL")
+elseif(WIN32)
+  target_link_libraries(pbo_texture_manager_integration_test PRIVATE opengl32)
+else()
+  target_link_libraries(pbo_texture_manager_integration_test PRIVATE GL)
+endif()
+add_test(NAME PboTextureManagerIntegrationTest COMMAND pbo_texture_manager_integration_test)
+
+# TextureArrayManager test (Faz 2B)
+add_executable(texture_array_manager_test
+  tests/texture_array_manager_test.cpp
+  src/rendering/texture_array_manager.cpp
+)
+target_include_directories(texture_array_manager_test PRIVATE
+  src
+  _deps/glad-src/include
+)
+target_link_libraries(texture_array_manager_test PRIVATE glad glm::glm)
+if(APPLE)
+  target_link_libraries(texture_array_manager_test PRIVATE "-framework OpenGL")
+elseif(WIN32)
+  target_link_libraries(texture_array_manager_test PRIVATE opengl32)
+else()
+  target_link_libraries(texture_array_manager_test PRIVATE GL)
+endif()
+add_test(NAME TextureArrayManagerTest COMMAND texture_array_manager_test)
+
+# RockTree Octree mapping determinism test (Faz 2B closure)
+add_executable(rocktree_octree_mapping_test
+  tests/rocktree_octree_mapping_test.cpp
+  src/io/providers/rocktree_octree_index.cpp
+  src/io/providers/planetoid_metadata_parser.cpp
+  src/io/providers/bulk_metadata_parser.cpp
+  src/io/providers/ge_rate_limiter.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/dem_fetch_result.cpp
+)
+target_include_directories(rocktree_octree_mapping_test PRIVATE
+  src
+)
+target_compile_definitions(rocktree_octree_mapping_test PRIVATE NATIVE_GLOBE_TESTING)
+target_link_libraries(rocktree_octree_mapping_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME RockTreeOctreeMappingTest COMMAND rocktree_octree_mapping_test)
+
+# Tile crossfade + array-unpop compatibility test
+add_executable(tile_crossfade_array_unpop_test
+  tests/tile_crossfade_array_unpop_test.cpp
+)
+target_include_directories(tile_crossfade_array_unpop_test PRIVATE
+  src
+)
+target_link_libraries(tile_crossfade_array_unpop_test PRIVATE glm::glm)
+add_test(NAME TileCrossfadeArrayUnpopTest COMMAND tile_crossfade_array_unpop_test)
+
+# Horizon Culler test (Faz 3)
+add_executable(horizon_culler_test
+  tests/horizon_culler_test.cpp
+)
+target_include_directories(horizon_culler_test PRIVATE
+  src
+  _deps/glm-src
+)
+target_link_libraries(horizon_culler_test PRIVATE glm::glm)
+add_test(NAME HorizonCullerTest COMMAND horizon_culler_test)
 
 # BoundedQueue test (core data structure for RockMesh scheduling)
 add_executable(bounded_queue_test

@@ -8,6 +8,8 @@
 #include "rockmesh_runtime.h"
 #include "../io/providers/google_earth_nodedata_client.h"
 #include "../io/providers/rocktree_node_data_parser.h"
+#include "../io/providers/rocktree_octree_index.h"
+#include "../io/providers/ge_rate_limiter.h"
 #include "../core/config.h"
 #include "../core/bounded_queue.h"
 #include "../core/tile_key.h"
@@ -20,6 +22,7 @@
 #include <atomic>
 #include <queue>
 #include <list>
+#include <memory>
 
 // Sprint 2.2: Forward declare for disk cache
 namespace globe {
@@ -99,7 +102,8 @@ public:
     
     // Render all uploaded meshes
     // Phase 6: Added shaderProgram parameter for fade uniform
-    void Render(GLuint shaderProgram = 0);
+    // Faz 1C: Added useRte parameter for RTE/RTC jitter-free rendering
+    void Render(GLuint shaderProgram = 0, bool useRte = true);
     
     // Sprint 3: Update fade values (call each frame before Render)
     void UpdateFades(float deltaTime);
@@ -191,22 +195,35 @@ private:
     
     // Worker main loop
     void WorkerLoop();
-    
+
+    // Octree BulkMetadata worker loop
+    void OctreeWorkerLoop();
+
     // Build CPU mesh from parsed data
     RockMeshCpu BuildMesh(const std::string& nodeKey, const ParsedNodeData& parsed);
-    
+
     // Create fallback texture
     bool CreateFallbackTexture();
-    
+
     // Sprint 2: Helper methods
     std::string TileKeyToNodeKey(const TileKey& key) const;
     void MarkStaleEntries(const std::unordered_set<std::string>& visibleKeys);
     void UpdateLRU(const std::string& nodeKey);
     void EvictIfNeeded();
-    
+
     // Sprint 2: In-flight tracking
     std::unordered_set<std::string> inFlightSet_;
     mutable std::mutex inFlightMutex_;
+
+    // Octree discovery system
+    std::shared_ptr<RockTreeOctreeIndex> octreeIndex_;
+    std::unique_ptr<GeRateLimiter> rateLimiter_;
+    std::thread octreeWorkerThread_;
+
+    // Per-worker NodeDataClient epoch (set after octree init)
+    // Thread-safe epoch storage (GE Octree integration)
+    mutable std::mutex epochMutex_;
+    std::string resolvedEpoch_;
 };
 
 } // namespace globe

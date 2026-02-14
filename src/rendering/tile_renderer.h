@@ -31,7 +31,8 @@ public:
     
     // Begin a render batch
     void BeginBatch(const glm::mat4& mvp, bool wireframe = false,
-                    bool useLogDepth = false, float logDepthFarKm = 1.0f);
+                    bool useLogDepth = false, float logDepthFarKm = 1.0f,
+                    bool useRte = true, bool useTextureArray = false);
     
     // Render a single tile (uses tile's own texture)
     void RenderTile(const Tile& tile, float terrainMorph = 1.0f);
@@ -48,6 +49,8 @@ public:
     // Render child tile with shader-level parent/child crossfade (unpop)
     void RenderTileWithCrossfade(const Tile& tile,
                                  uint32_t unpopTextureId,
+                                 int unpopTextureLayer,
+                                 bool unpopUsesArray,
                                  const glm::vec4& texScaleOffsetUnpop,
                                  float unpopBlend,
                                  uint32_t heightmapId = 0,
@@ -91,6 +94,8 @@ private:
     glm::mat4 currentMvp_;
     bool useLogDepthBatch_ = false;
     float logDepthFarBatch_ = 1.0f;
+    bool useRteBatch_ = true;
+    bool useTextureArrayBatch_ = false;  // Faz 2B: Use GL_TEXTURE_2D_ARRAY
     
     // Stats
     RenderStats stats_;
