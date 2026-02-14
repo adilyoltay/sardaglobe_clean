@@ -136,10 +136,18 @@ private:
     // Populate nodes_ from parsed BulkMetadata
     void PopulateNodes(const BulkMetadataResult& bulk);
 
-    // Build octree path from BulkMetadata index
-    // Root BulkMetadata covers paths at level 2-5 (approx)
-    // Each entry maps to a specific octree path within the subtree
+    // Build octree path from BulkMetadata index.
+    // Root BulkMetadata path entries are materialized into deterministic BFS-decoded
+    // descendant paths before runtime lookup.
     static std::string BuildOctreePath(const std::string& basePath, int nodeIndex, int level);
+
+    // Shared helper: collect nodes with mesh data filtered by inclusive depth range and
+    // optional fixed prefix. Result is deterministically sorted by depth then lexicographic
+    // order.
+    std::vector<std::string> CollectRenderableNodesByDepthRange(
+        int minDepth,
+        int maxDepth,
+        const std::string& facePrefix = std::string{}) const;
 };
 
 } // namespace globe

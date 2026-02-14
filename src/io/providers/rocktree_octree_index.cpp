@@ -265,29 +265,7 @@ std::vector<std::string> RockTreeOctreeIndex::GetChildrenWithData(
 
 std::vector<std::string> RockTreeOctreeIndex::GetRenderableNodes(
     int minDepth, int maxDepth) const {
-
-    std::lock_guard<std::mutex> lock(nodesMutex_);
-    if (maxDepth < minDepth) {
-        return {};
-    }
-
-    std::vector<std::vector<std::string>> byDepth;
-    byDepth.assign(static_cast<std::size_t>(maxDepth - minDepth + 1), {});
-    std::vector<std::string> result;
-    for (const auto& [path, info] : nodes_) {
-        int depth = static_cast<int>(path.length());
-        if (depth >= minDepth && depth <= maxDepth && info.hasNodeData) {
-            byDepth[static_cast<std::size_t>(depth - minDepth)].push_back(path);
-        }
-    }
-    for (auto& bucket : byDepth) {
-        std::sort(bucket.begin(), bucket.end());
-        for (const auto& path : bucket) {
-            result.push_back(path);
-        }
-    }
-
-    return result;
+    return CollectRenderableNodesByDepthRange(minDepth, maxDepth);
 }
 
 bool RockTreeOctreeIndex::RequestBulkMetadata(const std::string& prefix) {
@@ -336,7 +314,7 @@ bool RockTreeOctreeIndex::IsBulkMetadataFetched(const std::string& path) const {
     for (const auto& prefix : fetchedBulkPrefixes_) {
         if (path.find(prefix) == 0 || prefix.empty()) {
             // Check if this path is within the BFS depth covered by the prefix
-            // Root BulkMetadata covers ~4 levels deep
+            // Root BulkMetadata is discovered up to a bounded depth window in current implementation.
             int depthFromPrefix = static_cast<int>(path.length() - prefix.length());
             if (depthFromPrefix <= 4) return true;
         }
@@ -361,7 +339,7 @@ size_t RockTreeOctreeIndex::GetMeshNodeCount() const {
 std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
     const std::string& tileQuadKey) const {
 
-    std::lock_guard<std::mutex> lock(nodesMutex_);
+    
     auto isValidTmsQuadKey = [](const std::string& key) {
         if (key.size() < 2) return false;
         for (char digit : key) {
@@ -371,18 +349,7 @@ std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
         }
         return true;
     };
-
     std::vector<std::string> result;
-    std::vector<std::vector<std::string>> byDepth;
-
-    // TMS quadkeys use digits 0-3, octree uses 0-7
-    // At level 2, TMS quadkeys happen to map to valid octree paths
-    // (02, 03, 12, 13, 20, 21, 30, 31 are the 8 root faces)
-    //
-    // For deeper levels, map tile keys to candidate octree nodes by:
-    // 1) shared face prefix (first 2 chars),
-    // 2) candidate depth window [tileDepth-1, tileDepth+1],
-    // 3) deterministic sorting by depth then lexicographic order.
 
     const int tileDepth = static_cast<int>(tileQuadKey.length());
     if (!isValidTmsQuadKey(tileQuadKey)) {
@@ -391,10 +358,10 @@ std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
 
     const int minDepth = std::max(2, tileDepth - 1);
     const int maxDepth = tileDepth + 1;
-    byDepth.assign(static_cast<std::size_t>(maxDepth - minDepth + 1), {});
 
     // For short keys, direct lookup
     if (tileDepth <= 2) {
+        std::lock_guard<std::mutex> lock(nodesMutex_);
         auto it = nodes_.find(tileQuadKey);
         if (it != nodes_.end() && it->second.hasNodeData) {
             result.push_back(tileQuadKey);
@@ -402,19 +369,39 @@ std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
         return result;
     }
 
-    // For deeper tiles, find octree nodes with the same face prefix and
-    // stable, deterministic output ordering.
-    // Result is sorted deterministically by depth, then lexicographically.
-    std::string facePrefix = tileQuadKey.substr(0, 2);
+    // For deeper tiles, filter to matching face prefix and sort deterministically.
+    return CollectRenderableNodesByDepthRange(minDepth, maxDepth, tileQuadKey.substr(0, 2));
+}
+
+std::vector<std::string> RockTreeOctreeIndex::CollectRenderableNodesByDepthRange(
+    int minDepth,
+    int maxDepth,
+    const std::string& facePrefix) const {
+
+    std::lock_guard<std::mutex> lock(nodesMutex_);
+    if (maxDepth < minDepth) {
+        return {};
+    }
+
+    std::vector<std::vector<std::string>> byDepth;
+    byDepth.assign(static_cast<std::size_t>(maxDepth - minDepth + 1), {});
+    std::vector<std::string> result;
+
+    const bool filterByPrefix = !facePrefix.empty();
+    const std::size_t prefixLen = facePrefix.size();
 
     for (const auto& [path, info] : nodes_) {
         if (!info.hasNodeData) continue;
 
-        int pathDepth = static_cast<int>(path.length());
-        if (pathDepth < minDepth || pathDepth > maxDepth ||
-            path.size() < 2 ||
-            path.compare(0, 2, facePrefix) != 0) {
+        const int pathDepth = static_cast<int>(path.length());
+        if (pathDepth < minDepth || pathDepth > maxDepth) {
             continue;
+        }
+
+        if (filterByPrefix) {
+            if (path.size() < prefixLen || path.compare(0, prefixLen, facePrefix) != 0) {
+                continue;
+            }
         }
 
         byDepth[static_cast<std::size_t>(pathDepth - minDepth)].push_back(path);
@@ -422,8 +409,8 @@ std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
 
     for (auto& bucket : byDepth) {
         std::sort(bucket.begin(), bucket.end());
-        for (const auto& candidate : bucket) {
-            result.push_back(candidate);
+        for (const auto& path : bucket) {
+            result.push_back(path);
         }
     }
 

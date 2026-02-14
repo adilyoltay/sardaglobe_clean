@@ -38,6 +38,17 @@ inline void ApplyPerTileUniforms(ShaderManager& shaderManager, const Tile& tile,
     }
 }
 
+inline void ResetCrossfadeState(ShaderManager& shaderManager, bool useTextureArrayBatch) {
+    glUniform1i(shaderManager.GetRasterCrossfadeLocation(), 0);
+    glUniform1f(shaderManager.GetUnpopBlendLocation(), 1.0f);
+    glUniform4f(shaderManager.GetTexScaleOffsetUnpopLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
+    if (useTextureArrayBatch) {
+        glUniform1i(shaderManager.GetUnpopUsesArrayLocation(), 0);
+        glUniform1i(shaderManager.GetUnpopTextureLayerLocation(), 0);
+        glUniform1i(shaderManager.GetUseTexture2DLocation(), 0);
+    }
+}
+
 struct DrawCallBreakdown {
     int drawCalls = 0;
     int triangles = 0;
@@ -543,8 +554,30 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
                                            const glm::vec4& heightmapUvTransform,
                                            float terrainMorph) {
     if (!batchActive_) return;
-    if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
+    if (!useTextureArrayBatch_) {
+        unpopUsesArray = false;
+    }
+    if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) {
+        if (useTextureArrayBatch_) {
+            ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
+        }
+        return;
+    }
     if (unpopTextureId == 0) {
+        ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
+        if (heightmapId != 0) {
+            RenderTileWithHeightmap(tile, heightmapId, heightMin, heightMax, heightmapUvTransform, terrainMorph);
+        } else {
+            RenderTile(tile, terrainMorph);
+        }
+        return;
+    }
+
+    // Safety: if caller marks ancestor as array-backed but omits valid layer index,
+    // avoid binding array id to GL_TEXTURE_2D sampler (undefined behavior).
+    // Degrade gracefully to non-crossfade tile render in this edge case.
+    if (useTextureArrayBatch_ && unpopUsesArray && unpopTextureLayer < 0) {
+        ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
         if (heightmapId != 0) {
             RenderTileWithHeightmap(tile, heightmapId, heightMin, heightMax, heightmapUvTransform, terrainMorph);
         } else {
@@ -554,7 +587,6 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     }
 
     assert(unpopTextureId != 0);
-    assert(!useTextureArrayBatch_ ? !unpopUsesArray : true);
 
     // Faz 2B: Ensure array mode for this draw (in case previous was 2D placeholder)
     if (useTextureArrayBatch_) {
@@ -578,17 +610,15 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
 
     // Bind unpop (ancestor) texture on unit 2 (array or 2D)
     glActiveTexture(GL_TEXTURE2);
-    const bool useUnpopArray = useTextureArrayBatch_ && unpopUsesArray && unpopTextureLayer >= 0;
+    const bool useUnpopArray = useTextureArrayBatch_ &&
+                               unpopUsesArray &&
+                               unpopTextureLayer >= 0 &&
+                               unpopTextureId != 0;
     if (useUnpopArray) {
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 1);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), unpopTextureLayer);
         glBindTexture(GL_TEXTURE_2D_ARRAY, unpopTextureId);
     } else {
-        if (unpopUsesArray && !useTextureArrayBatch_) {
-            glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 0);
-            glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), 0);
-            assert(!useTextureArrayBatch_ ? !unpopUsesArray : true);
-        }
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 0);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), 0);
         glBindTexture(GL_TEXTURE_2D, unpopTextureId);
@@ -629,14 +659,7 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     glUniform1i(shaderManager_.GetHasHeightmapLocation(), 0);
     glUniform4f(shaderManager_.GetHeightmapUvTransformLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
     glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
-    glUniform1i(shaderManager_.GetRasterCrossfadeLocation(), 0);
-    glUniform1f(shaderManager_.GetUnpopBlendLocation(), 1.0f);
-    glUniform4f(shaderManager_.GetTexScaleOffsetUnpopLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
-    if (useTextureArrayBatch_) {
-        glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 0);
-        glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), 0);
-        glUniform1i(shaderManager_.GetUseTexture2DLocation(), 0);
-    }
+    ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
     glActiveTexture(GL_TEXTURE0);
 
     stats_.tilesRendered++;

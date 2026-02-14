@@ -9,6 +9,10 @@ namespace globe {
 
 namespace {
 
+bool HasRenderableSurface(const Tile& tile) {
+    return tile.hasMesh && tile.surfaceVertexCount > 0;
+}
+
 } // namespace
 
 RenderFrame::RenderFrame(TileRenderer& tileRenderer, ShaderManager& shaderManager)
@@ -30,7 +34,7 @@ Tile* RenderFrame::FindRenderableAncestor(const TileKey& key,
         auto it = tiles.find(parentKey);
         if (it != tiles.end()) {
             Tile& tile = it->second;
-            const bool hasSurfaceGeometry = tile.hasMesh && tile.surfaceVertexCount > 0;
+            const bool hasSurfaceGeometry = HasRenderableSurface(tile);
             const bool hasTexture = tile.textureId != 0 &&
                                     (allowPlaceholder || tile.textureId != loadingTexture) &&
                                     !tile.mostlyBlackOpaqueRaster;
@@ -114,7 +118,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             auto it = tiles.find(parentKey);
             if (it != tiles.end()) {
                 Tile& tile = it->second;
-                const bool hasSurfaceGeometry = tile.hasMesh && tile.surfaceVertexCount > 0;
+                const bool hasSurfaceGeometry = HasRenderableSurface(tile);
                 const bool hasTexture = tile.textureId != 0 &&
                                         (allowPlaceholder || tile.textureId != loadingTexture) &&
                                         !tile.mostlyBlackOpaqueRaster;
@@ -201,7 +205,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 }
             }
         }
-        bool isRenderable = tile.hasMesh && tile.surfaceVertexCount > 0 && hasRealTexture && hasRequiredTerrain;
+        bool isRenderable = HasRenderableSurface(tile) && hasRealTexture && hasRequiredTerrain;
         
         if (isRenderable) {
             // Leaf is renderable - render with fade
@@ -239,9 +243,12 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                     glm::vec4 relativeUnpopUv = ComputeUnpopUvTransform(tile.key, ancestor->key);
                     leaf.unpopUvTransform = ComposeUvTransform(ancestor->texScaleOffset, relativeUnpopUv);
                     leaf.unpopTextureLayer = ancestor->textureArrayLayer;
-                    leaf.unpopTextureTargetIsArray = useTextureArray &&
-                                                      ancestor->usesTextureArray &&
-                                                      ancestor->textureArrayLayer >= 0;
+                    leaf.unpopTextureTargetIsArray =
+                        useTextureArray &&
+                        ancestor->usesTextureArray &&
+                        ancestor->textureArrayLayer >= 0 &&
+                        ancestor->textureId != 0 &&
+                        ancestor->textureArrayTier >= 0;
                 } else {
                     // No parent available -> avoid temporary transparency holes.
                     leaf.alpha = 1.0f;
@@ -259,7 +266,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             ++stats.renderableLeaves;
         } else {
             // Leaf not renderable - categorize and find fallback
-            if (!tile.hasMesh || tile.surfaceVertexCount == 0) {
+            if (!HasRenderableSurface(tile)) {
                 ++stats.leafNoMesh;
             } else if (!hasRealTexture) {
                 ++stats.leafNoTexture;  // Has mesh but no real texture (or loading placeholder only)
@@ -270,7 +277,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             // GE-Style: Use parent tile until child is ready
             if (!addFallbackAncestor(key)) {
                 // Last resort: placeholder if mesh exists
-                if (tile.hasMesh && loadingTexture != 0) {
+                if (HasRenderableSurface(tile) && loadingTexture != 0) {
                     placeholderTiles.push_back(&tile);
                 } else {
                     ++stats.missing;  // True gap

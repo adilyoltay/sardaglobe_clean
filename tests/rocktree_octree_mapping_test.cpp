@@ -4,6 +4,7 @@
 #include "../src/io/providers/rocktree_octree_index.h"
 #include "../src/core/config.h"
 #include <atomic>
+#include <algorithm>
 #include <cstddef>
 #include <iostream>
 #include <thread>
@@ -273,6 +274,103 @@ int main() {
         } else {
             std::cerr << "PASSED: OctreeSingleDigitIgnored\n";
         }
+    }
+
+    // Test 10: Mapping output should be strictly face-prefixed and depth-limited for deep tiles.
+    {
+        std::unordered_map<std::string, globe::OctreeNodeInfo> faceNodes;
+        faceNodes["02"] = Node(true);
+        faceNodes["020"] = Node(true);
+        faceNodes["021"] = Node(true);
+        faceNodes["022"] = Node(true);
+        faceNodes["023"] = Node(false); // invalid due no mesh
+        faceNodes["0230"] = Node(true);
+        faceNodes["0231"] = Node(true);
+        faceNodes["030"] = Node(true);  // different face (03), should be filtered out for 02 query
+
+#ifdef NATIVE_GLOBE_TESTING
+        index.TEST_SetNodesForUnitTests(std::move(faceNodes));
+#endif
+
+        auto paths = index.TileQuadKeyToOctreePaths("023");
+        std::vector<std::string> expected = {"02", "020", "021", "022", "0230", "0231"};
+        if (!ExpectEq(paths, expected, "Face-prefixed deep mapping must filter other faces and no-mesh nodes")) {
+            failures++;
+        } else {
+            std::cerr << "PASSED: OctreeFacePrefixAndHasDataFiltering\n";
+        }
+    }
+
+    // Test 11: Candidate list should be an ordered subsequence of GetRenderableNodes window.
+    {
+        std::unordered_map<std::string, globe::OctreeNodeInfo> orderNodes;
+        orderNodes["02"] = Node(true);
+        orderNodes["020"] = Node(true);
+        orderNodes["021"] = Node(true);
+        orderNodes["0210"] = Node(true);
+        orderNodes["0211"] = Node(true);
+        orderNodes["0240"] = Node(true);
+#ifdef NATIVE_GLOBE_TESTING
+        index.TEST_SetNodesForUnitTests(std::move(orderNodes));
+#endif
+
+        const auto candidates = index.TileQuadKeyToOctreePaths("023");
+        const auto window = index.GetRenderableNodes(2, 4);
+        bool orderedSubsequence = true;
+        for (const auto& p : candidates) {
+            if (std::find(window.begin(), window.end(), p) == window.end()) {
+                orderedSubsequence = false;
+                break;
+            }
+        }
+        if (!Expect(orderedSubsequence, "Mapped candidates should be subset of renderable node window")) {
+            failures++;
+        } else {
+            std::cerr << "PASSED: OctreeMappingSubsetOfRenderableWindow\n";
+        }
+    }
+
+    // Test 12: Candidate ordering must be depth-first then lexicographic.
+    {
+        std::unordered_map<std::string, globe::OctreeNodeInfo> orderedNodes;
+        orderedNodes["0231"] = Node(true);
+        orderedNodes["020"] = Node(true);
+        orderedNodes["0230"] = Node(true);
+        orderedNodes["022"] = Node(true);
+        orderedNodes["02310"] = Node(true);
+        orderedNodes["02311"] = Node(true);
+        orderedNodes["0232"] = Node(true);
+        orderedNodes["025"] = Node(true);
+#ifdef NATIVE_GLOBE_TESTING
+        globe::RockTreeOctreeIndex orderedIndex(config, nullptr);
+        orderedIndex.TEST_SetNodesForUnitTests(std::move(orderedNodes));
+        auto ordered = orderedIndex.TileQuadKeyToOctreePaths("023");
+        bool isOrdered = true;
+        for (std::size_t i = 1; i < ordered.size(); ++i) {
+            const auto& prev = ordered[i - 1];
+            const auto& current = ordered[i];
+            if (current.size() < prev.size() ||
+                (current.size() == prev.size() && current < prev)) {
+                isOrdered = false;
+                break;
+            }
+        }
+        bool sameFacePrefix = true;
+        for (const auto& p : ordered) {
+            if (!p.empty() && p.substr(0, 2) != "02") {
+                sameFacePrefix = false;
+                break;
+            }
+        }
+        if (!Expect(isOrdered && sameFacePrefix,
+                    "TileQuadKeyToOctreePaths output must be depth then lexicographic with face prefix")) {
+            failures++;
+        } else {
+            std::cerr << "PASSED: OctreeMappingDepthLexicographicOrdering\n";
+        }
+#else
+        std::cerr << "SKIPPED: deterministic ordering assertion requires NATIVE_GLOBE_TESTING\n";
+#endif
     }
 
     if (failures > 0) {
