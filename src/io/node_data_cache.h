@@ -73,6 +73,9 @@ private:
     // Ensure cache directory exists
     bool EnsureDirectory(const std::string& path) const;
     
+    // Phase 6.4: Purge corrupt entry (both data and metadata)
+    void PurgeCorruptEntry(const std::string& dataPath);
+    
     // Write metadata file alongside cached data
     bool WriteMetadata(const std::string& path, const NodeDataCacheEntry& entry);
     

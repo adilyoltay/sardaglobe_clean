@@ -58,7 +58,7 @@ void RockMeshManager::Shutdown() {
         workerThread_.join();
     }
     
-    // Phase 6: Cleanup any remaining entries in non-terminal states
+    // Phase 6.4: Cleanup any remaining entries in non-terminal states
     // to prevent visual/log artifacts during shutdown
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -69,6 +69,16 @@ void RockMeshManager::Shutdown() {
                 entry.error = "Shutdown";
             }
         }
+    }
+    
+    // Phase 6.4: Clear all tracking sets for deterministic state
+    {
+        std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+        inFlightSet_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> queuedLock(queuedMutex_);
+        queuedOrPendingKeys_.clear();
     }
     
     // Destroy all GPU meshes
@@ -566,7 +576,10 @@ bool RockMeshManager::HasPendingWork() const {
 }
 
 // Sprint 2: Check inflight work
+// Phase 6.4: Returns false during shutdown for deterministic state
 bool RockMeshManager::HasInflightWork() const {
+    if (shutdown_.load()) return false;
+    
     std::lock_guard<std::mutex> lock(stateMutex_);
     
     for (const auto& [id, entry] : entries_) {
@@ -606,12 +619,15 @@ std::vector<std::string> RockMeshManager::GetActiveNodeKeysSnapshot() const {
 }
 
 // Sprint 2: Get debug stats
+// Phase 6.4: Returns 0 in-flight during shutdown for deterministic state
 RockMeshManager::Stats RockMeshManager::GetStats() const {
     std::lock_guard<std::mutex> lock(statsMutex_);
     Stats s = stats_;
     s.cachedCount = static_cast<int>(lruList_.size());
     // Calculate in-flight count on-demand (proper locking order)
-    {
+    if (shutdown_.load()) {
+        s.inFlightCount = 0;
+    } else {
         std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
         s.inFlightCount = static_cast<int>(inFlightSet_.size());
     }
@@ -629,7 +645,27 @@ void RockMeshManager::WorkerLoop() {
     
     std::string nodeKey;
     while (requestQueue_.Pop(nodeKey)) {
-        if (shutdown_) break;
+        // Phase 6.4: Handle shutdown immediately with proper cleanup
+        if (shutdown_) {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end() && 
+                (it->second.state == RockMeshState::Fetching || 
+                 it->second.state == RockMeshState::Queued)) {
+                it->second.state = RockMeshState::Failed;
+                it->second.error = "Shutdown";
+            }
+            // Remove from tracking sets
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
+            {
+                std::lock_guard<std::mutex> queuedLock(queuedMutex_);
+                queuedOrPendingKeys_.erase(nodeKey);
+            }
+            break;
+        }
         
         // Check generation - skip stale requests
         uint64_t currentGen = currentGeneration_.load();

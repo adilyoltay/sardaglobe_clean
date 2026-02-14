@@ -85,8 +85,8 @@ std::vector<uint8_t> NodeDataDiskCache::Read(const std::string& endpoint,
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.missCount++;
         stats_.errorCount++;
-        // Remove corrupt file
-        try { std::filesystem::remove(path); } catch (...) {}
+        // Phase 6.4: Use PurgeCorruptEntry for consistent cleanup
+        PurgeCorruptEntry(path);
         return {};
     }
     
@@ -95,6 +95,9 @@ std::vector<uint8_t> NodeDataDiskCache::Read(const std::string& endpoint,
     if (!meta || !meta->valid) {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.missCount++;
+        stats_.errorCount++;
+        // Phase 6.4: Cleanup invalid metadata
+        PurgeCorruptEntry(path);
         return {};
     }
     
@@ -103,11 +106,8 @@ std::vector<uint8_t> NodeDataDiskCache::Read(const std::string& endpoint,
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.missCount++;
         stats_.errorCount++;
-        // Remove corrupt cache entry
-        try { 
-            std::filesystem::remove(path); 
-            std::filesystem::remove(GetMetadataPath(path));
-        } catch (...) {}
+        // Phase 6.4: Use PurgeCorruptEntry for consistent cleanup
+        PurgeCorruptEntry(path);
         return {};
     }
     
@@ -227,6 +227,23 @@ bool NodeDataDiskCache::Remove(const std::string& endpoint,
     }
     
     return success;
+}
+
+// Phase 6.4: Purge corrupt entry (both data and metadata)
+void NodeDataDiskCache::PurgeCorruptEntry(const std::string& dataPath) {
+    try {
+        // Remove data file
+        if (std::filesystem::exists(dataPath)) {
+            std::filesystem::remove(dataPath);
+        }
+        // Remove metadata file
+        std::string metaPath = GetMetadataPath(dataPath);
+        if (std::filesystem::exists(metaPath)) {
+            std::filesystem::remove(metaPath);
+        }
+    } catch (const std::exception& e) {
+        // Best effort cleanup - ignore errors
+    }
 }
 
 bool NodeDataDiskCache::Clear() {

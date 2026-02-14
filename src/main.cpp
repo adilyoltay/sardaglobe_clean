@@ -11,10 +11,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iomanip>
 #include <string>
-#include <charconv>
-#include <system_error>
+#include <limits>
+#include <cerrno>
 
-// Phase 6: Strict numeric parsing helper for CLI flags
+// Phase 6.4: Strict numeric parsing helper for CLI flags with overflow protection
 // Returns true on success, false on parse failure
 template<typename T>
 bool ParseNumeric(const char* str, T& out, const char* name) {
@@ -52,18 +52,37 @@ bool ParseNumeric(const char* str, T& out, const char* name) {
     
     // Parse based on type
     if constexpr (std::is_integral_v<T>) {
+        // Phase 6.4: Use strtoll for overflow-safe parsing
         char* endptr = nullptr;
-        long val = std::strtol(str, &endptr, 10);
+        errno = 0;  // Clear errno before parse
+        long long val = std::strtoll(str, &endptr, 10);
+        
+        // Check for parse errors
         if (endptr && *endptr != '\0') {
             std::cerr << "Error: " << name << " has trailing characters\n";
+            return false;
+        }
+        if (errno == ERANGE) {
+            std::cerr << "Error: " << name << " value out of range\n";
+            return false;
+        }
+        
+        // Phase 6.4: Check against type limits
+        if (val < std::numeric_limits<T>::min() || val > std::numeric_limits<T>::max()) {
+            std::cerr << "Error: " << name << " value " << val << " out of range for type\n";
             return false;
         }
         out = static_cast<T>(val);
     } else {
         char* endptr = nullptr;
+        errno = 0;
         double val = std::strtod(str, &endptr);
         if (endptr && *endptr != '\0') {
             std::cerr << "Error: " << name << " has trailing characters\n";
+            return false;
+        }
+        if (errno == ERANGE) {
+            std::cerr << "Error: " << name << " value out of range\n";
             return false;
         }
         out = static_cast<T>(val);
