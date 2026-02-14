@@ -8,7 +8,7 @@ namespace globe {
 namespace {
     // Known placeholders for GE mesh URLs
     const std::vector<std::string> kKnownPlaceholders = {
-        "{quadkey}", "{z}", "{x}", "{y}"
+        "{quadkey}", "{z}", "{x}", "{y}", "{epoch}", "{path}"
     };
     
     // Check if a substring is a known placeholder

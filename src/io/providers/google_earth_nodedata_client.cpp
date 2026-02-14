@@ -13,6 +13,7 @@ GoogleEarthNodeDataClient::GoogleEarthNodeDataClient(
     const Config& config,
     std::unique_ptr<IHttpTransport> transport)
     : endpointTemplate_(config.geMeshEndpoint),
+      epoch_(config.geEpoch),
       headers_(config.geHeaders),
       transport_(std::move(transport)),
       ownsTransport_(transport_ == nullptr) {
@@ -44,6 +45,11 @@ GoogleEarthNodeDataClient::BuildHeaders() const {
     
     // Accept protobuf format
     result.push_back({"Accept", "application/x-protobuf"});
+
+    // Add Google Earth spoofing headers (Required for access)
+    result.push_back({"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"});
+    result.push_back({"Referer", "https://earth.google.com/"});
+    result.push_back({"Origin", "https://earth.google.com"});
     
     // Check if custom Authorization header is provided
     bool hasCustomAuth = false;
@@ -77,8 +83,17 @@ NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeK
         return result;
     }
     
+    // Resolve {epoch} placeholder in template before building URL
+    std::string tmpl = endpointTemplate_;
+    if (!epoch_.empty()) {
+        size_t epochPos = tmpl.find("{epoch}");
+        if (epochPos != std::string::npos) {
+            tmpl.replace(epochPos, 7, epoch_);
+        }
+    }
+
     // Build URL from template
-    std::string url = BuildGeMeshUrl(endpointTemplate_, nodeKey);
+    std::string url = BuildGeMeshUrl(tmpl, nodeKey);
     
     // Build headers
     auto headers = BuildHeaders();

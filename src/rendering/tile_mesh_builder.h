@@ -31,6 +31,9 @@ public:
         uint8_t stitchMask = 0;
         uint8_t skirtMask = 0;
         uint8_t demEffectiveLevel = 0;
+        // RTE/RTC origin for jitter-free rendering
+        glm::vec3 originEcefHi{0.0f};     // High 16 bits of tile origin
+        glm::vec3 originEcefLo{0.0f};     // Low 16 bits of tile origin
     };
     
     // Build mesh geometry for a tile
@@ -64,6 +67,7 @@ private:
         int level,
         uint8_t skirtMask,
         const Config& config,
+        const glm::dvec3& tileOrigin,
         double heightRange = 0.0
     );
 };

@@ -113,12 +113,20 @@ public:
         }
     }
     
+    // Set safety margin for conservative culling (to avoid false negatives)
+    void SetSafetyMargin(float marginFactor) {
+        safetyMargin_ = marginFactor;
+    }
+    
+    float GetSafetyMargin() const { return safetyMargin_; }
+    
     // Test if point on globe surface is above horizon
     bool IsVisible(const glm::vec3& surfacePoint) const {
         glm::vec3 toPoint = glm::normalize(surfacePoint - cameraPos_);
         glm::vec3 toCenter = -glm::normalize(cameraPos_);
         float dot = glm::dot(toPoint, toCenter);
-        return dot < horizonCosAngle_;
+        // Apply safety margin: make culling more conservative
+        return dot < (horizonCosAngle_ * safetyMargin_);
     }
     
     // Test if sphere is potentially visible (conservative)
@@ -140,17 +148,39 @@ public:
         //
         // This is conservative and avoids false negatives that lead to low-LOD coverage holes.
         float dotCenter = glm::dot(cameraPos_, center);
-        float maxDot = dotCenter + std::max(0.0f, radius) * cameraHeight_;
+        // Apply safety margin: shrink the horizon threshold to be more conservative
+        float adjustedRadius = radius * safetyMargin_;
+        float maxDot = dotCenter + std::max(0.0f, adjustedRadius) * cameraHeight_;
         float horizon = globeRadius_ * globeRadius_;
         return maxDot >= horizon - 1e-3f;
     }
+    
+    // Get horizon distance
+    float GetHorizonDistance() const { return horizonDist_; }
+    
+    // Get horizon angle (cosine)
+    float GetHorizonCosAngle() const { return horizonCosAngle_; }
 
+public:
+    // Statistics for debugging
+    struct Stats {
+        int totalTested = 0;
+        int culledCount = 0;
+        int keptCount = 0;
+        void Reset() { totalTested = culledCount = keptCount = 0; }
+    };
+    
+    const Stats& GetStats() const { return stats_; }
+    void ResetStats() { stats_.Reset(); }
+    
 private:
     glm::vec3 cameraPos_{0.0f};
     float globeRadius_ = 0.0f;
     float cameraHeight_ = 0.0f;
     float horizonDist_ = 0.0f;
     float horizonCosAngle_ = 1.0f;
+    float safetyMargin_ = 1.0f;  // Default 1.0 = no additional margin
+    mutable Stats stats_;  // Mutable for const-correctness in test functions
 };
 
 } // namespace globe

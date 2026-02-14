@@ -57,6 +57,11 @@ public:
         // Debug culling toggles (for gap diagnosis)
         bool disableFrustumCull = false;
         bool disableHorizonCull = false;
+        
+        // Faz 3A: Horizon Culling settings
+        bool useHorizonCulling = true;           // Enable horizon culling
+        float horizonSafetyMarginRad = 0.01f;    // Safety margin in radians
+        float horizonNearHorizonInflation = 1.15f;  // Bounding radius inflation near horizon
     };
     
     LodSelector() = default;

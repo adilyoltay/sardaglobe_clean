@@ -221,20 +221,28 @@ void PerspectiveCamera::UpdateMatrices() const {
     
     if (m_proj_dirty) {
         if (!m_reverseZ) {
+            // Standard Z: near=0, far=1 in depth buffer
             m_proj_matrix = glm::perspective(glm::radians(m_fov), m_aspect, m_near, m_far);
         } else {
-            // Reversed-Z projection for OpenGL NDC [-1, 1]:
-            // near -> +1, far -> -1. Depth test should use GL_GEQUAL with clear depth 0.
+            // Reversed-Z with infinite far plane
+            // This gives maximum depth precision at far distances
+            // Depth buffer: 0 = far, 1 = near
+            // GL setup: glDepthFunc(GL_GEQUAL), glClearDepth(0.0f)
+            
             const double f = 1.0 / std::tan(glm::radians(m_fov) * 0.5);
             const double n = m_near;
-            const double fa = m_far;
-
+            
+            // Infinite far plane Reversed-Z matrix
+            // Clip space Z: +1 at near plane, approaches 0 at infinity
             m_proj_matrix = glm::dmat4(0.0);
             m_proj_matrix[0][0] = f / m_aspect;
             m_proj_matrix[1][1] = f;
-            m_proj_matrix[2][2] = (n + fa) / (fa - n);
-            m_proj_matrix[2][3] = -1.0;
-            m_proj_matrix[3][2] = (2.0 * fa * n) / (fa - n);
+            m_proj_matrix[2][2] = 0.0;      // Coefficient for Z: maps to 0 at infinity
+            m_proj_matrix[2][3] = -1.0;     // Perspective divide
+            m_proj_matrix[3][2] = n;        // Near plane offset: Z = n/w = 1 at near
+            // Result: gl_FragCoord.z = n / (-viewZ) 
+            // At near plane (viewZ = -n): z = 1
+            // At infinity (viewZ = -inf): z approaches 0
         }
         m_proj_dirty = false;
     }

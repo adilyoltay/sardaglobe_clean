@@ -452,6 +452,23 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         glm::dvec3 pos = ellipsoid.GeodeticToCartesian(sampleLonDeg[i], sampleLatDeg[i], heightsKm[i]);
         positions.push_back(pos);
     }
+    
+    // Compute tile center as RTE origin (for jitter-free rendering)
+    // Use the geometric center of the tile's bounding box
+    glm::dvec3 tileOriginECEF(0.0);
+    if (!positions.empty()) {
+        glm::dvec3 bboxMin = positions[0];
+        glm::dvec3 bboxMax = positions[0];
+        for (const auto& pos : positions) {
+            bboxMin = glm::min(bboxMin, pos);
+            bboxMax = glm::max(bboxMax, pos);
+        }
+        tileOriginECEF = (bboxMin + bboxMax) * 0.5;
+    }
+    
+    // Split origin into high/low for double emulation on GPU
+    result.originEcefHi = glm::vec3(tileOriginECEF);
+    result.originEcefLo = glm::vec3(tileOriginECEF - glm::dvec3(result.originEcefHi));
 
     // Track final min/max height for skirt-depth and terrain stats.
     double minHeightKm = 0.0;
@@ -633,9 +650,13 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                 normal = glm::vec3(surfaceNormal);
             }
             
-            result.vertices.push_back(static_cast<float>(pos.x));
-            result.vertices.push_back(static_cast<float>(pos.y));
-            result.vertices.push_back(static_cast<float>(pos.z));
+            // RTE: Store position relative to tile origin (for jitter-free rendering)
+            // CPU uses double precision for the subtraction, GPU gets float32 relative
+            glm::vec3 relativePos = glm::vec3(pos - tileOriginECEF);
+            
+            result.vertices.push_back(relativePos.x);
+            result.vertices.push_back(relativePos.y);
+            result.vertices.push_back(relativePos.z);
             result.vertices.push_back(normal.x);
             result.vertices.push_back(normal.y);
             result.vertices.push_back(normal.z);
@@ -883,6 +904,10 @@ void TileMeshBuilder::GenerateSkirts(
 void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     // Delete old mesh first
     DeleteMesh(tile);
+    
+    // Copy RTE origin for jitter-free rendering
+    tile.originEcefHi = result.originEcefHi;
+    tile.originEcefLo = result.originEcefLo;
     
     // Create VAO/VBO/EBO
     glGenVertexArrays(1, &tile.vao);

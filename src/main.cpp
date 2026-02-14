@@ -343,6 +343,18 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.geMeshMaxChildRequestsPerFrame = maxReq;
+        } else if (std::strcmp(argv[i], "--ge-epoch") == 0 && i + 1 < argc) {
+            config.geEpoch = argv[++i];
+        } else if (std::strcmp(argv[i], "--ge-rate-limit") == 0 && i + 1 < argc) {
+            int rateMs;
+            if (!ParseNumeric(argv[++i], rateMs, "--ge-rate-limit")) return 1;
+            if (rateMs < 0 || rateMs > 10000) {
+                std::cerr << "Error: --ge-rate-limit must be between 0 and 10000 ms\n";
+                return 1;
+            }
+            config.geRateLimitMs = rateMs;
+        } else if (std::strcmp(argv[i], "--ge-no-octree") == 0) {
+            config.geOctreeEnabled = false;
         } else if (std::strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             config.cacheDir = argv[++i];
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {

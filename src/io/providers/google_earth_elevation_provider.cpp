@@ -33,6 +33,11 @@ GoogleEarthElevationProvider::BuildRequestHeaders() const {
     // Add content type for protobuf
     headers.push_back({"Content-Type", "application/x-protobuf"});
     headers.push_back({"Accept", "application/x-protobuf"});
+
+    // Add Google Earth spoofing headers (Required for access)
+    headers.push_back({"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"});
+    headers.push_back({"Referer", "https://earth.google.com/"});
+    // headers.push_back({"Origin", "https://earth.google.com"}); // Causing 400 Bad Request on earth-pa
     
     return headers;
 }
@@ -109,6 +114,20 @@ ElevationBatchResult GoogleEarthElevationProvider::BatchQuery(const std::vector<
     // This preserves metadata (httpStatusCode, bytesReceived, elapsedMs, curlResult)
     result.fetch = HttpResponseToDemFetchResult(httpResponse);
     
+    // Debug logging for troubleshooting auth/bad response
+    if (!httpResponse.success || httpResponse.httpCode != 200) {
+        std::cerr << "[GE Elevation] Request failed:\n"
+                  << "  URL: " << config_.endpoint << "\n"
+                  << "  HTTP Code: " << httpResponse.httpCode << "\n"
+                  << "  Curl Result: " << httpResponse.curlResult << "\n"
+                  << "  Body Size: " << httpResponse.body.size() << " bytes\n"
+                  << "  Error: " << httpResponse.errorMessage << "\n";
+        if (!httpResponse.body.empty() && httpResponse.body.size() < 1024) {
+             std::string bodyStr(httpResponse.body.begin(), httpResponse.body.end());
+             std::cerr << "  Body: " << bodyStr << "\n";
+        }
+    }
+
     // Check HTTP result
     if (!httpResponse.success) {
         // Use httpCode and curlResult for specific error mapping (no substring matching)

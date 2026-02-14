@@ -14,6 +14,10 @@ bool RockMeshGpu::Create(const RockMeshCpu& cpu, GLuint fallbackTexture) {
     id = cpu.id;
     indexCount = static_cast<uint32_t>(cpu.indices.size());
     
+    // Copy RTE origin for jitter-free rendering
+    originEcefHi = cpu.originEcefHi;
+    originEcefLo = cpu.originEcefLo;
+    
     // VAO
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);

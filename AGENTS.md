@@ -15,9 +15,16 @@ Amacımız Google Earth kalitesinde bir globe engine geliştirmektir. Tüm davra
 
 ## Dokümanlar
 
+### Ana Teknik Referanslar
 - `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` — **ANA TEKNİK REFERANS** (3 bölüm birleşik: GE WASM RE + 3D Terrain Planı + Tile Pipeline Optimizasyon Planı)
+- `docs/GE_PARITY_STABILIZATION_PLAN.md` — **GE Parity Stabilizasyon Planı** (4 fazlı stabilizasyon yol haritası)
 - `docs/GOOGLE_EARTH_PRO_DESKTOP_RE_ANALYSIS.md` — **GE Pro Desktop Native Binary RE** (earth::evll sınıf hiyerarşisi, IG render engine, Drawable sistem, Navigation detay, Proto şemaları)
 - `docs/GOOGLE_EARTH_MOUSE_NAVIGATION_ANALYSIS.md` — GE navigasyon RE (kamera, orbit, zoom, momentum)
+
+### Implementasyon Planları
+- `docs/FAZ1_REVERSEDZ_RTE_IMPLEMENTATION.md` — Faz 1: Reversed-Z + RTE/RTC kılavuzu
+- `docs/FAZ2_PBO_TEXTUREARRAY_IMPLEMENTATION.md` — Faz 2: PBO + Texture2Array kılavuzu
+- `docs/FAZ3_FAZ4_OPTIMIZATION_FINISHING.md` — Faz 3-4: Optimizasyon ve finisaj kılavuzu
 - `docs/MASTER_DEVELOPMENT_PLAN.md` — 7-faz geliştirme yol haritası
 - `README.md` — Proje genel açıklaması (build/run notları)
 
@@ -31,6 +38,8 @@ Amacımız Google Earth kalitesinde bir globe engine geliştirmektir. Tüm davra
 - `webglobe_deobfuscated_v2/**` — Deobfuscate edilmiş JS kaynak
 
 ## Mimari Uyum İçin Öncelikli Yapılar:
+
+### Temel Yapılar
 - TileKey (QuadKey, Parent/Child/Neighbor navigation)
 - SSE-based LOD selection (Screen-Space Error)
 - Skirt generation (LOD seam prevention)
@@ -41,11 +50,175 @@ Amacımız Google Earth kalitesinde bir globe engine geliştirmektir. Tüm davra
 - **uCornerLods:** Bilinear LOD interpolation for smooth tile transitions
 - **Mirth Engine:** geo/render/mirth/ — iç render engine kaynak yol haritası
 
+### Stabilizasyon (GE Parity) Yapıları
+- **Reversed-Z:** `glDepthFunc(GL_GEQUAL)` + infinite far plane (z-fighting çözümü)
+- **RTE/RTC:** Relative-to-Center/ Eye vertex encoding (titreme çözümü)
+- **PBO Upload:** Async DMA texture upload (stutter azaltma)
+- **Texture2DArray:** Layer-based tile storage (bleeding çözümü)
+- **Horizon Culling:** Ufuk arkası tile atma (performans)
+- **Weighted Scheduler:** Screen-space priority queue (loading latency)
+
 ## Mimari Değişiklik Kuralı
 - `docs/GOOGLE_EARTH_TILE_DEM_RENDER_DEEP_ANALYSIS.md` mimari hedef referansıdır.
 - `docs/MASTER_DEVELOPMENT_PLAN.md` yürütme planıdır.
+- `docs/GE_PARITY_STABILIZATION_PLAN.md` stabilizasyon hedef referansıdır.
 - Yeni mimari değişiklikler bu dokümanlara dayanmalı ve plan fazlarıyla uyumlu olmalıdır.
 - Parity'yi etkileyen her değişiklikte plan fazı referansı belirtilmelidir.
+
+## GE Parity Stabilizasyon Planı (Aktif)
+
+> **Durum:** Phase 5-6 tamamlandı (NodeData pipeline stabil)  
+> **Hedef:** Görsel parity'i kilitleyen P0 engellerini kaldırmak
+
+### Faz 1 — Çekirdek Hassasiyet (P0 - Zorunlu İlk) ✅ TAMAMLANDI
+**Amaç:** Titreme ve z-fighting'i gider
+- **Reversed-Z:** `glDepthFunc(GL_GEQUAL)` + infinite far projection ✅
+  - `PerspectiveCamera::UpdateMatrices()` infinite far plane implementasyonu
+  - `GlobeEngine::Init()/Render()` GL state yönetimi (`GL_GEQUAL`, `glClearDepth(0.0f)`)
+- **RTE/RTC:** Relative-to-Center vertex encoding (double-precision simulation) ✅
+  - Tile render path: `TileMeshBuilder` origin split, `TileRenderer` uniform binding
+  - RockMesh render path: `RockMeshManager::BuildMesh()` origin split, `Render()` uniform binding
+  - Shader: `uTileOriginECEFHi/Lo`, `uUseRTE` uniform'ları
+- **Feature Flags:** 
+  - `config_.reversedZEnabled` - Reversed-Z aç/kapa
+  - `config_.useRteRender` - RTE/RTC aç/kapa (Tile ve RockMesh için tutarlı)
+- **Kılavuz:** `docs/FAZ1_REVERSEDZ_RTE_IMPLEMENTATION.md`
+- **Testler (Toplam 47 test, hepsi geçiyor ✅):**
+  - `tests/reversed_z_precision_test.cpp` - 5/5 geçti ✅
+  - `tests/rte_rtc_tile_regression_test.cpp` - 3/3 geçti ✅
+  - `tests/rte_rtc_rockmesh_regression_test.cpp` - 5/5 geçti ✅
+  - `tests/shader_uniform_parity_test.cpp` - 8/8 geçti ✅
+  - `tests/pbo_upload_manager_test.cpp` - 8/8 geçti ✅
+  - `tests/pbo_texture_manager_integration_test.cpp` - 8/8 geçti ✅
+  - `tests/texture_array_manager_test.cpp` - 10/10 geçti ✅
+
+### Faz 2 — Asenkron Geçiş (P0 - Zorunlu İkinci) 🚧 DEVAM EDİYOR
+**Amaç:** Mikro takılmaları ve texture bleeding'i çöz
+
+#### 2A — PBO Upload Manager ✅ TAMAMLANDI (Closure Dahil)
+- **PBO Upload:** Ring buffer async DMA texture upload
+- **Dosyalar:** 
+  - `src/rendering/pbo_upload_manager.h` - PBO Upload Manager header (GL fence desteği)
+  - `src/rendering/pbo_upload_manager.cpp` - Ring buffer, async upload, GLsync
+  - `src/rendering/texture_manager.h/.cpp` - TextureManager PBO entegrasyonu
+  - `tests/pbo_upload_manager_test.cpp` - 8/8 test geçti ✅
+  - `tests/pbo_texture_manager_integration_test.cpp` - 8/8 test geçti ✅
+  - `src/core/config.h` - `usePboUploads`, `pboUploadCount`, `pboUploadSize`
+- **Özellikler:**
+  - Ring buffer PBO havuzu (varsayılan 8 PBO, 4MB her biri)
+  - GL_ARB_sync fence tabanlı async completion tracking
+  - Safe data ownership: `std::vector<uint8_t>` veya external pointer
+  - Priority-based upload kuyruğu
+  - Orphan/implicit sync önleme
+  - **Closure özellikleri:**
+    - `InFlightRequest` yapısı ile PBO-request ilişkilendirmesi
+    - `PollGpuCompletion()` per-request completion kontrolü
+    - Callback mekanizması `OnPboUploadComplete()`
+    - `usePboUploads` isim standardizasyonu
+  - TextureManager entegrasyonu: PBO → immediate fallback
+  - İstatistik takibi (`UploadStats`)
+- **Hardening:**
+  - Safe PBO ID üretimi (vector<GLuint> + glGenBuffers)
+  - Move semantics (`UploadRequest` non-copyable)
+  - Configurable PBO sayısı/boyutu
+
+#### 2B — Texture2DArray Manager ✅ TEMEL RENDER ENTEGRASYONU TAMAMLANDI
+- **Texture2DArray:** Atlas yerine layer-based storage (bleeding çözümü)
+- **Bağımlılıklar:** Faz 2A tamamlandı, PBO altyapısı entegre
+- **Tamamlanan Dosyalar:** 
+  - `src/rendering/texture_array_manager.h/.cpp` - Tier/layer yönetimi
+  - `src/core/config.h` - `useTexture2DArray` flag'i eklendi (varsayılan: false)
+  - `src/core/tile.h` - `textureLayerHandle`, `textureArrayLayer`, `textureArrayTier` alanları
+  - `src/rendering/shader_manager.h/cpp` - `UseTextureArray` flag'i, `sampler2DArray` shader variant'ı
+  - `src/rendering/texture_manager.h/cpp` - TextureArrayManager entegrasyonu, `UploadTileViaArray()`
+  - `src/rendering/tile_renderer.h/cpp` - `useTextureArray` batch desteği, layer uniform binding
+  - `src/rendering/render_frame.h/cpp` - `useTextureArray` parametre geçişi
+  - `tests/texture_array_manager_test.cpp` - 10/10 test geçti ✅
+- **Tamamlanan Özellikler:**
+  - Tier bazlı yönetim (farklı tile boyutları için)
+  - Layer allocate/free/reuse
+  - LRU eviction desteği
+  - Mipmap ve anisotropic filtering desteği
+  - Shader'da `sampler2DArray` ve `uTextureLayer` uniform desteği
+  - `GL_TEXTURE_2D_ARRAY` ile bleeding önleme altyapısı
+  - **Tamamlanan Entegrasyonlar:**
+    - TextureManager'da array → atlas → PBO → immediate fallback zinciri
+    - TileRenderer'da `GL_TEXTURE_2D_ARRAY` bind ve `uTextureLayer` set
+    - RenderFrame'den TileRenderer'a `useTextureArray` flag geçişi
+    - Atlas/2D legacy path korundu (geri dönülebilirlik)
+- **Devam Eden:**
+  - Bleeding regression testleri
+  - GlobeEngine'de `useTexture2DArray` flag'i ile test
+
+#### 2A + 2B Toplam Test Kapsamı
+- **Unit Tests:** 47 test (hepsi geçiyor ✅)
+- **Integration:** PBO + TextureArrayManager + TileRenderer entegrasyonu
+- **Kod:** ~3200 satır yeni kod
+- **Yapılanlar:**
+  - ✅ PBO async upload (GL fence tabanlı)
+  - ✅ Texture2DArray tier/layer yönetimi
+  - ✅ Shader `sampler2DArray` + `uTextureLayer` desteği
+  - ✅ TextureManager array → atlas → PBO fallback zinciri
+  - ✅ TileRenderer array binding ve layer uniform set
+  - ✅ RenderFrame'den parametre geçişi
+- **Kullanım:** `config.useTexture2DArray = true` (varsayılan: false)
+- **QA Test Senaryoları:** `docs/QA_TEST_SCENARIOS_FAZ2B.md` (5 temel senaryo)
+
+#### ⚠️ Bilinen Sınırlamalar
+1. **Instanced Path:** `RenderFlatTilesInstanced` şu anda texture array desteklemiyor. Array modunda otomatik olarak individual `RenderTile` çağrılarına düşüyor. Gelecekte instance data'ya layer index eklenerek optimize edilecek.
+2. **PBO Callback:** `OnPboUploadComplete` placeholder durumda. Full async için tile state management entegrasyonu gerekiyor.
+3. **Fallback Garantisi:** GL sürüm desteği yoksa otomatik atlas/2D path'e düşüyor.
+
+- **Kılavuz:** `docs/FAZ2_PBO_TEXTUREARRAY_IMPLEMENTATION.md`
+
+- **Kılavuz:** `docs/FAZ2_PBO_TEXTUREARRAY_IMPLEMENTATION.md`
+
+### Faz 3 — Performans Optimizasyonu (P1) 🚧 DEVAM EDİYOR
+**Amaç:** Frame-time sürdürülebilirliği, %40-50 tile azaltımı
+
+#### 3A — Horizon Culling ✅ TAMAMLANDI
+- **Matematik:** Geometrik horizon testi, camera altitude + Earth curvature
+- **Dosyalar:**
+  - `src/math/frustum.h` - `HorizonCuller` sınıfı (mevcut, genişletildi)
+  - `tests/horizon_culler_test.cpp` - 8/8 test geçti ✅
+  - `src/core/config.h` - `useHorizonCulling`, `horizonCullingSafetyMargin`
+  - `src/scheduling/lod_selector.h/cpp` - Settings entegrasyonu ✅
+  - `src/engine/globe_engine.cpp` - Config bağlantısı ✅
+- **Özellikler:**
+  - `IsVisible()` - Point-based horizon test
+  - `IsSphereVisible()` - Sphere-based conservative test
+  - `SetSafetyMargin()` - Configurable safety margin
+  - Stats entegrasyonu - Culling istatistikleri
+  - LODSelector entegrasyonu - `useHorizonCulling` flag'i
+- **Config:**
+  ```cpp
+  useHorizonCulling = true;              // Enable/disable
+  horizonCullingSafetyMargin = 0.01;     // Radians
+  horizonCullingDebug = false;           // Debug viz
+  ```
+
+#### 3B — Weighted Scheduler 📝 PLANLANDI
+- **Hedef:** Screen-space priority queue ile tile scheduling
+- **Ağırlık formülü:** SSE + distance + LOD + aging + visibility
+
+#### 3C — Adaptive LOD 📝 PLANLANDI
+- **Hedef:** Terrain variance tabanlı dinamik LOD selection
+- **Histerezis:** LOD flickering önleme
+
+- **Kılavuz:** `docs/FAZ3_IMPLEMENTATION_PLAN.md`
+
+### Faz 4 — Görsel Finisaj (P2)
+**Amaç:** GE kalitesinde görsel deneyim
+- **Dither Crossfade:** Alpha blending yerine stochastic dithering
+- **GPU De-kuantizasyon:** Vertex memory %60 azaltma
+- **Kılavuz:** `docs/FAZ3_FAZ4_OPTIMIZATION_FINISHING.md`
+
+### Kabul Kriterleri
+- 60 FPS senaryolarında micro-stutter p95 < 16.6ms
+- Jitter metrikleri: Pixel RMS < 0.5px
+- Texture bleeding: %0 (array ile)
+- Yakın tile bekleme: Priority scheduler median < 200ms
+- Test kapsamı: +20 yeni test (toplam 65+)
 
 ## Dosya Haritası
 

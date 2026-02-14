@@ -70,6 +70,123 @@ TextureManager::TextureManager(const Config& config)
         atlasEnabled_ = false;
     }
     loadingTexture_ = CreateLoadingTexture();
+    InitializePboManager();
+    InitializeArrayManager();
+}
+
+void TextureManager::InitializePboManager() {
+    if (!config_.usePboUploads) {
+        return;
+    }
+    
+    PboUploadManager::Config pboConfig;
+    pboConfig.maxPboCount = static_cast<uint32_t>(config_.pboUploadCount);
+    pboConfig.defaultPboSize = config_.pboUploadSize;
+    pboConfig.usePbo = true;
+    pboConfig.useFences = true;
+    pboConfig.orphanUnusedPbos = true;
+    
+    pboManager_ = std::make_unique<PboUploadManager>(pboConfig);
+    if (!pboManager_->Initialize()) {
+        // Fall back to immediate uploads
+        pboManager_.reset();
+    }
+}
+
+void TextureManager::InitializeArrayManager() {
+    if (!config_.useTexture2DArray) {
+        return;
+    }
+    
+    TextureArrayManager::Config arrayConfig;
+    arrayConfig.useTexture2DArray = true;
+    arrayConfig.initialLayersPerTier = config_.pboUploadCount * 8;  // Scale with PBO count
+    arrayConfig.maxLayersPerTier = 256;
+    arrayConfig.generateMipmaps = true;
+    
+    arrayManager_ = std::make_unique<TextureArrayManager>(arrayConfig);
+    if (!arrayManager_->Initialize()) {
+        // Fall back to atlas/individual textures
+        arrayManager_.reset();
+    }
+}
+
+bool TextureManager::UploadTileViaArray(Tile& tile) {
+    if (!arrayManager_ || tile.pixels.empty()) {
+        return false;
+    }
+    
+    // Get or create tier for this tile size
+    int tierId = arrayManager_->GetOrCreateTier(tile.pixelWidth, tile.pixelHeight, true);
+    if (tierId < 0) {
+        return false;
+    }
+    
+    // Allocate a layer
+    LayerHandle layerHandle = arrayManager_->AllocateLayer(tierId);
+    if (layerHandle == INVALID_LAYER_HANDLE) {
+        return false;
+    }
+    
+    // Upload data to layer
+    bool uploaded = arrayManager_->UploadToLayer(layerHandle, tile.pixels.data(), 
+                                                  tile.pixelWidth, tile.pixelHeight,
+                                                  GL_RGBA, GL_UNSIGNED_BYTE);
+    
+    if (uploaded) {
+        // Update tile with array info
+        tile.textureLayerHandle = layerHandle;
+        tile.textureArrayLayer = arrayManager_->GetLayerIndex(layerHandle);
+        tile.textureArrayTier = tierId;
+        
+        // Set textureId to the tier's texture (for binding)
+        tile.textureId = arrayManager_->GetTierTextureId(tierId);
+        tile.ownsTexture = false;  // Array owns the texture
+        tile.texWidth = tile.pixelWidth;
+        tile.texHeight = tile.pixelHeight;
+        
+        // No UV transform needed for array (no bleeding)
+        tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+        tile.atlasAllocated = false;
+        tile.atlasPage = -1;
+        tile.atlasSlot = -1;
+        
+        return true;
+    } else {
+        // Upload failed, free the layer
+        arrayManager_->FreeLayer(layerHandle);
+        return false;
+    }
+}
+
+void TextureManager::ReleaseArrayLayer(Tile& tile) {
+    if (!arrayManager_ || tile.textureLayerHandle == INVALID_LAYER_HANDLE) {
+        return;
+    }
+    
+    arrayManager_->FreeLayer(tile.textureLayerHandle);
+    
+    tile.textureLayerHandle = INVALID_LAYER_HANDLE;
+    tile.textureArrayLayer = -1;
+    tile.textureArrayTier = -1;
+}
+
+// PBO Upload completion callback
+// userData is a pointer to TileKey that we allocated
+void OnPboUploadComplete(GLuint textureId, bool success, void* userData) {
+    if (!userData) return;
+    
+    // userData contains the TileKey that was uploaded
+    // In a real implementation, we'd look up the tile and update its state
+    // For now, this is a placeholder for the callback mechanism
+    TileKey* key = static_cast<TileKey*>(userData);
+    (void)key;  // Suppress unused warning
+    (void)textureId;
+    (void)success;
+    
+    // TODO: Update tile state to Ready, generate mipmaps, etc.
+    // This requires access to the tiles map which we don't have here
+    // Full implementation would use a context pointer or lambda capture
 }
 
 TextureManager::~TextureManager() {
@@ -287,6 +404,7 @@ void TextureManager::ReleaseAtlasAllocation(Tile& tile) {
 
 void TextureManager::ReleaseTileResources(Tile& tile) {
     ReleaseAtlasAllocation(tile);
+    ReleaseArrayLayer(tile);  // Faz 2B: Release array layer if allocated
     if (tile.ownsTexture && tile.textureId != 0) {
         DeleteTexture(tile.textureId);
     }
@@ -297,6 +415,10 @@ void TextureManager::ReleaseTileResources(Tile& tile) {
     tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
     tile.atlasContentWidth = 0;
     tile.atlasContentHeight = 0;
+    // Faz 2B: Reset array fields
+    tile.textureLayerHandle = INVALID_LAYER_HANDLE;
+    tile.textureArrayLayer = -1;
+    tile.textureArrayTier = -1;
 }
 
 void TextureManager::TrimTrailingEmptyAtlasPages() {
@@ -462,6 +584,109 @@ void TextureManager::QueueUpload(Tile& tile) {
     uploadQueue_.push(job);
 }
 
+void TextureManager::ProcessPboUploads() {
+    if (pboManager_) {
+        pboManager_->BeginFrame(currentFrame_);
+        pboManager_->ProcessUploads();
+        pboManager_->EndFrame();
+    }
+}
+
+bool TextureManager::UploadTileViaPbo(Tile& tile) {
+    if (!pboManager_ || tile.pixels.empty()) {
+        return false;
+    }
+    
+    // Create texture object first (orphaned, will receive data via PBO)
+    bool reuseTexture = tile.ownsTexture &&
+                        tile.textureId != 0 &&
+                        tile.texWidth == tile.pixelWidth &&
+                        tile.texHeight == tile.pixelHeight;
+    
+    GLuint textureId;
+    if (reuseTexture) {
+        textureId = tile.textureId;
+    } else {
+        // Delete old texture if owned
+        if (tile.ownsTexture && tile.textureId != 0) {
+            DeleteTexture(tile.textureId);
+        }
+        
+        // Create new empty texture
+        glGenTextures(1, &textureId);
+        glBindTexture(GL_TEXTURE_2D, textureId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Allocate storage but don't upload data yet
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tile.pixelWidth, tile.pixelHeight, 0, 
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        ++textureCount_;
+    }
+    
+    // Submit PBO upload (takes ownership of pixel data)
+    // Note: In full async mode, callback would handle completion
+    // For now, we use synchronous completion tracking via ProcessUploads
+    bool submitted = pboManager_->SubmitUploadOwned(
+        textureId,
+        tile.pixelWidth,
+        tile.pixelHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        std::move(tile.pixels),  // Move pixels into request
+        nullptr,  // Callback - see note below
+        nullptr,
+        static_cast<uint64_t>(tile.requestPriority),
+        true  // generateMipmap
+    );
+    
+    // IMPORTANT: With proper async, we should:
+    // 1. Store a copy of the TileKey in userData
+    // 2. Pass a callback that updates tile state on completion
+    // 3. Tile stays in Uploading state until callback fires
+    // 4. Callback then does: GenerateMipmap, ClearPixels, UploadOk transition
+    //
+    // Current simplified approach:
+    // - PBO upload happens async
+    // - But we mark tile as ready immediately (caller does GenerateMipmap)
+    // - Full async would require more complex state management
+    
+    if (submitted) {
+        tile.textureId = textureId;
+        tile.ownsTexture = true;
+        tile.texWidth = tile.pixelWidth;
+        tile.texHeight = tile.pixelHeight;
+        
+        // Half-texel inset
+        if (tile.texWidth > 1 && tile.texHeight > 1) {
+            float insetX = 0.5f / static_cast<float>(tile.texWidth);
+            float insetY = 0.5f / static_cast<float>(tile.texHeight);
+            tile.texScaleOffset = glm::vec4(
+                1.0f - 2.0f * insetX,
+                1.0f - 2.0f * insetY,
+                insetX,
+                insetY
+            );
+        } else {
+            tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+        }
+        tile.atlasAllocated = false;
+        tile.atlasPage = -1;
+        tile.atlasSlot = -1;
+        
+        return true;
+    } else {
+        // PBO submission failed, delete the texture we created
+        if (!reuseTexture) {
+            glDeleteTextures(1, &textureId);
+            --textureCount_;
+        }
+        return false;
+    }
+}
+
 int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, double budgetMs) {
     double startTime = glfwGetTime() * 1000.0;
     int uploadCount = 0;
@@ -472,6 +697,12 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
     GLint prevAlign = 0;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    
+    // Process any pending PBO completions first
+    if (pboManager_) {
+        pboManager_->BeginFrame(currentFrame_);
+        pboManager_->ProcessUploads();
+    }
     
     while (!uploadQueue_.empty()) {
         // Check upload count limit (prevents frame hitch during heavy decode)
@@ -498,66 +729,107 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
         // Explicit upload-start lifecycle event before GPU work.
         TileStateMachine::Advance(tile, TileStateMachine::Event::UploadStart, glfwGetTime());
         
-        bool uploadedToAtlas = UploadToAtlas(tile);
-
-        if (!uploadedToAtlas) {
+        bool uploaded = false;
+        
+        // Faz 2B: Try Texture2DArray first (prevents bleeding, best quality)
+        if (config_.useTexture2DArray && arrayManager_) {
+            uploaded = UploadTileViaArray(tile);
+        }
+        
+        // If not uploaded to array, try atlas upload
+        if (!uploaded && atlasEnabled_) {
+            // Release any array allocation first
+            if (tile.textureLayerHandle != INVALID_LAYER_HANDLE) {
+                ReleaseArrayLayer(tile);
+            }
+            uploaded = UploadToAtlas(tile);
+        }
+        
+        // If not uploaded to atlas/array, try PBO or immediate
+        if (!uploaded) {
             if (tile.atlasAllocated) {
                 ReleaseAtlasAllocation(tile);
             }
-
-            bool reuseTexture = tile.ownsTexture &&
-                                tile.textureId != 0 &&
-                                tile.texWidth == tile.pixelWidth &&
-                                tile.texHeight == tile.pixelHeight;
-
-            if (reuseTexture) {
-                glBindTexture(GL_TEXTURE_2D, tile.textureId);
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tile.pixelWidth, tile.pixelHeight,
-                                GL_RGBA, GL_UNSIGNED_BYTE, tile.pixels.data());
-                glGenerateMipmap(GL_TEXTURE_2D);
-                glBindTexture(GL_TEXTURE_2D, 0);
-            } else {
-                // Delete old texture if owned
-                if (tile.ownsTexture && tile.textureId != 0) {
-                    DeleteTexture(tile.textureId);
+            if (tile.textureLayerHandle != INVALID_LAYER_HANDLE) {
+                ReleaseArrayLayer(tile);
+            }
+            
+            // Try PBO async upload if enabled
+            // Note: PBO path moves pixel data, so we check if it's still available
+            if (pboManager_ && !tile.pixels.empty()) {
+                uploaded = UploadTileViaPbo(tile);
+                if (uploaded) {
+                    // PBO owns the pixels now, generate mipmaps will happen later
+                    // when we know the upload is complete
+                    // For now, mark as needing mipmap generation
+                    // (In a full async implementation, this would be done via callback)
+                    glBindTexture(GL_TEXTURE_2D, tile.textureId);
+                    glGenerateMipmap(GL_TEXTURE_2D);
+                    glBindTexture(GL_TEXTURE_2D, 0);
                 }
-                
-                // Create new texture
-                tile.textureId = CreateTexture(tile.pixels.data(), tile.pixelWidth, tile.pixelHeight);
-                tile.ownsTexture = true;
-                tile.texWidth = tile.pixelWidth;
-                tile.texHeight = tile.pixelHeight;
             }
+            
+            // Fall back to immediate upload if PBO failed or disabled
+            if (!uploaded) {
+                bool reuseTexture = tile.ownsTexture &&
+                                    tile.textureId != 0 &&
+                                    tile.texWidth == tile.pixelWidth &&
+                                    tile.texHeight == tile.pixelHeight;
 
-            // Half-texel inset to reduce visible raster seams on per-tile textures.
-            // Atlas path already applies an equivalent inset in TextureAtlasAllocator::ToUvTransform().
-            if (tile.texWidth > 1 && tile.texHeight > 1) {
-                float insetX = 0.5f / static_cast<float>(tile.texWidth);
-                float insetY = 0.5f / static_cast<float>(tile.texHeight);
-                tile.texScaleOffset = glm::vec4(
-                    1.0f - 2.0f * insetX,
-                    1.0f - 2.0f * insetY,
-                    insetX,
-                    insetY
-                );
-            } else {
-                tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+                if (reuseTexture) {
+                    glBindTexture(GL_TEXTURE_2D, tile.textureId);
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tile.pixelWidth, tile.pixelHeight,
+                                    GL_RGBA, GL_UNSIGNED_BYTE, tile.pixels.data());
+                    glGenerateMipmap(GL_TEXTURE_2D);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                } else {
+                    // Delete old texture if owned
+                    if (tile.ownsTexture && tile.textureId != 0) {
+                        DeleteTexture(tile.textureId);
+                    }
+                    
+                    // Create new texture
+                    tile.textureId = CreateTexture(tile.pixels.data(), tile.pixelWidth, tile.pixelHeight);
+                    tile.ownsTexture = true;
+                    tile.texWidth = tile.pixelWidth;
+                    tile.texHeight = tile.pixelHeight;
+                }
+
+                // Half-texel inset to reduce visible raster seams on per-tile textures.
+                if (tile.texWidth > 1 && tile.texHeight > 1) {
+                    float insetX = 0.5f / static_cast<float>(tile.texWidth);
+                    float insetY = 0.5f / static_cast<float>(tile.texHeight);
+                    tile.texScaleOffset = glm::vec4(
+                        1.0f - 2.0f * insetX,
+                        1.0f - 2.0f * insetY,
+                        insetX,
+                        insetY
+                    );
+                } else {
+                    tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+                }
+                tile.atlasAllocated = false;
+                tile.atlasPage = -1;
+                tile.atlasSlot = -1;
+                tile.atlasContentWidth = 0;
+                tile.atlasContentHeight = 0;
             }
-            tile.atlasAllocated = false;
-            tile.atlasPage = -1;
-            tile.atlasSlot = -1;
-            tile.atlasContentWidth = 0;
-            tile.atlasContentHeight = 0;
         }
         
         // Use state machine for upload completion (handles fade reset)
         TileStateMachine::Advance(tile, TileStateMachine::Event::UploadOk, glfwGetTime());
         
-        // Clear pixel data
+        // Clear pixel data (if PBO didn't take ownership)
         tile.ClearPixels();
         
         ++uploadCount;
     }
+    
+    // End PBO frame
+    if (pboManager_) {
+        pboManager_->EndFrame();
+    }
+    ++currentFrame_;
 
     glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
 

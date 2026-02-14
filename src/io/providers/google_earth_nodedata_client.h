@@ -41,12 +41,19 @@ public:
     // Fetch NodeData for a given node key (quadkey string)
     // This is a synchronous blocking call - caller should run in worker thread
     NodeDataResult FetchNodeData(const std::string& nodeKey);
-    
+
+    // Set epoch dynamically (from PlanetoidMetadata via octree index)
+    void SetEpoch(const std::string& epoch) { epoch_ = epoch; }
+
+    // Get current epoch
+    const std::string& GetEpoch() const { return epoch_; }
+
     // Check if client is properly configured
     bool IsEnabled() const { return !endpointTemplate_.empty(); }
     
 private:
     std::string endpointTemplate_;
+    std::string epoch_;  // Dynamic epoch (from PlanetoidMetadata)
     std::vector<std::pair<std::string, std::string>> headers_;
     std::string authToken_;
     std::unique_ptr<IHttpTransport> transport_;

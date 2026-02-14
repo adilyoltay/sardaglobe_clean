@@ -57,12 +57,12 @@ struct Config {
     std::string demAuth;
     
     // Google Earth provider configuration (only used when demProvider="google-earth")
-    std::string geElevationEndpoint;                          // Elevation service endpoint (empty = GE disabled)
-    std::string geMeshEndpoint;                               // Mesh/NodeData endpoint (Phase 5)
+    std::string geElevationEndpoint = "https://earth-pa.clients6.google.com/v1/earth/elevation?alt=proto&key=AIzaSyD8Ja5AIIiHVmgDANhp5ygOAkbIi2hBZ5A"; // Default GE elevation endpoint
+    std::string geMeshEndpoint = "https://kh.google.com/rt/earth/NodeData/pb=!1m2!1s{quadkey}!2u{epoch}!2e1!3u1031!4b0"; // Default GE NodeData endpoint (dynamic epoch)
     std::vector<std::pair<std::string, std::string>> geHeaders; // GE-only headers (allowlisted)
     std::string geTokenEnv = "NATIVE_GLOBE_GE_TOKEN";         // Env var for auth token
-    int geElevationType = 0;                                  // 0=ELLIPSOID, 1=TERRAIN, 2=SEA_LEVEL
-    std::string geEpoch = "latest";                           // Dataset epoch
+    int geElevationType = 1;                                  // 0=ELLIPSOID, 1=TERRAIN (GE Default), 2=SEA_LEVEL
+    std::string geEpoch = "";                                  // Dataset epoch (auto-detected from PlanetoidMetadata)
     std::string geChannel = "default";                        // Service channel
     
     // Phase 5 Sprint 1: RockTree/NodeData mesh (single quadkey mode)
@@ -87,6 +87,13 @@ struct Config {
     long geMeshTcpKeepAliveSec = 30;                          // TCP keep-alive interval
     long geMeshTcpKeepAliveIdleSec = 15;                      // TCP keep-alive idle time
     bool geMeshEnableConnectionReuse = true;                  // Enable connection reuse
+
+    // Octree discovery configuration
+    std::string geBulkMetadataEndpoint = "https://kh.google.com/rt/earth/BulkMetadata/pb=!1m2!1s{path}!2u{epoch}";
+    std::string gePlanetoidMetadataUrl = "https://kh.google.com/rt/earth/PlanetoidMetadata";
+    int geRateLimitMs = 250;                                  // Min interval between GE requests (ms)
+    bool geOctreeEnabled = true;                              // Enable octree discovery (vs legacy quadkey)
+    int geBulkMetadataMaxPending = 4;                         // Max concurrent BulkMetadata fetches
     
     bool geMeshEnabled() const { 
         // Sprint 2: requires endpoint with {quadkey} placeholder
@@ -142,6 +149,7 @@ struct Config {
     bool is2D = false;
     bool logDepthEnabled = true;    // Log-depth precision path (P1.4)
     bool reversedZEnabled = false;  // Reversed-Z precision path (P1.4 alternative)
+    bool useRteRender = true;       // RTE/RTC relative-to-center rendering (jitter fix)
     bool requestDrivenFrame = true; // Event/dirty-driven frame loop (P2.2)
     bool textureAtlasEnabled = false; // Shared color atlas path (P3.2) - disabled by default for stability
     bool selectiveSkirts = true;    // Enable selective skirt generation per edge mask
@@ -153,11 +161,35 @@ struct Config {
     bool atlasEdgeDilate = true;     // Dilate border texels into gutter on upload
     bool textureAtlasMipmaps = false; // Optional atlas mip generation (costly per upload)
     
+    // Faz 2A: PBO async texture upload (renamed for consistency: usePboUploads)
+    bool usePboUploads = true;      // Enable async PBO texture upload (reduces stutter)
+    int pboUploadCount = 8;         // Number of PBOs in ring buffer
+    size_t pboUploadSize = 4 * 1024 * 1024; // Default PBO buffer size (4MB)
+    
+    // Faz 2B: Texture2DArray (layer-based texture storage)
+    bool useTexture2DArray = false; // Enable Texture2DArray (prevents bleeding, default false for safe rollout)
+    
+    // Faz 3: Performance optimizations
+    // Horizon Culling
+    bool useHorizonCulling = true;           // Enable horizon culling (default true)
+    double horizonCullingSafetyMargin = 0.01; // Safety margin in radians (0.01 ~ 0.57 degrees)
+    bool horizonCullingDebug = false;        // Visualize culled tiles for debugging
+    
+    // Weighted Scheduler
+    bool useWeightedScheduler = true;        // Enable weighted tile scheduling
+    float schedulerAgingHalfLifeMs = 5000.0f; // Aging half-life in milliseconds
+    bool schedulerUseAging = true;           // Enable aging factor in priority
+    
+    // Adaptive LOD
+    bool useAdaptiveLod = true;              // Enable adaptive LOD based on terrain variance
+    float lodVarianceThreshold = 100.0f;     // Height variance threshold for LOD adjustment
+    int lodHysteresisFrames = 3;             // Frames to wait before LOD change
+    
     // DEM/Terrain settings
     // Default: MapTiler Terrain-RGB v2 tiles (Mapbox Terrain-RGB encoding).
-    std::string demBaseUrl = "https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key=YGPXGCyXf6kh5TO9dJ7l";
+    std::string demBaseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw?access_token=YOUR_MAPBOX_TOKEN";
     // DEM Provider: terrain-rgb (default, public) | google-earth (internal, requires auth)
-    std::string demProvider = "terrain-rgb";
+    std::string demProvider = "terrain-rgb";  // earth-pa.clients6.google.com blocked for native clients
     int demMaxZoom = 15;               // Clamp DEM requests above provider max zoom
     int demMeshN = 17;                // Grid resolution per tile (17x17 = 289 samples, GE parity)
                                       // Old: 5x5 = 25 samples (blocky terrain)

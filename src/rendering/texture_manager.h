@@ -3,6 +3,8 @@
 #include "../core/tile.h"
 #include "../core/config.h"
 #include "texture_atlas_allocator.h"
+#include "pbo_upload_manager.h"
+#include "texture_array_manager.h"
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -109,6 +111,21 @@ private:
     
     // Eviction callback (for heightmap cleanup)
     TileEvictionCallback evictionCallback_;
+    
+    // Faz 2A: PBO async upload
+    std::unique_ptr<PboUploadManager> pboManager_;
+    uint64_t currentFrame_ = 0;
+    
+    void InitializePboManager();
+    bool UploadTileViaPbo(Tile& tile);
+    void ProcessPboUploads();
+    
+    // Faz 2B: Texture2DArray support
+    std::unique_ptr<TextureArrayManager> arrayManager_;
+    
+    void InitializeArrayManager();
+    bool UploadTileViaArray(Tile& tile);
+    void ReleaseArrayLayer(Tile& tile);
 };
 
 } // namespace globe

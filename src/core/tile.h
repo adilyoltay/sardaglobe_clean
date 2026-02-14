@@ -40,6 +40,11 @@ struct Tile {
     float boundingRadius = 0.0f;   // Bounding sphere radius
     float angularRadius = 0.0f;    // Angular extent (radians)
     
+    // RTE/RTC (Relative-to-Center) origin for jitter-free rendering
+    // Double-precision origin split into high/low for GPU double emulation
+    glm::vec3 originEcefHi{0.0f};  // High 16 bits of tile origin
+    glm::vec3 originEcefLo{0.0f};  // Low 16 bits of tile origin
+    
     // Compute extent from tile key
     void ComputeExtent() {
         extent = Extent::FromTileWGS84(key.x, key.y, key.level);
@@ -56,6 +61,11 @@ struct Tile {
     int atlasSlot = -1;            // Atlas slot index (if atlasAllocated)
     int atlasContentWidth = 0;     // Uploaded source width inside atlas slot
     int atlasContentHeight = 0;    // Uploaded source height inside atlas slot
+    
+    // Faz 2B: Texture2DArray layer storage (prevents bleeding)
+    int textureLayerHandle = -1;   // Layer handle in TextureArrayManager (-1 = not in array)
+    int textureArrayLayer = -1;    // Actual layer index in GL texture array (-1 = not set)
+    int textureArrayTier = -1;     // Tier ID for array lookup (-1 = not in array)
     
     // Decoded data (temporary, cleared after upload)
     std::vector<uint8_t> pixels;

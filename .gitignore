@@ -1,5 +1,11 @@
 # Build artifacts
 build/
+build_test/
+build_networktests/
+build_octree/
+build_review/
+build_review2/
+build_test_compile/
 cmake-build-*/
 
 # Runtime caches
@@ -8,9 +14,14 @@ tile_cache/
 # IDE
 .vscode/
 .idea/
+.claude/
+.minimax/
 *.swp
 *.swo
 *~
+
+# Temp paste files
+pasted-text-*.txt
 
 # macOS
 .DS_Store

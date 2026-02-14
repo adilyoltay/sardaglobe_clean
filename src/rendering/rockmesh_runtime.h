@@ -4,6 +4,7 @@
 #pragma once
 
 #include <glad/glad.h>
+#include <glm/glm.hpp>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -16,6 +17,7 @@ struct RockMeshCpu {
     std::string id;  // nodeKey
     
     // Vertices: stride 9 floats (pos3, normal3, uv2, heightKm=0)
+    // NOTE: pos is relative to originEcef (RTE/RTC for jitter-free rendering)
     std::vector<float> vertices;
     std::vector<uint32_t> indices;
     
@@ -24,6 +26,11 @@ struct RockMeshCpu {
     int texWidth = 0;
     int texHeight = 0;
     bool hasTexture = false;
+    
+    // RTE/RTC origin for jitter-free rendering
+    // Double-precision origin split into high/low for GPU double emulation
+    glm::vec3 originEcefHi{0.0f};  // High 16 bits of mesh origin
+    glm::vec3 originEcefLo{0.0f};  // Low 16 bits of mesh origin
     
     // Metadata
     int triangleCount = 0;
@@ -42,6 +49,10 @@ struct RockMeshGpu {
     uint32_t indexCount = 0;
     std::string id;
     bool valid = false;
+    
+    // RTE/RTC origin for jitter-free rendering (copied from RockMeshCpu)
+    glm::vec3 originEcefHi{0.0f};
+    glm::vec3 originEcefLo{0.0f};
     
     // Create from CPU data (main thread, GL context active)
     // Uses fallbackTexture if cpu.hasTexture is false

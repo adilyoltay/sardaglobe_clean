@@ -31,6 +31,15 @@ LodSelection LodSelector::Select(
     float horizonRadius = static_cast<float>(EARTH_RADIUS_KM) * HORIZON_OCCLUDER_SHRINK;
     horizon_.Update(cameraPos, horizonRadius);
     
+    // Faz 3A: Apply safety margin from settings
+    if (settings.useHorizonCulling) {
+        // Convert radian safety margin to a factor for cosine threshold
+        // Small positive margin = more conservative (keep more tiles)
+        // We use a simplified approximation: factor = 1 + margin/10
+        float safetyFactor = 1.0f + settings.horizonSafetyMarginRad * 10.0f;
+        horizon_.SetSafetyMargin(safetyFactor);
+    }
+    
     // Use FOV directly from camera (CRITICAL FIX: don't extract from MVP)
     // MVP = proj * view, so view matrix contaminates FOV extraction
     fovDegrees_ = fovDegrees;
@@ -118,10 +127,10 @@ bool LodSelector::IsTileVisible(
     
     // Horizon culling (bypass at high tilt - 45° threshold for better oblique coverage)
     constexpr float HORIZON_BYPASS_TILT = 45.0f;
-    if (!settings.disableHorizonCull && tiltDegrees_ < HORIZON_BYPASS_TILT) {
+    if (settings.useHorizonCulling && !settings.disableHorizonCull && tiltDegrees_ < HORIZON_BYPASS_TILT) {
         // Slightly inflate bounds for horizon test: horizon false-negatives are the
         // primary source of low-LOD missing-tile rectangles in practice.
-        float horizonRadius = conservativeRadius * 1.15f;
+        float horizonRadius = conservativeRadius * settings.horizonNearHorizonInflation;
         if (!horizon_.IsSphereVisible(center, horizonRadius)) {
             return false;
         }
