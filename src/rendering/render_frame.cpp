@@ -30,10 +30,11 @@ Tile* RenderFrame::FindRenderableAncestor(const TileKey& key,
         auto it = tiles.find(parentKey);
         if (it != tiles.end()) {
             Tile& tile = it->second;
+            const bool hasSurfaceGeometry = tile.hasMesh && tile.surfaceVertexCount > 0;
             const bool hasTexture = tile.textureId != 0 &&
                                     (allowPlaceholder || tile.textureId != loadingTexture) &&
                                     !tile.mostlyBlackOpaqueRaster;
-            if (tile.hasMesh && hasTexture) {
+            if (hasSurfaceGeometry && hasTexture) {
                 return &tile;
             }
         }
@@ -59,6 +60,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     HeightmapManager* heightmapManager,
     DemManager* demManager,
     bool useRte,
+    bool fallbackRequireParentUntilChildrenReady,
     bool useTextureArray
 ) {
     TileDrawStats stats;
@@ -72,7 +74,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         Tile* unpopAncestor = nullptr;     // Used in shader-level crossfade
         glm::vec4 unpopUvTransform{1.0f};  // scale.xy + offset.zw
         int unpopTextureLayer = -1;
-        bool unpopUsesArray = false;
+        bool unpopTextureTargetIsArray = false;
         bool useShaderCrossfade = false;
     };
     
@@ -112,10 +114,11 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             auto it = tiles.find(parentKey);
             if (it != tiles.end()) {
                 Tile& tile = it->second;
+                const bool hasSurfaceGeometry = tile.hasMesh && tile.surfaceVertexCount > 0;
                 const bool hasTexture = tile.textureId != 0 &&
                                         (allowPlaceholder || tile.textureId != loadingTexture) &&
                                         !tile.mostlyBlackOpaqueRaster;
-                if (tile.hasMesh && hasTexture) {
+                if (hasSurfaceGeometry && hasTexture) {
                     bool hasTerrain = heightmapManager ? hasAnyHeightmap(parentKey) : tile.demUsed;
                     if (!hasTerrain) {
                         const bool terrainExpected = tile.demPending || hasAnyDemCoverage(parentKey);
@@ -139,6 +142,10 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
 
     auto addFallbackAncestor = [&](const TileKey& key) -> bool {
         Tile* ancestor = nullptr;
+
+        if (!fallbackRequireParentUntilChildrenReady) {
+            return false;
+        }
 
         // When terrain is required, prefer an ancestor that also has terrain data.
         // Rendering a displaced child against a flat ancestor is the primary source of
@@ -194,7 +201,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 }
             }
         }
-        bool isRenderable = tile.hasMesh && hasRealTexture && hasRequiredTerrain;
+        bool isRenderable = tile.hasMesh && tile.surfaceVertexCount > 0 && hasRealTexture && hasRequiredTerrain;
         
         if (isRenderable) {
             // Leaf is renderable - render with fade
@@ -232,7 +239,9 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                     glm::vec4 relativeUnpopUv = ComputeUnpopUvTransform(tile.key, ancestor->key);
                     leaf.unpopUvTransform = ComposeUvTransform(ancestor->texScaleOffset, relativeUnpopUv);
                     leaf.unpopTextureLayer = ancestor->textureArrayLayer;
-                    leaf.unpopUsesArray = useTextureArray && ancestor->textureArrayLayer >= 0;
+                    leaf.unpopTextureTargetIsArray = useTextureArray &&
+                                                      ancestor->usesTextureArray &&
+                                                      ancestor->textureArrayLayer >= 0;
                 } else {
                     // No parent available -> avoid temporary transparency holes.
                     leaf.alpha = 1.0f;
@@ -250,7 +259,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             ++stats.renderableLeaves;
         } else {
             // Leaf not renderable - categorize and find fallback
-            if (!tile.hasMesh) {
+            if (!tile.hasMesh || tile.surfaceVertexCount == 0) {
                 ++stats.leafNoMesh;
             } else if (!hasRealTexture) {
                 ++stats.leafNoTexture;  // Has mesh but no real texture (or loading placeholder only)
@@ -430,7 +439,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 *leaf.tile,
                 leaf.unpopAncestor->textureId,
                 leaf.unpopTextureLayer,
-                leaf.unpopUsesArray,
+                leaf.unpopTextureTargetIsArray,
                 leaf.unpopUvTransform,
                 leaf.alpha,
                 hasHeightmap ? hmTex.textureId : 0,

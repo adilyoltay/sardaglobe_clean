@@ -20,6 +20,10 @@ struct TerrainRGBConfig {
     int meshN = 17;                        // Grid resolution per tile
     int maxZoom = 15;                      // Max zoom level for requests
     bool debug = false;
+    // DEM no-data sanitization (mirrors Config defaults)
+    float demNoDataMinHeightM = -11000.0f;
+    float demNoDataReplacementM = 0.0f;
+    bool forceClampTerrainNoData = true;
 };
 
 // Terrain-RGB tile provider implementation.

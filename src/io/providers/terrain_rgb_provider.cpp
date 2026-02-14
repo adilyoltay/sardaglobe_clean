@@ -1,5 +1,6 @@
 #include "terrain_rgb_provider.h"
 #include "../terrain_rgb_decoder.h"
+#include "../../core/config.h"
 #include "../../debug/network_panel.h"
 #include <curl/curl.h>
 #include <algorithm>
@@ -147,12 +148,18 @@ bool TerrainRGBProvider::HttpFetch(const std::string& url, std::vector<uint8_t>&
 
 bool TerrainRGBProvider::DecodeTile(const std::vector<uint8_t>& pngData, DemGridData& outData) {
     std::string decodeError;
+    // Build a minimal Config to pass no-data sanitization parameters to the decoder.
+    Config sanitizeConfig;
+    sanitizeConfig.demNoDataMinHeightM = config_.demNoDataMinHeightM;
+    sanitizeConfig.demNoDataReplacementM = config_.demNoDataReplacementM;
+    sanitizeConfig.forceClampTerrainNoData = config_.forceClampTerrainNoData;
     return DecodeTerrainRGBFromImage(
-        pngData, 
-        std::max(2, config_.meshN), 
-        TerrainRGBEncoding::Mapbox, 
-        outData, 
-        &decodeError);
+        pngData,
+        std::max(2, config_.meshN),
+        TerrainRGBEncoding::Mapbox,
+        outData,
+        &decodeError,
+        &sanitizeConfig);
 }
 
 bool TerrainRGBProvider::FetchDemTile(const TileKey& key, DemGridData& outData, 

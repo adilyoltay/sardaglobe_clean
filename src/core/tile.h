@@ -66,6 +66,7 @@ struct Tile {
     int textureLayerHandle = -1;   // Layer handle in TextureArrayManager (-1 = not in array)
     int textureArrayLayer = -1;    // Actual layer index in GL texture array (-1 = not set)
     int textureArrayTier = -1;     // Tier ID for array lookup (-1 = not in array)
+    bool usesTextureArray = false; // True when textureId is sourced from GL_TEXTURE_2D_ARRAY
     
     // Decoded data (temporary, cleared after upload)
     std::vector<uint8_t> pixels;
@@ -81,6 +82,7 @@ struct Tile {
     uint32_t indexCount = 0;
     uint32_t mainIndexCount = 0;
     uint32_t skirtIndexCount = 0;
+    uint32_t surfaceVertexCount = 0;  // Surface vertices (skirt excluded) for culling bounds
     bool hasMesh = false;
     bool ownsEBO = true;
     bool meshPending = false;

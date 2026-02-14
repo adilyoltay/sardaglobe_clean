@@ -251,6 +251,38 @@ target_include_directories(tile_fade_test PRIVATE
 target_link_libraries(tile_fade_test PRIVATE glm::glm)
 add_test(NAME TileFadeTest COMMAND tile_fade_test)
 
+# Terrain RGB Decoder No-Data Clamp Test (GE Parity Stabilization Aşama 1.1)
+add_executable(terrain_rgb_decoder_nodata_test
+  tests/terrain_rgb_decoder_nodata_test.cpp
+)
+target_include_directories(terrain_rgb_decoder_nodata_test PRIVATE
+  src
+)
+target_link_libraries(terrain_rgb_decoder_nodata_test PRIVATE glm::glm)
+add_test(NAME TerrainRGBDecoderNoDataTest COMMAND terrain_rgb_decoder_nodata_test)
+
+# Tile State Fallback Stability Test (GE Parity Stabilization Aşama 3.3)
+add_executable(tile_state_fallback_stability_test
+  tests/tile_state_fallback_stability_test.cpp
+  src/scheduling/tile_state_machine.cpp
+)
+target_include_directories(tile_state_fallback_stability_test PRIVATE
+  src
+)
+target_link_libraries(tile_state_fallback_stability_test PRIVATE glm::glm)
+add_test(NAME TileStateFallbackStabilityTest COMMAND tile_state_fallback_stability_test)
+
+# Pipeline Integration Smoke Test (GE Parity Stabilization Aşama 4.2)
+add_executable(pipeline_integration_smoke_test
+  tests/pipeline_integration_smoke_test.cpp
+  src/scheduling/tile_state_machine.cpp
+)
+target_include_directories(pipeline_integration_smoke_test PRIVATE
+  src
+)
+target_link_libraries(pipeline_integration_smoke_test PRIVATE glm::glm)
+add_test(NAME PipelineIntegrationSmokeTest COMMAND pipeline_integration_smoke_test)
+
 # Corner LOD mapping test (uCornerLods helpers)
 add_executable(corner_lod_test
   tests/corner_lod_test.cpp

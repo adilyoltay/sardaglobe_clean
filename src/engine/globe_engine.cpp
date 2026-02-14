@@ -165,6 +165,9 @@ bool GlobeEngine::Init() {
         demConfig.maxZoom = config_.demMaxZoom;
         demConfig.cacheSize = config_.demCacheSize;
         demConfig.debug = config_.demDebug;
+        demConfig.demNoDataMinHeightM = config_.demNoDataMinHeightM;
+        demConfig.demNoDataReplacementM = config_.demNoDataReplacementM;
+        demConfig.forceClampTerrainNoData = config_.forceClampTerrainNoData;
         demConfig.timeoutSec = 30;
         demConfig.connectTimeoutSec = 10;
         // Wire GE config fields
@@ -2179,6 +2182,7 @@ void GlobeEngine::Render() {
         hmForRender,
         demManager_.get(),
         config_.useRteRender,
+        config_.fallbackRequireParentUntilChildrenReady,
         config_.useTexture2DArray  // Faz 2B: Texture array support
     );
     const auto& renderStats = tileRenderer_->GetStats();

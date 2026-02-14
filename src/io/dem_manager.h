@@ -95,6 +95,11 @@ struct DemManagerConfig {
     double heightScale = 0.001;       // Meters to world units (km)
     bool debug = false;
     
+    // DEM no-data sanitization
+    float demNoDataMinHeightM = -11000.0f;
+    float demNoDataReplacementM = 0.0f;
+    bool forceClampTerrainNoData = true;
+
     // Network settings (consolidated)
     long timeoutSec = 30;             // CURL total timeout
     long connectTimeoutSec = 10;      // CURL connect timeout

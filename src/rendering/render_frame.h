@@ -46,6 +46,7 @@ public:
         HeightmapManager* heightmapManager = nullptr,  // Optional: GPU terrain displacement
         DemManager* demManager = nullptr,              // Optional: DEM coverage for terrain gating
         bool useRte = true,                            // RTE/RTC jitter-free rendering
+        bool fallbackRequireParentUntilChildrenReady = true, // Parent fallback control
         bool useTextureArray = false                   // Faz 2B: Use GL_TEXTURE_2D_ARRAY
     );
 

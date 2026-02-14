@@ -700,6 +700,9 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         result.mainIndexCount = static_cast<uint32_t>(result.indices.size());
     }
     
+    // Record surface vertex count before skirts are appended (for culling bounds)
+    result.surfaceVertexCount = static_cast<uint32_t>(result.vertices.size() / kVertexStrideFloats);
+
     // Generate skirts (GE-style seam hiding)
     double heightRange = result.maxHeightKm - result.minHeightKm;
     uint8_t effectiveSkirtMask = config.selectiveSkirts ? skirtMask : static_cast<uint8_t>(Tile::EDGE_NORTH |
@@ -751,28 +754,35 @@ void TileMeshBuilder::GenerateSkirts(
     // Calculate skirt depth based on geometric error (GE parity)
     // Tie skirt depth to geometric error for consistent gap hiding across zoom levels
     float geometricErrorM = ComputeGeometricError(level);  // meters per pixel at equator
-    
+
     // Base skirt depth: ~50 pixels worth of geometric error
     double baseSkirtDepthKm = (geometricErrorM * 50.0) * 0.001;
-    
+
     // Apply LOD-based range from config
     double minDepth = std::max(baseSkirtDepthKm, static_cast<double>(config.skirtDepthNearKm));
     double farDepth = std::max(minDepth, static_cast<double>(config.skirtDepthFarKm));
     double clampMaxDepth = std::max(farDepth, static_cast<double>(config.skirtMaxDepthKm));
-    
+
     // Interpolate based on tile arc length (zoom level)
-    double tileArcKm = 40075.0 / (1 << level);
+    // Guard against extreme level values causing integer overflow in (1 << level)
+    int clampedLevel = std::clamp(level, 0, 24);
+    double tileArcKm = 40075.0 / static_cast<double>(1 << clampedLevel);
     double lodT = std::clamp(tileArcKm / 2500.0, 0.0, 1.0);
     double skirtDepth = minDepth + (farDepth - minDepth) * lodT;
-    
-    // Terrain-aware: scale by height range for mountain regions
-    if (heightRange > 0.0) {
-        // Keep skirts proportional to relief, but avoid excessive "wall" silhouettes.
-        skirtDepth = std::max(skirtDepth, heightRange * 0.15);
+
+    // Terrain-aware: scale by height range for mountain regions.
+    // Clamp heightRange to sane bounds to prevent absurd skirt walls from spike vertices.
+    double safeHeightRange = std::clamp(heightRange, 0.0, 20.0);  // max ~20 km (Everest exaggerated)
+    if (safeHeightRange > 0.0) {
+        skirtDepth = std::max(skirtDepth, safeHeightRange * 0.15);
     }
-    
+
     // Final clamp within configured bounds
     skirtDepth = std::clamp(skirtDepth, static_cast<double>(config.skirtMinDepthKm), clampMaxDepth);
+    // Ensure skirt depth is finite
+    if (!std::isfinite(skirtDepth)) {
+        skirtDepth = static_cast<double>(config.skirtMinDepthKm);
+    }
     
     // Lambda to add a skirt vertex
     auto addSkirtVertex = [&](int mainIdx) {
@@ -785,12 +795,27 @@ void TileMeshBuilder::GenerateSkirts(
         float u = vertices[mainIdx * kVertexStrideFloats + 6];
         float v = vertices[mainIdx * kVertexStrideFloats + 7];
         float h = vertices[mainIdx * kVertexStrideFloats + 8];
-        
+
         // Push vertex inward (toward Earth center)
-        glm::vec3 pos(px, py, pz);
-        glm::vec3 radialDir = glm::normalize(pos);
-        glm::vec3 skirtPos = pos - radialDir * static_cast<float>(skirtDepth);
-        
+        // RTE: pos is relative to tileOrigin, so reconstruct world pos for radial direction.
+        glm::vec3 relPos(px, py, pz);
+        glm::vec3 worldPos = relPos + glm::vec3(tileOrigin);
+        float worldLen = glm::length(worldPos);
+        // Guard: if worldPos is degenerate (zero-length), fall back to relPos direction
+        glm::vec3 radialDir = (worldLen > 1e-6f)
+            ? (worldPos / worldLen)
+            : glm::normalize(relPos);
+        // Clamp skirt offset so it never exceeds the vertex's distance from Earth center.
+        // This prevents skirt vertices from passing through the origin for extreme heights.
+        float maxOffset = std::max(0.0f, worldLen * 0.1f);
+        float safeSkirtDepth = std::min(static_cast<float>(skirtDepth), maxOffset);
+        glm::vec3 skirtPos = relPos - radialDir * safeSkirtDepth;
+
+        // Verify skirt position is finite; fall back to surface position if not
+        if (!std::isfinite(skirtPos.x) || !std::isfinite(skirtPos.y) || !std::isfinite(skirtPos.z)) {
+            skirtPos = relPos;
+        }
+
         vertices.push_back(skirtPos.x);
         vertices.push_back(skirtPos.y);
         vertices.push_back(skirtPos.z);
@@ -953,6 +978,7 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     tile.indexCount = result.indexCount;
     tile.mainIndexCount = result.mainIndexCount;
     tile.skirtIndexCount = result.skirtIndexCount;
+    tile.surfaceVertexCount = result.surfaceVertexCount;
     tile.hasMesh = true;
     tile.demUsed = result.demUsed;
     tile.demPending = result.demPending;

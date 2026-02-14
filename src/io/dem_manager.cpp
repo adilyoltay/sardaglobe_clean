@@ -45,6 +45,9 @@ DemManager::DemManager(const Config& config) : config_(config) {
             trConfig.meshN = config_.meshN;
             trConfig.maxZoom = config_.maxZoom;
             trConfig.debug = config_.debug;
+            trConfig.demNoDataMinHeightM = config_.demNoDataMinHeightM;
+            trConfig.demNoDataReplacementM = config_.demNoDataReplacementM;
+            trConfig.forceClampTerrainNoData = config_.forceClampTerrainNoData;
             provider_ = std::make_unique<TerrainRGBProvider>(trConfig);
             break;
         }

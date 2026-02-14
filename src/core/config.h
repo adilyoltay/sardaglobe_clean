@@ -187,7 +187,7 @@ struct Config {
     
     // DEM/Terrain settings
     // Default: MapTiler Terrain-RGB v2 tiles (Mapbox Terrain-RGB encoding).
-    std::string demBaseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw?access_token=YOUR_MAPBOX_TOKEN";
+    std::string demBaseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw?access_token={MAPBOX_ACCESS_TOKEN}";
     // DEM Provider: terrain-rgb (default, public) | google-earth (internal, requires auth)
     std::string demProvider = "terrain-rgb";  // earth-pa.clients6.google.com blocked for native clients
     int demMaxZoom = 15;               // Clamp DEM requests above provider max zoom
@@ -212,10 +212,18 @@ struct Config {
     float skirtMinDepthKm = 0.05f;    // Minimum skirt depth (km)
     float skirtMaxDepthKm = 0.4f;     // Maximum skirt depth (km)
     
+    // DEM no-data / terrain sanitization
+    float demNoDataMinHeightM = -11000.0f;    // Heights below this are treated as no-data
+    float demNoDataReplacementM = 0.0f;       // Replacement height for no-data samples
+    bool forceClampTerrainNoData = true;       // Enable no-data clamping in DEM decode
+
+    // Fallback / parent retention
+    bool fallbackRequireParentUntilChildrenReady = true; // Keep parent visible until all children ready
+
     // Debug
     bool showDebugInfo = true;
     bool logNetwork = false;
-    
+
     // Debug culling toggles (for gap diagnosis)
     bool disableFrustumCull = false;   // Skip frustum culling in LOD selection
     bool disableHorizonCull = false;   // Skip horizon culling in LOD selection

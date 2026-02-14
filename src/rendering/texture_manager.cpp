@@ -115,6 +115,16 @@ bool TextureManager::UploadTileViaArray(Tile& tile) {
     if (!arrayManager_ || tile.pixels.empty()) {
         return false;
     }
+
+    if (tile.textureLayerHandle != INVALID_LAYER_HANDLE) {
+        ReleaseArrayLayer(tile);
+    } else if (tile.ownsTexture && tile.textureId != 0 && !tile.usesTextureArray) {
+        DeleteTexture(tile.textureId);
+        tile.textureId = 0;
+        tile.texWidth = 0;
+        tile.texHeight = 0;
+        tile.ownsTexture = false;
+    }
     
     // Get or create tier for this tile size
     int tierId = arrayManager_->GetOrCreateTier(tile.pixelWidth, tile.pixelHeight, true);
@@ -138,6 +148,7 @@ bool TextureManager::UploadTileViaArray(Tile& tile) {
         tile.textureLayerHandle = layerHandle;
         tile.textureArrayLayer = arrayManager_->GetLayerIndex(layerHandle);
         tile.textureArrayTier = tierId;
+        tile.usesTextureArray = true;
         
         // Set textureId to the tier's texture (for binding)
         tile.textureId = arrayManager_->GetTierTextureId(tierId);
@@ -169,6 +180,7 @@ void TextureManager::ReleaseArrayLayer(Tile& tile) {
     tile.textureLayerHandle = INVALID_LAYER_HANDLE;
     tile.textureArrayLayer = -1;
     tile.textureArrayTier = -1;
+    tile.usesTextureArray = false;
 }
 
 // PBO Upload completion callback
@@ -382,6 +394,7 @@ bool TextureManager::UploadToAtlas(Tile& tile) {
     tile.atlasSlot = allocation.slotIndex;
     tile.atlasContentWidth = allocation.width;
     tile.atlasContentHeight = allocation.height;
+    tile.usesTextureArray = false;
     return true;
 }
 
@@ -415,6 +428,7 @@ void TextureManager::ReleaseTileResources(Tile& tile) {
     tile.texScaleOffset = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
     tile.atlasContentWidth = 0;
     tile.atlasContentHeight = 0;
+    tile.usesTextureArray = false;
     // Faz 2B: Reset array fields
     tile.textureLayerHandle = INVALID_LAYER_HANDLE;
     tile.textureArrayLayer = -1;
@@ -658,6 +672,7 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
         tile.ownsTexture = true;
         tile.texWidth = tile.pixelWidth;
         tile.texHeight = tile.pixelHeight;
+        tile.usesTextureArray = false;
         
         // Half-texel inset
         if (tile.texWidth > 1 && tile.texHeight > 1) {
@@ -675,6 +690,7 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
         tile.atlasAllocated = false;
         tile.atlasPage = -1;
         tile.atlasSlot = -1;
+        tile.usesTextureArray = false;
         
         return true;
     } else {
@@ -683,6 +699,7 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
             glDeleteTextures(1, &textureId);
             --textureCount_;
         }
+        tile.usesTextureArray = false;
         return false;
     }
 }
@@ -753,6 +770,7 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
             if (tile.textureLayerHandle != INVALID_LAYER_HANDLE) {
                 ReleaseArrayLayer(tile);
             }
+            tile.usesTextureArray = false;
             
             // Try PBO async upload if enabled
             // Note: PBO path moves pixel data, so we check if it's still available
@@ -793,6 +811,7 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
                     tile.ownsTexture = true;
                     tile.texWidth = tile.pixelWidth;
                     tile.texHeight = tile.pixelHeight;
+                    tile.usesTextureArray = false;
                 }
 
                 // Half-texel inset to reduce visible raster seams on per-tile textures.

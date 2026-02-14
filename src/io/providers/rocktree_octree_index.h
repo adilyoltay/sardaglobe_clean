@@ -57,8 +57,9 @@ public:
     // Get all children paths that have data for a given parent
     std::vector<std::string> GetChildrenWithData(const std::string& parentPath) const;
 
-    // Get renderable node paths within a depth range
-    // Returns paths that have mesh data between minDepth and maxDepth
+    // Get renderable node paths within a depth range.
+    // Returns paths with mesh data in [minDepth, maxDepth], ordered
+    // deterministically by increasing depth then lexicographic path.
     std::vector<std::string> GetRenderableNodes(int minDepth, int maxDepth) const;
 
     // Request BulkMetadata fetch for a subtree prefix (async)
@@ -88,7 +89,8 @@ public:
     size_t GetMeshNodeCount() const;
 
     // Convert a TileKey-style quadkey (digits 0-3) to deterministic candidate octree paths.
-    // Returns candidate octree paths in deterministic ascending depth/lexicographic order.
+    // Returns candidate octree paths in deterministic ascending order:
+    // depth (shorter first), then lexicographic path.
     std::vector<std::string> TileQuadKeyToOctreePaths(const std::string& tileQuadKey) const;
 
 #ifdef NATIVE_GLOBE_TESTING

@@ -1,5 +1,6 @@
 #include "terrain_rgb_decoder.h"
 #include "../../third_party/stb_image.h"
+#include "../core/config.h"
 #include <algorithm>
 #include <cmath>
 
@@ -12,12 +13,28 @@ static double PixelToHeight(uint8_t r, uint8_t g, uint8_t b) {
                         static_cast<double>(b)) * 0.1;
 }
 
+// Sanitize decoded height grid: clamp no-data / NaN / Inf values.
+// Returns the number of samples that were replaced.
+static int SanitizeTerrainHeights(std::vector<double>& heights,
+                                   double minValidHeight,
+                                   double replacementHeight) {
+    int replaced = 0;
+    for (double& h : heights) {
+        if (!std::isfinite(h) || h < minValidHeight) {
+            h = replacementHeight;
+            ++replaced;
+        }
+    }
+    return replaced;
+}
+
 bool DecodeTerrainRGBFromImage(
     const std::vector<uint8_t>& imageData,
     int meshN,
     TerrainRGBEncoding encoding,
     DemGridData& outData,
-    std::string* error)
+    std::string* error,
+    const Config* config)
 {
     outData = DemGridData{};
 
@@ -58,6 +75,14 @@ bool DecodeTerrainRGBFromImage(
     }
     stbi_image_free(pixels);
 
+    // Sanitize full-resolution grid: clamp no-data / NaN / Inf before resampling
+    // to prevent toxic heights from spreading through bilinear interpolation.
+    if (config && config->forceClampTerrainNoData) {
+        SanitizeTerrainHeights(fullGrid,
+                               static_cast<double>(config->demNoDataMinHeightM),
+                               static_cast<double>(config->demNoDataReplacementM));
+    }
+
     // Bilinear resample to meshN × meshN.
     outData.meshN = meshN;
     outData.heights.resize(static_cast<size_t>(meshN) * meshN);
@@ -90,6 +115,21 @@ bool DecodeTerrainRGBFromImage(
             outData.heights[static_cast<size_t>(gy) * meshN + gx] = height;
             outData.minHeight = std::min(outData.minHeight, height);
             outData.maxHeight = std::max(outData.maxHeight, height);
+        }
+    }
+
+    // Secondary sanitization pass on the resampled grid.
+    // Bilinear interpolation at grid boundaries can re-introduce borderline values.
+    if (config && config->forceClampTerrainNoData) {
+        SanitizeTerrainHeights(outData.heights,
+                               static_cast<double>(config->demNoDataMinHeightM),
+                               static_cast<double>(config->demNoDataReplacementM));
+        // Recompute min/max after sanitization
+        outData.minHeight =  1e30;
+        outData.maxHeight = -1e30;
+        for (double h : outData.heights) {
+            outData.minHeight = std::min(outData.minHeight, h);
+            outData.maxHeight = std::max(outData.maxHeight, h);
         }
     }
 
