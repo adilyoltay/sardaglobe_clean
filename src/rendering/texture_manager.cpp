@@ -183,22 +183,31 @@ void TextureManager::ReleaseArrayLayer(Tile& tile) {
     tile.usesTextureArray = false;
 }
 
+// PBO Upload completion tracking structure
+struct PboUploadContext {
+    TileKey key;
+    uint32_t textureId;
+    bool generateMipmap;
+    double startTime;
+};
+
 // PBO Upload completion callback
-// userData is a pointer to TileKey that we allocated
+// userData is a PboUploadContext that was allocated during submission
 void OnPboUploadComplete(GLuint textureId, bool success, void* userData) {
     if (!userData) return;
     
-    // userData contains the TileKey that was uploaded
-    // In a real implementation, we'd look up the tile and update its state
-    // For now, this is a placeholder for the callback mechanism
-    TileKey* key = static_cast<TileKey*>(userData);
-    (void)key;  // Suppress unused warning
-    (void)textureId;
-    (void)success;
+    PboUploadContext* ctx = static_cast<PboUploadContext*>(userData);
     
-    // TODO: Update tile state to Ready, generate mipmaps, etc.
-    // This requires access to the tiles map which we don't have here
-    // Full implementation would use a context pointer or lambda capture
+    if (success && ctx->textureId != 0 && ctx->generateMipmap) {
+        // Generate mipmaps now that upload is complete
+        glBindTexture(GL_TEXTURE_2D, ctx->textureId);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    
+    // Clean up the context
+    delete ctx;
+    (void)textureId;  // textureId is already in ctx
 }
 
 TextureManager::~TextureManager() {
@@ -640,9 +649,17 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
         ++textureCount_;
     }
     
+    // Faz 2A Fix: Full async PBO upload with callback
+    // Create context for callback
+    PboUploadContext* ctx = new PboUploadContext{
+        tile.key,
+        textureId,
+        true,  // generateMipmap
+        glfwGetTime()
+    };
+    
     // Submit PBO upload (takes ownership of pixel data)
-    // Note: In full async mode, callback would handle completion
-    // For now, we use synchronous completion tracking via ProcessUploads
+    // Callback will handle mipmap generation and cleanup
     bool submitted = pboManager_->SubmitUploadOwned(
         textureId,
         tile.pixelWidth,
@@ -650,22 +667,15 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
         GL_RGBA,
         GL_UNSIGNED_BYTE,
         std::move(tile.pixels),  // Move pixels into request
-        nullptr,  // Callback - see note below
-        nullptr,
+        OnPboUploadComplete,     // Callback for completion
+        ctx,                     // Context with tile key
         static_cast<uint64_t>(tile.requestPriority),
-        true  // generateMipmap
+        false  // Don't generate mipmap immediately - callback will do it
     );
     
-    // IMPORTANT: With proper async, we should:
-    // 1. Store a copy of the TileKey in userData
-    // 2. Pass a callback that updates tile state on completion
-    // 3. Tile stays in Uploading state until callback fires
-    // 4. Callback then does: GenerateMipmap, ClearPixels, UploadOk transition
-    //
-    // Current simplified approach:
-    // - PBO upload happens async
-    // - But we mark tile as ready immediately (caller does GenerateMipmap)
-    // - Full async would require more complex state management
+    if (!submitted) {
+        delete ctx;  // Clean up context if submission failed
+    }
     
     if (submitted) {
         tile.textureId = textureId;

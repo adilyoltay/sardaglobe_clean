@@ -84,6 +84,7 @@ void MemoryTileCache::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     map_.clear();
     lru_.clear();
+    pinned_.clear();  // P2: Pin temizliği eklendi
     bytesUsed_ = 0;
 }
 
@@ -95,6 +96,26 @@ MemoryTileCache::Stats MemoryTileCache::GetStats() const {
     return out;
 }
 
+void MemoryTileCache::Pin(const TileKey& key, const std::string& urlTemplate) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pinned_.insert(MakeCacheKey(key, urlTemplate));  // O(1) insert
+}
+
+void MemoryTileCache::Unpin(const TileKey& key, const std::string& urlTemplate) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pinned_.erase(MakeCacheKey(key, urlTemplate));  // O(1) erase
+}
+
+void MemoryTileCache::UnpinAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pinned_.clear();
+}
+
+size_t MemoryTileCache::GetPinnedCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pinned_.size();
+}
+
 void MemoryTileCache::EvictIfNeededLocked() {
     while (map_.size() > maxEntries_ || bytesUsed_ > maxBytes_) {
         if (lru_.empty()) {
@@ -102,6 +123,21 @@ void MemoryTileCache::EvictIfNeededLocked() {
         }
 
         const CacheKey& victim = lru_.back();
+        
+        // P2: Pin'lenmiş entry'leri asla silme (O(1) lookup)
+        if (pinned_.find(victim) != pinned_.end()) {
+            // Tümü pin'liyse çık (deadlock önleme)
+            bool allPinned = std::all_of(lru_.begin(), lru_.end(),
+                [&](const CacheKey& k) { return pinned_.find(k) != pinned_.end(); });
+            if (allPinned) {
+                break;  // Hepsi pin'li, daha fazla eviction yapma
+            }
+            
+            // Sonraki victim'a geç
+            lru_.splice(lru_.begin(), lru_, std::prev(lru_.end()));
+            continue;
+        }
+        
         auto it = map_.find(victim);
         if (it == map_.end()) {
             lru_.pop_back();

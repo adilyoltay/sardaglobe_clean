@@ -97,6 +97,10 @@ public:
     // Fetch fail tracking (for debug/telemetry)
     size_t GetRecentFetchFails() const { return recentFetchFails_; }
     void ResetRecentFetchFails() { recentFetchFails_ = 0; }
+    
+    // Cache pinning: Görünür tile'ların eviction'dan korunması
+    void PinCacheEntry(const TileKey& key);
+    void UnpinAllCacheEntries();
 
 private:
     void OnFetchComplete(FetchResult result);

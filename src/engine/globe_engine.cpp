@@ -74,6 +74,23 @@ GlobeEngine::~GlobeEngine() {
 bool GlobeEngine::Init() {
     shutdown_ = false;
     glReady_ = false;
+    
+    // P1-4: Config validasyonu (çakışan ayarları düzelt)
+    config_.Validate();
+    
+    // Runtime Telemetry: Aktif config kombinasyonlarını logla
+    std::cout << "[Config] =========================================\n";
+    std::cout << "[Config] Precision Mode: " 
+              << (config_.reversedZEnabled ? "Reversed-Z" : 
+                  (config_.logDepthEnabled ? "Log-Depth" : "Standard")) << "\n";
+    if (config_.reversedZEnabled && !config_.logDepthEnabled) {
+        std::cout << "[Config]   -> LogDepth auto-disabled (mutual exclusion)\n";
+    }
+    std::cout << "[Config] RTE/RTC: " << (config_.useRteRender ? "Enabled" : "Disabled") << "\n";
+    std::cout << "[Config] Cache: Memory=" << (config_.memoryCacheMaxBytes / (1024*1024)) 
+              << "MB, Decoded=" << (config_.decodedMemoryCacheMaxBytes / (1024*1024)) << "MB\n";
+    std::cout << "[Config] Texture: " << (config_.useTexture2DArray ? "Array" : "Atlas/2D") << "\n";
+    std::cout << "[Config] =========================================\n";
 
     // Init GLFW
     if (!glfwInit()) {
@@ -245,6 +262,18 @@ bool GlobeEngine::Init() {
         // Reversed-Z: 0 = far, 1 = near, greater Z = closer
         glDepthFunc(GL_GEQUAL);
         glClearDepth(0.0f);
+        
+        // P1-3: glClipControl ile tam precision (OpenGL 4.5+)
+        #ifdef GLAD_GL_ARB_clip_control
+        if (GLAD_GL_ARB_clip_control) {
+            glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+            std::cout << "[OpenGL] glClipControl(GL_ZERO_TO_ONE) enabled for Reversed-Z\n";
+        } else {
+            std::cout << "[OpenGL] glClipControl not available (using fallback)\n";
+        }
+        #else
+        std::cout << "[OpenGL] GLAD_GL_ARB_clip_control not defined (using fallback)\n";
+        #endif
     } else {
         // Standard: 0 = near, 1 = far, smaller Z = closer
         glDepthFunc(GL_LEQUAL);
@@ -534,6 +563,20 @@ void GlobeEngine::Update(double dt, double currentTime) {
     glm::mat4 mvp = glm::mat4(mvpD);
     
     // LOD selection via TilePyramid (GE-style centralized management)
+    
+    // P2-1 Final: Elevation-aware culling callback (Himalayas, etc.)
+    // P0-2: Instance-local flag kullanımı (static yerine)
+    if (!maxHeightCallbackSet_) {
+        tilePyramid_.SetMaxHeightCallback([this](const TileKey& key) -> float {
+            auto it = tiles_.find(key);
+            if (it != tiles_.end()) {
+                return it->second.maxHeightKm;  // Tile'dan max yüksekliği al
+            }
+            return 0.0f;  // Tile bulunamazsa flat kabul et
+        });
+        maxHeightCallbackSet_ = true;
+    }
+    
     auto& lodSettings = tilePyramid_.GetSettings();
     lodSettings.minZoom = config_.minZoom;
     lodSettings.maxZoom = config_.maxZoom;
@@ -2166,6 +2209,44 @@ void GlobeEngine::Render() {
     if (!sceneSnapshot_.valid) {
         return;
     }
+    
+    // FAZ 6 KAPANIŞ: Optimize Cache Pinning
+    // Sadece görünür leaf set + required set + minimal fallback chain pin'leniyor
+    int pinnedCount = 0;
+    if (scheduler_) {
+        scheduler_->UnpinAllCacheEntries();
+        
+        // 1. Render leaf set'i pin'le (görünür tile'lar)
+        for (const TileKey& key : sceneSnapshot_.leafSet) {
+            scheduler_->PinCacheEntry(key);
+            ++pinnedCount;
+        }
+        
+        // 2. TilePyramid required set'i pin'le (yüklenmekte olanlar)
+        for (const auto& ranked : tilePyramid_.GetRankedRequired()) {
+            if (sceneSnapshot_.leafSet.count(ranked.key) == 0) {
+                scheduler_->PinCacheEntry(ranked.key);
+                ++pinnedCount;
+            }
+        }
+        
+        // 3. Minimal fallback chain (sadece render edilecek leaf'lerin parent'ları)
+        for (const TileKey& leafKey : sceneSnapshot_.leafSet) {
+            TileKey parent = leafKey;
+            int chainDepth = 0;
+            const int maxChainDepth = 3;  // Sadece 3 seviye yukarı pin'le
+            while (parent.level > 0 && chainDepth < maxChainDepth) {
+                parent = parent.Parent();
+                // Eğer henüz pin'lenmemişse pin'le
+                // (PinCacheEntry idempotent, ama sayaç için kontrol ediyoruz)
+                scheduler_->PinCacheEntry(parent);
+                ++pinnedCount;
+                ++chainDepth;
+            }
+        }
+        
+        debugStats_.pinnedTileCount = pinnedCount;
+    }
 
     // RenderScene: consume immutable snapshot produced during Update.
     const glm::mat4& mvp = sceneSnapshot_.mvp;
@@ -3033,6 +3114,8 @@ void GlobeEngine::RenderDebugPanel() {
                         debugStats_.memoryCacheWrites,
                         debugStats_.memoryCacheWriteRejects,
                         debugStats_.memoryCacheEvictions);
+            ImGui::Text("Pinned Tiles: %d", debugStats_.pinnedTileCount);
+                        debugStats_.memoryCacheEvictions);
             ImGui::Text("Disk Cache Hit/Miss: %zu / %zu",
                         debugStats_.diskCacheReadHits, debugStats_.diskCacheReadMisses);
             ImGui::Text("Disk Cache Writes/Fails: %zu / %zu",
@@ -3144,12 +3227,30 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Render Options");
             ImGui::Separator();
             ImGui::Checkbox("Wireframe Mode", &config_.wireframeMode);
-            ImGui::Checkbox("Log Depth Precision", &config_.logDepthEnabled);
-            if (ImGui::Checkbox("Reversed-Z Precision", &config_.reversedZEnabled)) {
-                if (config_.reversedZEnabled) {
-                    config_.logDepthEnabled = false;
+            
+            // P2: Depth mode toggle requires restart warning
+            static bool prevLogDepth = config_.logDepthEnabled;
+            static bool prevReversedZ = config_.reversedZEnabled;
+            
+            if (ImGui::Checkbox("Log Depth Precision", &config_.logDepthEnabled)) {
+                if (config_.logDepthEnabled != prevLogDepth) {
+                    // Toggle değişti - restart gerekli
                 }
             }
+            if (ImGui::Checkbox("Reversed-Z Precision", &config_.reversedZEnabled)) {
+                if (config_.reversedZEnabled != prevReversedZ) {
+                    if (config_.reversedZEnabled) {
+                        config_.logDepthEnabled = false;
+                    }
+                }
+            }
+            
+            // P2: Restart uyarısı (depth mode değişikliği)
+            if (config_.logDepthEnabled != prevLogDepth || config_.reversedZEnabled != prevReversedZ) {
+                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), 
+                    "⚠ Depth mode change requires restart!");
+            }
+            
             if (config_.reversedZEnabled && config_.logDepthEnabled) {
                 config_.logDepthEnabled = false;
             }

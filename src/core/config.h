@@ -106,11 +106,11 @@ struct Config {
     std::string cacheDir = "tile_cache";
     bool useDiskCache = true;
     bool useMemoryCache = true;
-    size_t memoryCacheMaxEntries = 2048;
-    size_t memoryCacheMaxBytes = 128 * 1024 * 1024; // 128 MB compressed tile bytes
+    size_t memoryCacheMaxEntries = 8192;                    // 4x artırıldı
+    size_t memoryCacheMaxBytes = 512 * 1024 * 1024;         // 512 MB (4x) compressed tile bytes
     bool useDecodedMemoryCache = true;
-    size_t decodedMemoryCacheMaxEntries = 1024;
-    size_t decodedMemoryCacheMaxBytes = 256 * 1024 * 1024; // 256 MB RGBA payload
+    size_t decodedMemoryCacheMaxEntries = 4096;             // 4x artırıldı
+    size_t decodedMemoryCacheMaxBytes = 1024 * 1024 * 1024; // 1 GB (4x) RGBA payload
     
     // Zoom limits
     int minZoom = MIN_ZOOM;
@@ -232,6 +232,15 @@ struct Config {
     
     // Quality mode (GE parity: 1.0/2.0/4.0 multipliers)
     QualityMode qualityMode = QualityMode::MEDIUM;  // Default: GE standard quality
+    
+    // P1-4: Config validasyonu - çakışan ayarları düzelt
+    void Validate() {
+        // LogDepth ve Reversed-Z aynı anda aktif olamaz!
+        if (reversedZEnabled && logDepthEnabled) {
+            logDepthEnabled = false;
+            // Log mesajı uygulama başlangıcında yazılacak
+        }
+    }
 };
 
 } // namespace globe

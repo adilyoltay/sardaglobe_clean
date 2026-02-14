@@ -104,7 +104,14 @@ bool LodSelector::IsTileVisible(
 ) const {
     // Calculate tile geometry
     glm::vec3 center = TileCenterWorld(key);
-    float radius = TileBoundingRadius(key);
+    
+    // Elevation-aware bounding radius (P2-1 final)
+    // Yüksek arazi (Himalayalar vb.) için doğru culling
+    float maxHeightKm = 0.0f;
+    if (getMaxHeight_) {
+        maxHeightKm = getMaxHeight_(key);
+    }
+    float radius = TileBoundingRadius(key, maxHeightKm, 0.4f);  // 0.4km = skirt
     
     // Conservative bounding:
     // We intentionally inflate bounds at low LODs because any false-negative cull

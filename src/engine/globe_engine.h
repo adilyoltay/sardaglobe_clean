@@ -181,6 +181,7 @@ private:
         double requestLoopMs = 0.0;
         double schedulerUpdateMs = 0.0;
         double textureUploadMs = 0.0;
+        int pinnedTileCount = 0;  // FAZ 6: Cache pinning visibility
         double meshBuildMs = 0.0;
         int tileCount = 0;
         int leafCount = 0;
@@ -318,6 +319,9 @@ private:
     bool shutdown_ = false;
     bool glfwInitialized_ = false;
     bool glReady_ = false;
+    
+    // P0-2: Instance-local callback setup flag (replaces static bool)
+    bool maxHeightCallbackSet_ = false;
 };
 
 } // namespace globe

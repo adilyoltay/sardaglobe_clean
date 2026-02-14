@@ -29,6 +29,11 @@ public:
     LodSelector::Settings& GetSettings() { return settings_; }
     const LodSelector::Settings& GetSettings() const { return settings_; }
     
+    // Elevation-aware culling callback (P2-1 final)
+    void SetMaxHeightCallback(LodSelector::GetTileMaxHeightFn callback) {
+        selector_.SetMaxHeightCallback(callback);
+    }
+    
     // Center bias weight for scoring (GE-style)
     void SetCenterBiasWeight(float w) { centerBiasWeight_ = w; }
     float GetCenterBiasWeight() const { return centerBiasWeight_; }

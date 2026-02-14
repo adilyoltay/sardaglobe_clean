@@ -66,10 +66,18 @@ public:
 
     // Render flat (no-heightmap/no-crossfade) tiles as a single instanced draw.
     // All instances must share the same textureId and mesh segment count.
+    // Faz 2B: Texture array support - if textureArrayId is provided, uses sampler2DArray
     void RenderFlatTilesInstanced(uint32_t textureId,
                                   int segments,
                                   const std::vector<FlatTileInstance>& instances);
+    
+    // Faz 2B: Texture array variant with layer indices per instance
+    void RenderFlatTilesInstancedArray(uint32_t textureArrayId,
+                                       int segments,
+                                       const std::vector<FlatTileInstance>& instances);
+    
     bool SupportsInstancedFlatPath() const { return instancedProgram_ != 0; }
+    bool SupportsInstancedArrayPath() const { return instancedArrayProgram_ != 0; }
     
     // End the batch and restore state
     void EndBatch();
@@ -123,6 +131,17 @@ private:
     int instancedUseLogDepthLoc_ = -1;
     int instancedLogDepthFarLoc_ = -1;
     std::vector<float> instancedInstanceData_;
+    
+    // Faz 2B: Texture array instancing support
+    uint32_t instancedArrayProgram_ = 0;
+    uint32_t instancedArrayVao_ = 0;
+    uint32_t instancedArrayInstanceVbo_ = 0;
+    int instancedArrayMvpLoc_ = -1;
+    int instancedArrayTextureLoc_ = -1;
+    int instancedArrayUseLogDepthLoc_ = -1;
+    int instancedArrayLogDepthFarLoc_ = -1;
+    int instancedArrayTextureLayerLoc_ = -1;
+    std::vector<float> instancedArrayInstanceData_;
 };
 
 } // namespace globe

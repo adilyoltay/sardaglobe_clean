@@ -135,6 +135,26 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     ss << "\n";
     ss << "out vec4 fragColor;\n";
     ss << "\n";
+    
+    // Faz 2B Fix: Bayer matrix for stochastic dithering during crossfade
+    // 8x8 Bayer matrix for smooth LOD transitions (GE-style)
+    ss << "const float bayer8x8[64] = float[](\n";
+    ss << "    0.0/64.0, 48.0/64.0, 12.0/64.0, 60.0/64.0, 3.0/64.0, 51.0/64.0, 15.0/64.0, 63.0/64.0,\n";
+    ss << "    32.0/64.0, 16.0/64.0, 44.0/64.0, 28.0/64.0, 35.0/64.0, 19.0/64.0, 47.0/64.0, 31.0/64.0,\n";
+    ss << "    8.0/64.0, 56.0/64.0, 4.0/64.0, 52.0/64.0, 11.0/64.0, 59.0/64.0, 7.0/64.0, 55.0/64.0,\n";
+    ss << "    40.0/64.0, 24.0/64.0, 36.0/64.0, 20.0/64.0, 43.0/64.0, 27.0/64.0, 39.0/64.0, 23.0/64.0,\n";
+    ss << "    2.0/64.0, 50.0/64.0, 14.0/64.0, 62.0/64.0, 1.0/64.0, 49.0/64.0, 13.0/64.0, 61.0/64.0,\n";
+    ss << "    34.0/64.0, 18.0/64.0, 46.0/64.0, 30.0/64.0, 33.0/64.0, 17.0/64.0, 45.0/64.0, 29.0/64.0,\n";
+    ss << "    10.0/64.0, 58.0/64.0, 6.0/64.0, 54.0/64.0, 9.0/64.0, 57.0/64.0, 5.0/64.0, 53.0/64.0,\n";
+    ss << "    42.0/64.0, 26.0/64.0, 38.0/64.0, 22.0/64.0, 41.0/64.0, 25.0/64.0, 37.0/64.0, 21.0/64.0\n";
+    ss << ");\n";
+    ss << "\n";
+    ss << "float GetBayerValue(vec2 screenPos) {\n";
+    ss << "    ivec2 pos = ivec2(mod(screenPos, 8.0));\n";
+    ss << "    return bayer8x8[pos.y * 8 + pos.x];\n";
+    ss << "}\n";
+    ss << "\n";
+    
     ss << "void main() {\n";
     
     if (useArray) {
@@ -154,7 +174,11 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
         ss << "            unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);\n";
         ss << "        }\n";
         ss << "        float blend = clamp(uUnpopBlend, 0.0, 1.0);\n";
-        ss << "        texColor = mix(unpopColor, texColor, blend);\n";
+        // Bayer dithering: stochastic crossfade for smoother transitions
+        ss << "        float bayer = GetBayerValue(gl_FragCoord.xy);\n";
+        ss << "        float ditheredBlend = blend + (bayer - 0.5) * 0.25;\n";
+        ss << "        float useChild = step(ditheredBlend, 0.5);\n";
+        ss << "        texColor = mix(unpopColor, texColor, useChild);\n";
         ss << "    }\n";
     } else {
         // Standard atlas/individual texture path
@@ -164,7 +188,11 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
         ss << "        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;\n";
         ss << "        vec4 unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);\n";
         ss << "        float blend = clamp(uUnpopBlend, 0.0, 1.0);\n";
-        ss << "        texColor = mix(unpopColor, texColor, blend);\n";
+        // Bayer dithering for non-array path too
+        ss << "        float bayer = GetBayerValue(gl_FragCoord.xy);\n";
+        ss << "        float ditheredBlend = blend + (bayer - 0.5) * 0.25;\n";
+        ss << "        float useChild = step(ditheredBlend, 0.5);\n";
+        ss << "        texColor = mix(unpopColor, texColor, useChild);\n";
         ss << "    }\n";
     }
     

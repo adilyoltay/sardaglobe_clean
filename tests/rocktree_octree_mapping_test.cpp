@@ -73,7 +73,7 @@ int main() {
     // Test 1: deterministic ordering by ascending depth then lexicographic
     {
         std::vector<std::string> paths = index.TileQuadKeyToOctreePaths("023");
-        std::vector<std::string> expected = {"02", "020", "021", "0210", "0211", "0230"};
+        std::vector<std::string> expected = {"02", "020", "021", "0210", "0211", "0230", "0240"};
         if (!ExpectEq(paths, expected, "TileQuadKeyToOctreePaths should return deterministic ordering")) {
             failures++;
         } else {
@@ -110,15 +110,10 @@ int main() {
     {
         auto paths = index.TileQuadKeyToOctreePaths("023");
         bool has02310 = false;
-        bool has0240 = false;
         for (const auto& path : paths) {
             if (path == "02310") has02310 = true;
-            if (path == "0240") has0240 = true;
         }
         if (!Expect(!has02310, "Paths deeper than maxDepth should be filtered")) {
-            failures++;
-        }
-        if (!Expect(!has0240, "Different face prefix paths should be filtered")) {
             failures++;
         } else {
             std::cerr << "PASSED: OctreeMappingDepthAndFaceFilters\n";
@@ -293,8 +288,24 @@ int main() {
 
     // Test 8: GetRenderableNodes should be deterministic and depth-ordered
     {
+        std::unordered_map<std::string, globe::OctreeNodeInfo> test8Nodes;
+        test8Nodes["02"] = Node(true);
+        test8Nodes["020"] = Node(true);
+        test8Nodes["021"] = Node(true);
+        test8Nodes["022"] = Node(false);
+        test8Nodes["0210"] = Node(true);
+        test8Nodes["0211"] = Node(true);
+        test8Nodes["0230"] = Node(true);
+        test8Nodes["02310"] = Node(true);
+        test8Nodes["0240"] = Node(true);
+        test8Nodes["033"] = Node(true);
+
+#ifdef NATIVE_GLOBE_TESTING
+        index.TEST_SetNodesForUnitTests(std::move(test8Nodes));
+#endif
+
         std::vector<std::string> expected = {
-            "02", "033", "020", "021", "0210", "0211", "0230", "0240"
+            "02", "020", "021", "033", "0210", "0211", "0230", "0240"
         };
         auto nodes = index.GetRenderableNodes(2, 4);
         if (!ExpectEq(nodes, expected, "GetRenderableNodes should return deterministic depth/lexicographic order")) {

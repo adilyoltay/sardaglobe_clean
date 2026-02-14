@@ -409,4 +409,22 @@ TileScheduler::SchedulerStats TileScheduler::GetStats() const {
     return stats;
 }
 
+void TileScheduler::PinCacheEntry(const TileKey& key) {
+    if (memoryCache_) {
+        memoryCache_->Pin(key, config_.tileUrl);
+    }
+    if (decodedCache_) {
+        decodedCache_->Pin(key, config_.tileUrl);
+    }
+}
+
+void TileScheduler::UnpinAllCacheEntries() {
+    if (memoryCache_) {
+        memoryCache_->UnpinAll();
+    }
+    if (decodedCache_) {
+        decodedCache_->UnpinAll();
+    }
+}
+
 } // namespace globe

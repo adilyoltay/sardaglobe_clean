@@ -96,6 +96,8 @@ struct Tile {
     uint8_t demSourceLevelMin = 0;
     uint8_t demSourceLevelMax = 0;
     uint16_t demMissingSamples = 0;
+    // P2-1: Max elevation for conservative bounding radius (prevents false-positive culling)
+    float maxHeightKm = 0.0f;  // Maximum terrain height in km (0 = flat/unknown)
     // DEM level requested by the engine for mesh baking (may be lower than tile level for coherence).
     uint8_t demTargetLevel = 0;
     // DEM level effectively used by the mesh builder (authoritative level chosen from cache/ancestors).

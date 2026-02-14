@@ -8,9 +8,17 @@ namespace globe {
 
 static double PixelToHeight(uint8_t r, uint8_t g, uint8_t b) {
     // Mapbox Terrain-RGB: height = -10000 + (R*65536 + G*256 + B) * 0.1
-    return -10000.0 + (static_cast<double>(r) * 65536.0 +
-                        static_cast<double>(g) * 256.0 +
-                        static_cast<double>(b)) * 0.1;
+    double height = -10000.0 + (static_cast<double>(r) * 65536.0 +
+                                 static_cast<double>(g) * 256.0 +
+                                 static_cast<double>(b)) * 0.1;
+    
+    // SERT BARİYER: Config'ten bağımsız olarak NoData/NaN/Inf değerlerini filtrele
+    // NoData sentinel: (0,0,0) => -10000.0 ve daha düşük değerler -> 0.0
+    // Yüksek uç: > 9000.0 -> 0.0 (Everest ~8848m güvenli)
+    if (!std::isfinite(height) || height <= -10000.0 || height > 9000.0) {
+        return 0.0;  // Deniz seviyesine çek
+    }
+    return height;
 }
 
 // Sanitize decoded height grid: clamp no-data / NaN / Inf values.

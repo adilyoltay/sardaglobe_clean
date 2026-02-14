@@ -248,12 +248,25 @@ in vec3 vNormal;
 in vec3 vWorldPos;
 
 uniform sampler2D uTexture;
+uniform sampler2D uPhotoTileTextureUnpop;
+uniform float uUnpopBlend;
+uniform vec4 uTexScaleOffsetMain;
+uniform vec4 uTexScaleOffsetUnpop;
+uniform int uRasterCrossfade;
 uniform float uFade;
 
 out vec4 fragColor;
 
 void main() {
-    vec4 texColor = texture(uTexture, vTexCoord);
+    vec2 uvMain = vTexCoord * uTexScaleOffsetMain.xy + uTexScaleOffsetMain.zw;
+    vec4 texColor = texture(uTexture, uvMain);
+    
+    if (uRasterCrossfade == 1) {
+        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;
+        vec4 unpopColor = texture(uPhotoTileTextureUnpop, uvUnpop);
+        float blend = clamp(uUnpopBlend, 0.0, 1.0);
+        texColor = mix(unpopColor, texColor, blend);
+    }
     
     // Simple lighting
     vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));

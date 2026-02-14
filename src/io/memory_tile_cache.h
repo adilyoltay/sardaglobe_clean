@@ -5,6 +5,7 @@
 #include <list>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>  // P2: O(1) lookup için gerekli
 #include <vector>
 #include <mutex>
 
@@ -31,8 +32,15 @@ public:
     void Clear();
 
     Stats GetStats() const;
+    
+    // Pinning API: Görünür tile'ların eviction'dan korunması için
+    void Pin(const TileKey& key, const std::string& urlTemplate);
+    void Unpin(const TileKey& key, const std::string& urlTemplate);
+    void UnpinAll();
+    size_t GetPinnedCount() const;
 
-private:
+public:
+    // CacheKey artık public - pinned set için gerekli (P2 optimizasyonu)
     struct CacheKey {
         TileKey key;
         size_t sourceHash = 0;
@@ -50,6 +58,7 @@ private:
         }
     };
 
+private:
     struct Entry {
         std::vector<uint8_t> data;
         std::list<CacheKey>::iterator lruIt;
@@ -66,7 +75,10 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<CacheKey, Entry, CacheKeyHash> map_;
     std::list<CacheKey> lru_; // front = most-recently-used
-
+    
+    // Pin'lenen entry'ler - O(1) lookup için unordered_set (P2 optimizasyonu)
+    std::unordered_set<CacheKey, CacheKeyHash> pinned_;  // O(1) lookup
+    
     Stats stats_;
 };
 

@@ -26,6 +26,10 @@ class LodSelector {
 public:
     using TileReadyFunc = std::function<bool(const TileKey&)>;
     
+    // Elevation-aware culling: Tile'den maxHeightKm değerini almak için callback
+    // Bu sayede yüksek arazi (Himalayalar vb.) için doğru culling yapılabilir
+    using GetTileMaxHeightFn = std::function<float(const TileKey&)>;
+    
     struct Settings {
         int minZoom = 0;
         int maxZoom = 22;
@@ -65,6 +69,9 @@ public:
     };
     
     LodSelector() = default;
+    
+    // Set elevation callback for elevation-aware culling (optional)
+    void SetMaxHeightCallback(GetTileMaxHeightFn callback) { getMaxHeight_ = callback; }
     
     // Perform LOD selection
     // fovDegrees should come directly from camera, NOT extracted from MVP
@@ -134,6 +141,9 @@ private:
     float fovDegrees_ = 45.0f;
     float tiltDegrees_ = 0.0f;  // For horizon culling bypass
     std::unordered_set<TileKey> previousLeafSet_;  // SSE hysteresis state
+    
+    // Elevation-aware culling callback (optional)
+    GetTileMaxHeightFn getMaxHeight_ = nullptr;
 };
 
 } // namespace globe

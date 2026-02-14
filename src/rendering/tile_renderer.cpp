@@ -172,6 +172,83 @@ void main() {
 }
 )";
 
+// Faz 2B: Texture Array variant for instanced rendering
+constexpr char kInstancedArrayVertexShader[] = R"(
+#version 330 core
+layout(location = 0) in vec2 aGridUv;
+layout(location = 1) in vec4 aExtentDeg;       // west, east, south, north
+layout(location = 2) in vec4 aTexScaleOffset;  // xy scale, zw offset
+layout(location = 3) in vec4 aInstanceData;    // x: fade, y: layer index
+
+uniform mat4 uMVP;
+uniform int uUseLogDepth;
+uniform float uLogDepthFar;
+
+out vec2 vTexCoord;
+out vec3 vNormal;
+out float vFade;
+out float vLayer;
+
+const float PI = 3.14159265358979323846;
+const float WGS84_A_KM = 6378.137;
+const float WGS84_E2 = 0.00669437999014;
+
+void main() {
+    float north = radians(aExtentDeg.w);
+    float south = radians(aExtentDeg.z);
+    float west = radians(aExtentDeg.x);
+    float east = radians(aExtentDeg.y);
+
+    float mercTop = log(tan(PI * 0.25 + north * 0.5));
+    float mercBottom = log(tan(PI * 0.25 + south * 0.5));
+    float merc = mix(mercBottom, mercTop, aGridUv.y);
+    float lat = 2.0 * atan(exp(merc)) - PI * 0.5;
+    float lon = mix(west, east, aGridUv.x);
+
+    float sinLat = sin(lat);
+    float cosLat = cos(lat);
+    float sinLon = sin(lon);
+    float cosLon = cos(lon);
+
+    float N = WGS84_A_KM / sqrt(max(1e-8, 1.0 - WGS84_E2 * sinLat * sinLat));
+    vec3 pos = vec3(
+        N * cosLat * cosLon,
+        N * cosLat * sinLon,
+        (N * (1.0 - WGS84_E2)) * sinLat
+    );
+
+    gl_Position = uMVP * vec4(pos, 1.0);
+    if (uUseLogDepth == 1) {
+        float Fcoef = 2.0 / log2(max(1.0, uLogDepthFar) + 1.0);
+        gl_Position.z = log2(max(1e-6, gl_Position.w + 1.0)) * Fcoef - 1.0;
+    }
+    vNormal = normalize(pos);
+    vTexCoord = aGridUv * aTexScaleOffset.xy + aTexScaleOffset.zw;
+    vFade = clamp(aInstanceData.x, 0.0, 1.0);
+    vLayer = aInstanceData.y;  // Pass layer index to fragment shader
+}
+)";
+
+constexpr char kInstancedArrayFragmentShader[] = R"(
+#version 330 core
+in vec2 vTexCoord;
+in vec3 vNormal;
+in float vFade;
+in float vLayer;
+
+uniform sampler2DArray uTextureArray;
+
+out vec4 fragColor;
+
+void main() {
+    vec4 texColor = texture(uTextureArray, vec3(vTexCoord, vLayer));
+    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+    float diff = max(dot(normalize(vNormal), lightDir), 0.3);
+    vec3 color = texColor.rgb * diff;
+    fragColor = vec4(color, texColor.a * vFade);
+}
+)";
+
 } // namespace
 
 TileRenderer::TileRenderer(ShaderManager& shaderManager)
@@ -217,6 +294,7 @@ uint32_t TileRenderer::LinkProgram(uint32_t vertexShader, uint32_t fragmentShade
 }
 
 bool TileRenderer::InitInstancedResources() {
+    // Standard 2D instanced shader
     uint32_t vertexShader = CompileShader(GL_VERTEX_SHADER, kInstancedFlatTileVertexShader);
     uint32_t fragmentShader = CompileShader(GL_FRAGMENT_SHADER, kInstancedFlatTileFragmentShader);
     if (vertexShader == 0 || fragmentShader == 0) {
@@ -241,6 +319,30 @@ bool TileRenderer::InitInstancedResources() {
     glGenBuffers(1, &instancedGridVbo_);
     glGenBuffers(1, &instancedGridEbo_);
     glGenBuffers(1, &instancedInstanceVbo_);
+    
+    // Faz 2B: Texture array instanced shader
+    uint32_t arrayVertShader = CompileShader(GL_VERTEX_SHADER, kInstancedArrayVertexShader);
+    uint32_t arrayFragShader = CompileShader(GL_FRAGMENT_SHADER, kInstancedArrayFragmentShader);
+    if (arrayVertShader != 0 && arrayFragShader != 0) {
+        instancedArrayProgram_ = LinkProgram(arrayVertShader, arrayFragShader);
+        glDeleteShader(arrayVertShader);
+        glDeleteShader(arrayFragShader);
+        
+        if (instancedArrayProgram_ != 0) {
+            instancedArrayMvpLoc_ = glGetUniformLocation(instancedArrayProgram_, "uMVP");
+            instancedArrayTextureLoc_ = glGetUniformLocation(instancedArrayProgram_, "uTextureArray");
+            instancedArrayUseLogDepthLoc_ = glGetUniformLocation(instancedArrayProgram_, "uUseLogDepth");
+            instancedArrayLogDepthFarLoc_ = glGetUniformLocation(instancedArrayProgram_, "uLogDepthFar");
+            instancedArrayTextureLayerLoc_ = glGetUniformLocation(instancedArrayProgram_, "uTextureLayer");
+            
+            glGenVertexArrays(1, &instancedArrayVao_);
+            glGenBuffers(1, &instancedArrayInstanceVbo_);
+        }
+    } else {
+        if (arrayVertShader != 0) glDeleteShader(arrayVertShader);
+        if (arrayFragShader != 0) glDeleteShader(arrayFragShader);
+    }
+    
     return true;
 }
 
@@ -265,6 +367,26 @@ void TileRenderer::DestroyInstancedResources() {
         glDeleteProgram(instancedProgram_);
         instancedProgram_ = 0;
     }
+    
+    // Faz 2B: Cleanup array instancing resources
+    if (instancedArrayInstanceVbo_ != 0) {
+        glDeleteBuffers(1, &instancedArrayInstanceVbo_);
+        instancedArrayInstanceVbo_ = 0;
+    }
+    if (instancedArrayVao_ != 0) {
+        glDeleteVertexArrays(1, &instancedArrayVao_);
+        instancedArrayVao_ = 0;
+    }
+    if (instancedArrayProgram_ != 0) {
+        glDeleteProgram(instancedArrayProgram_);
+        instancedArrayProgram_ = 0;
+    }
+    instancedArrayMvpLoc_ = -1;
+    instancedArrayTextureLoc_ = -1;
+    instancedArrayUseLogDepthLoc_ = -1;
+    instancedArrayLogDepthFarLoc_ = -1;
+    instancedArrayTextureLayerLoc_ = -1;
+    
     instancedSegments_ = -1;
     instancedIndexCount_ = 0;
     instancedMvpLoc_ = -1;
@@ -685,19 +807,9 @@ void TileRenderer::RenderFlatTilesInstanced(uint32_t textureId,
     if (!batchActive_ || instances.empty() || textureId == 0) {
         return;
     }
-    // Faz 2B NOTE: Instanced path currently uses legacy GL_TEXTURE_2D only.
-    // Texture array support for instanced rendering requires:
-    // 1. Separate instanced shader variant with sampler2DArray
-    // 2. Layer index per-instance (in instance data)
-    // 3. Texture array textureId (tier texture) instead of individual textures
-    // For now, when useTextureArrayBatch_=true, instanced path falls back to individual RenderTile calls.
-    if (useTextureArrayBatch_) {
-        // Fallback to individual rendering for texture array mode
-        for (const auto& instance : instances) {
-            if (instance.tile) {
-                RenderTile(*instance.tile, 1.0f);
-            }
-        }
+    // Faz 2B: When texture array batch is active, use the array instanced path
+    if (useTextureArrayBatch_ && instancedArrayProgram_ != 0) {
+        RenderFlatTilesInstancedArray(textureId, segments, instances);
         return;
     }
     if (!EnsureInstancedGrid(segments) || instancedProgram_ == 0 || instancedIndexCount_ == 0) {
@@ -769,6 +881,108 @@ void TileRenderer::RenderFlatTilesInstanced(uint32_t textureId,
     glUseProgram(static_cast<GLuint>(prevProgram));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prevTex2D));
+    glActiveTexture(static_cast<GLenum>(prevActiveTex));
+
+    stats_.tilesRendered += renderedTiles;
+    stats_.drawCalls += 1;
+    stats_.trianglesRendered += static_cast<int>((instancedIndexCount_ / 3) * renderedTiles);
+    stats_.instancedBatches += 1;
+    stats_.instancedTiles += renderedTiles;
+}
+
+// Faz 2B: Texture array instanced rendering
+void TileRenderer::RenderFlatTilesInstancedArray(uint32_t textureArrayId,
+                                                 int segments,
+                                                 const std::vector<FlatTileInstance>& instances) {
+    if (!batchActive_ || instances.empty() || textureArrayId == 0) {
+        return;
+    }
+    if (!EnsureInstancedGrid(segments) || instancedArrayProgram_ == 0 || instancedIndexCount_ == 0) {
+        return;
+    }
+
+    // extent(4) + texScaleOffset(4) + data(4: fade + layer index)
+    instancedArrayInstanceData_.clear();
+    instancedArrayInstanceData_.reserve(instances.size() * 12);
+
+    int renderedTiles = 0;
+    for (const FlatTileInstance& instance : instances) {
+        if (instance.tile == nullptr || !instance.tile->hasMesh || instance.tile->textureId == 0) {
+            continue;
+        }
+        // Only array-backed tiles can be rendered with this path
+        if (!instance.tile->usesTextureArray || instance.tile->textureArrayLayer < 0) {
+            continue;
+        }
+        Extent extent = instance.tile->extent;
+        if (extent.Width() == 0.0 || extent.Height() == 0.0) {
+            extent = Extent::FromTileWGS84(instance.tile->key.x, instance.tile->key.y, instance.tile->key.level);
+        }
+        instancedArrayInstanceData_.push_back(static_cast<float>(extent.West()));
+        instancedArrayInstanceData_.push_back(static_cast<float>(extent.East()));
+        instancedArrayInstanceData_.push_back(static_cast<float>(extent.South()));
+        instancedArrayInstanceData_.push_back(static_cast<float>(extent.North()));
+        instancedArrayInstanceData_.push_back(instance.tile->texScaleOffset.x);
+        instancedArrayInstanceData_.push_back(instance.tile->texScaleOffset.y);
+        instancedArrayInstanceData_.push_back(instance.tile->texScaleOffset.z);
+        instancedArrayInstanceData_.push_back(instance.tile->texScaleOffset.w);
+        instancedArrayInstanceData_.push_back(std::clamp(instance.fade, 0.0f, 1.0f));
+        instancedArrayInstanceData_.push_back(static_cast<float>(instance.tile->textureArrayLayer));  // Layer index
+        instancedArrayInstanceData_.push_back(0.0f);
+        instancedArrayInstanceData_.push_back(0.0f);
+        ++renderedTiles;
+    }
+
+    if (renderedTiles == 0) {
+        return;
+    }
+
+    GLint prevProgram = 0;
+    GLint prevVao = 0;
+    GLint prevActiveTex = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActiveTex);
+
+    glUseProgram(instancedArrayProgram_);
+    glUniformMatrix4fv(instancedArrayMvpLoc_, 1, GL_FALSE, glm::value_ptr(currentMvp_));
+    glUniform1i(instancedArrayTextureLoc_, 0);
+    glUniform1i(instancedArrayUseLogDepthLoc_, useLogDepthBatch_ ? 1 : 0);
+    glUniform1f(instancedArrayLogDepthFarLoc_, logDepthFarBatch_);
+
+    // Bind texture array (shared tier texture)
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, textureArrayId);
+    
+    // Use shared grid VAO/VBO from standard instanced path
+    glBindVertexArray(instancedVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, instancedArrayInstanceVbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(instancedArrayInstanceData_.size() * sizeof(float)),
+                 instancedArrayInstanceData_.data(),
+                 GL_DYNAMIC_DRAW);
+    
+    // Re-setup instance attributes for array shader
+    // extent(4) + texScaleOffset(4) + data(4) = 12 floats per instance
+    constexpr GLsizei stride = static_cast<GLsizei>(12 * sizeof(float));
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribDivisor(1, 1);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(4 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribDivisor(2, 1);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(8 * sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribDivisor(3, 1);
+    
+    glDrawElementsInstanced(GL_TRIANGLES,
+                            static_cast<GLsizei>(instancedIndexCount_),
+                            GL_UNSIGNED_INT,
+                            nullptr,
+                            renderedTiles);
+    glBindVertexArray(static_cast<GLuint>(prevVao));
+
+    glUseProgram(static_cast<GLuint>(prevProgram));
     glActiveTexture(static_cast<GLenum>(prevActiveTex));
 
     stats_.tilesRendered += renderedTiles;

@@ -94,10 +94,19 @@ inline float TileAngularRadius(const TileKey& key) {
     return maxAngle;
 }
 
-// Bounding sphere radius in world units
+// Bounding sphere radius in world units (base version - terrain elevation ignored)
 inline float TileBoundingRadius(const TileKey& key) {
     float angular = TileAngularRadius(key);
     return 2.0f * std::sin(angular * 0.5f) * static_cast<float>(EARTH_RADIUS_KM);
+}
+
+// Bounding sphere radius with elevation and skirt offset (conservative culling)
+// Use this for horizon culling of high terrain tiles (Himalayas, etc.)
+inline float TileBoundingRadius(const TileKey& key, float maxElevationKm, float skirtDepthKm = 0.4f) {
+    float angular = TileAngularRadius(key);
+    float baseRadius = 2.0f * std::sin(angular * 0.5f) * static_cast<float>(EARTH_RADIUS_KM);
+    // Add elevation and skirt depth for conservative bounding (prevents false-positive culling)
+    return baseRadius + maxElevationKm + skirtDepthKm;
 }
 
 // Geometric error for SSE calculation (meters)

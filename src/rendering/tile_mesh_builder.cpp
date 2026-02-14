@@ -772,7 +772,15 @@ void TileMeshBuilder::GenerateSkirts(
 
     // Terrain-aware: scale by height range for mountain regions.
     // Clamp heightRange to sane bounds to prevent absurd skirt walls from spike vertices.
-    double safeHeightRange = std::clamp(heightRange, 0.0, 20.0);  // max ~20 km (Everest exaggerated)
+    // GÜVENLİK: NaN/Inf ve anormal değerleri tespit et
+    double safeHeightRange = 0.0;
+    if (std::isfinite(heightRange) && heightRange >= 0.0 && heightRange <= 10.0) {
+        safeHeightRange = heightRange;  // Normal değer
+    } else {
+        // Anormal değer - flat terrain kabul et (spike önleme)
+        safeHeightRange = 0.0;
+    }
+    
     if (safeHeightRange > 0.0) {
         skirtDepth = std::max(skirtDepth, safeHeightRange * 0.15);
     }
@@ -932,6 +940,17 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     // Delete old mesh first
     DeleteMesh(tile);
     
+    // P2-1: Deterministic bounding radius calculation with elevation
+    // Base radius from tile geometry (analytical, not accumulated)
+    tile.boundingRadius = TileBoundingRadius(tile.key);
+    
+    // Add elevation and skirt depth for conservative culling of high terrain
+    // This prevents false-positive culling of high terrain tiles (Himalayas, etc.)
+    if (result.maxHeightKm > 0.0) {
+        float elevationOffset = static_cast<float>(result.maxHeightKm) + 0.4f; // 0.4km = skirt
+        tile.boundingRadius += elevationOffset;
+    }
+    
     // Copy RTE origin for jitter-free rendering
     tile.originEcefHi = result.originEcefHi;
     tile.originEcefLo = result.originEcefLo;
@@ -986,6 +1005,8 @@ void TileMeshBuilder::UploadToGPU(Tile& tile, const BuildResult& result) {
     tile.demSourceLevelMax = result.demSourceLevelMax;
     tile.demMissingSamples = result.demMissingSamples;
     tile.demEffectiveLevel = result.demEffectiveLevel;
+    // P2-1: Max height for conservative bounding radius (false-positive culling prevention)
+    tile.maxHeightKm = static_cast<float>(result.maxHeightKm);
     tile.stitchMask = result.stitchMask;
     tile.skirtMask = result.skirtMask;
     tile.edgeGapMaxM = 0.0f;

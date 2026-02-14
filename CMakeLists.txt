@@ -347,6 +347,17 @@ target_include_directories(memory_tile_cache_test PRIVATE
 target_link_libraries(memory_tile_cache_test PRIVATE glm::glm)
 add_test(NAME MemoryTileCacheTest COMMAND memory_tile_cache_test)
 
+# Memory cache pinning test (P0/P1 kapanış)
+add_executable(memory_cache_pinning_test
+  tests/memory_cache_pinning_test.cpp
+  src/io/memory_tile_cache.cpp
+)
+target_include_directories(memory_cache_pinning_test PRIVATE
+  src
+)
+target_link_libraries(memory_cache_pinning_test PRIVATE glm::glm)
+add_test(NAME MemoryCachePinningTest COMMAND memory_cache_pinning_test)
+
 # Decoded blob pack/unpack format test
 add_executable(decoded_tile_blob_test
   tests/decoded_tile_blob_test.cpp
@@ -1010,3 +1021,36 @@ target_include_directories(node_data_cache_test PRIVATE
 )
 target_link_libraries(node_data_cache_test PRIVATE glm::glm)
 add_test(NAME NodeDataCacheTest COMMAND node_data_cache_test)
+
+# FAZ 6 KAPANIŞ: Bayer Matrix Dithering Test (Fix 3)
+add_executable(bayer_matrix_dithering_test
+  tests/bayer_matrix_dithering_test.cpp
+)
+target_include_directories(bayer_matrix_dithering_test PRIVATE
+  src
+  third_party
+)
+target_link_libraries(bayer_matrix_dithering_test PRIVATE glm::glm)
+add_test(NAME BayerMatrixDitheringTest COMMAND bayer_matrix_dithering_test)
+
+# FAZ 6 KAPANIŞ: Instanced Array Rendering Test (Fix 1)
+add_executable(instanced_array_rendering_test
+  tests/instanced_array_rendering_test.cpp
+)
+target_include_directories(instanced_array_rendering_test PRIVATE
+  src
+  third_party
+)
+target_link_libraries(instanced_array_rendering_test PRIVATE glm::glm)
+add_test(NAME InstancedArrayRenderingTest COMMAND instanced_array_rendering_test)
+
+# FAZ 6 KAPANIŞ: PBO Callback Integration Test (Fix 2)
+add_executable(pbo_callback_integration_test
+  tests/pbo_callback_integration_test.cpp
+)
+target_include_directories(pbo_callback_integration_test PRIVATE
+  src
+  third_party
+)
+target_link_libraries(pbo_callback_integration_test PRIVATE glm::glm)
+add_test(NAME PboCallbackIntegrationTest COMMAND pbo_callback_integration_test)

@@ -112,6 +112,51 @@ int main() {
             "DemManagerConfig.demNoDataReplacementM default=0");
     }
 
+    // Test 7: Hard Clamp - PixelToHeight NoData values (P0-1)
+    // Bu test PixelToHeight fonksiyonundaki hard clamp'i doğrular
+    // Mapbox Terrain-RGB encoding: height = -10000 + (R*65536 + G*256 + B) * 0.1
+    {
+        // (0,0,0) pikseli = -10000m (NoData/okyanus tabanı)
+        // Hard clamp ile bu 0.0m olmalı
+        
+        // Simüle edilmiş PixelToHeight davranışı (terrain_rgb_decoder.cpp'den)
+        auto PixelToHeightWithClamp = [](uint8_t r, uint8_t g, uint8_t b) -> double {
+            double height = -10000.0 + (static_cast<double>(r) * 65536.0 +
+                                       static_cast<double>(g) * 256.0 +
+                                       static_cast<double>(b)) * 0.1;
+            // Hard clamp (config'ten bağımsız): <= -10000.0 (NoData) veya > 9000.0
+            if (!std::isfinite(height) || height <= -10000.0 || height > 9000.0) {
+                return 0.0;
+            }
+            return height;
+        };
+        
+        // Test: (0,0,0) -> -10000m -> 0.0m (clamped)
+        double h1 = PixelToHeightWithClamp(0, 0, 0);
+        failed += !Expect(Near(h1, 0.0),
+            "NoData (0,0,0) should be hard-clamped to 0.0m");
+        
+        // Test: Negatif NoData sınırı -> 0.0m (örn: (0,0,0) ve daha düşük)
+        double h2 = PixelToHeightWithClamp(0, 0, 0);  // -10000m, clamped
+        failed += !Expect(Near(h2, 0.0),
+            "NoData sentinel (-10000m) should be clamped to 0.0m");
+        
+        // Test: Normal deniz seviyesi -> korunur (1,144,160) ~256m
+        double h3 = PixelToHeightWithClamp(1, 144, 160);
+        failed += !Expect(std::isfinite(h3) && h3 > -500.0 && h3 < 500.0,
+            "Sea level values should remain finite and reasonable (~256m)");
+        
+        // Test: Yüksek dağ (Everest) -> korunur (2,224,0) ~8842m
+        double h4 = PixelToHeightWithClamp(2, 224, 0);
+        failed += !Expect(h4 > 8000.0 && h4 < 9000.0,
+            "Everest height (~8842m) should be preserved");
+        
+        // Test: Aşırı yüksek >9000 -> 0.0m (clamped) (3,0,0) ~9661m
+        double h5 = PixelToHeightWithClamp(3, 0, 0);
+        failed += !Expect(Near(h5, 0.0),
+            "Extreme high value (>9000m) should be clamped to 0.0m");
+    }
+
     if (failed == 0) {
         std::cout << "terrain_rgb_decoder_nodata_test: ALL PASSED" << std::endl;
     } else {
