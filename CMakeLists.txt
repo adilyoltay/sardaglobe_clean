@@ -128,6 +128,7 @@ add_executable(native_globe
   src/rendering/heightmap_manager.cpp
   src/rendering/rockmesh_manager.cpp
   src/rendering/rockmesh_runtime.cpp
+  src/io/node_data_cache.cpp
   # Core module (OpenGlobus port)
   src/core/ellipsoid.cpp
   src/core/layer_manager.cpp
@@ -784,6 +785,7 @@ add_executable(rockmesh_manager_test
   src/io/ge_mesh_url_template.cpp
   src/io/providers/http_transport.cpp
   src/io/providers/dem_fetch_result.cpp
+  src/io/node_data_cache.cpp
   src/io/stb_image_impl.c
   tests/stubs/network_panel_stub.cpp
 )
@@ -799,3 +801,24 @@ target_link_libraries(rockmesh_manager_test PRIVATE
   CURL::libcurl
 )
 add_test(NAME RockMeshManagerTest COMMAND rockmesh_manager_test)
+
+# BoundedQueue test (core data structure for RockMesh scheduling)
+add_executable(bounded_queue_test
+  tests/bounded_queue_test.cpp
+)
+target_include_directories(bounded_queue_test PRIVATE
+  src
+)
+target_link_libraries(bounded_queue_test PRIVATE glm::glm)
+add_test(NAME BoundedQueueTest COMMAND bounded_queue_test)
+
+# NodeData disk cache test (Sprint 2.2)
+add_executable(node_data_cache_test
+  tests/node_data_cache_test.cpp
+  src/io/node_data_cache.cpp
+)
+target_include_directories(node_data_cache_test PRIVATE
+  src
+)
+target_link_libraries(node_data_cache_test PRIVATE glm::glm)
+add_test(NAME NodeDataCacheTest COMMAND node_data_cache_test)

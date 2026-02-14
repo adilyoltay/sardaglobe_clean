@@ -96,6 +96,36 @@ int main() {
     }
     failed += !Expect(childPrefixOk, "Children's quadkeys should extend parent's");
 
+    // Sprint 3: CenterEcef() test
+    {
+        // Level 0: center should be (0,0,0) or near origin
+        TileKey z0(0, 0, 0);
+        glm::dvec3 center0 = z0.CenterEcef();
+        // Level 0 covers whole earth, center could be defined as (R,0,0) or similar
+        // Just verify it doesn't crash and returns finite values
+        bool center0Valid = std::isfinite(center0.x) && std::isfinite(center0.y) && std::isfinite(center0.z);
+        failed += !Expect(center0Valid, "Level 0 center should be finite");
+        
+        // Level 1: NW corner tile should be in positive X, negative Y hemisphere (roughly)
+        TileKey z1_nw(1, 0, 0);  // NW = "0"
+        glm::dvec3 center1 = z1_nw.CenterEcef();
+        bool center1Valid = std::isfinite(center1.x) && std::isfinite(center1.y) && std::isfinite(center1.z);
+        failed += !Expect(center1Valid, "Level 1 center should be finite");
+        
+        // Verify magnitude is approximately Earth radius
+        double magnitude = glm::length(center1);
+        bool radiusOk = magnitude > 6000.0 && magnitude < 7000.0;  // ~6378 km
+        failed += !Expect(radiusOk, "Center magnitude should be ~Earth radius (km)");
+        
+        // Test CenterEcefMeters() is 1000x CenterEcef()
+        glm::dvec3 centerMeters = z1_nw.CenterEcefMeters();
+        glm::dvec3 expectedMeters = center1 * 1000.0;
+        bool metersOk = glm::length(centerMeters - expectedMeters) < 0.001;
+        failed += !Expect(metersOk, "CenterEcefMeters should be 1000x CenterEcef");
+        
+        std::cout << "  CenterEcef: magnitude=" << magnitude << " km\n";
+    }
+
     if (failed == 0) {
         std::cout << "TileKeyQuadKeyTest PASSED\n";
         return 0;

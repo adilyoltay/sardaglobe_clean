@@ -23,9 +23,15 @@ GoogleEarthNodeDataClient::GoogleEarthNodeDataClient(
     }
     
     // Create default transport if not provided
+    // Sprint 3: Use HTTP/2 config from main Config
     if (ownsTransport_) {
         HttpTransportConfig httpConfig;
         httpConfig.verifySsl = true;  // Default: secure
+        httpConfig.enableHttp2 = config.geMeshEnableHttp2;
+        httpConfig.allowHttp1Fallback = config.geMeshAllowHttp1Fallback;
+        httpConfig.tcpKeepAliveSec = config.geMeshTcpKeepAliveSec;
+        httpConfig.tcpKeepAliveIdleSec = config.geMeshTcpKeepAliveIdleSec;
+        httpConfig.enableConnectionReuse = config.geMeshEnableConnectionReuse;
         transport_ = std::make_unique<CurlHttpTransport>(httpConfig);
     }
 }
@@ -97,6 +103,7 @@ NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeK
     result.bytesReceived = result.data.size();
     
     // Record completion in NetworkPanel
+    // Phase 6: Pass fromCache flag for observability
     NetworkPanel::Instance().RecordComplete(
         nodeKey, 
         RequestType::TerrainMesh,
@@ -104,7 +111,7 @@ NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeK
         result.httpCode,
         result.bytesReceived,
         elapsedMs,
-        false,  // cacheHit - NodeData doesn't use tile cache yet
+        result.fromCache,  // cacheHit from disk cache
         result.errorMessage
     );
     

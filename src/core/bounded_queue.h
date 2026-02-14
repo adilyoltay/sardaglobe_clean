@@ -27,6 +27,17 @@ public:
         notEmpty_.notify_one();
         return true;
     }
+    
+    // Non-blocking push - returns immediately with false if queue is full
+    bool TryPush(T item) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (closed_.load() || queue_.size() >= maxSize_) {
+            return false;
+        }
+        queue_.push(std::move(item));
+        notEmpty_.notify_one();
+        return true;
+    }
 
     bool TryPop(T& item) {
         std::lock_guard<std::mutex> lock(mutex_);

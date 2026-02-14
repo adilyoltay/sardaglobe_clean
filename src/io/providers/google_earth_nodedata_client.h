@@ -21,6 +21,7 @@ struct NodeDataResult {
     std::string errorMessage;
     double elapsedMs = 0.0;
     size_t bytesReceived = 0;
+    bool fromCache = false;  // Sprint 2.2: Served from disk cache
     
     bool IsTimeout() const {
         return curlResult == 28 ||  // CURLE_OPERATION_TIMEDOUT

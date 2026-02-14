@@ -15,6 +15,13 @@ struct HttpTransportConfig {
     long connectTimeoutSec = 10;
     bool verifySsl = true;      // Default: secure (MITM protection)
     bool insecureMode = false;  // For local mock/self-signed (explicit opt-in)
+    
+    // Sprint 2.2: HTTP/2 and connection reuse settings
+    bool enableHttp2 = true;           // Prefer HTTP/2 (2TLS)
+    bool allowHttp1Fallback = true;    // Allow fallback to HTTP/1.1
+    long tcpKeepAliveSec = 30;         // TCP keep-alive interval (0 = disable)
+    long tcpKeepAliveIdleSec = 15;     // TCP keep-alive idle time
+    bool enableConnectionReuse = true; // Keep connections alive for reuse
 };
 
 // HTTP response structure

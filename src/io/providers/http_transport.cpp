@@ -81,6 +81,24 @@ HttpResponse CurlHttpTransport::DoRequest(const std::string& url,
     // User agent
     curl_easy_setopt(curl, CURLOPT_USERAGENT, config_.userAgent.c_str());
     
+    // Sprint 2.2: HTTP/2 support (prefer HTTP/2 with TLS)
+    if (config_.enableHttp2) {
+        long httpVersion = config_.allowHttp1Fallback 
+            ? CURL_HTTP_VERSION_2TLS  // Try HTTP/2, fallback to HTTP/1.1
+            : CURL_HTTP_VERSION_2_0;  // Require HTTP/2
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, httpVersion);
+    }
+    
+    // Sprint 2.2: TCP keep-alive for connection reuse
+    if (config_.tcpKeepAliveSec > 0) {
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, config_.tcpKeepAliveIdleSec);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, config_.tcpKeepAliveSec);
+    }
+    
+    // Sprint 2.2: Connection reuse
+    curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, config_.enableConnectionReuse ? 0L : 1L);
+    
     // Headers
     struct curl_slist* headerList = nullptr;
     for (const auto& [key, value] : headers) {

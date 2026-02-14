@@ -1,9 +1,12 @@
 // RockMesh Manager Implementation
 // Sprint 1: Single quadkey vertical slice
 // Sprint 2: LOD-aware mesh management
+// Sprint 2.2: HTTP/2 + disk cache
 
 #include "rockmesh_manager.h"
 #include "../core/ellipsoid.h"
+#include "../io/node_data_cache.h"
+#include "../io/providers/google_earth_nodedata_client.h"
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -30,6 +33,18 @@ bool RockMeshManager::Init() {
         return false;
     }
     
+    // Sprint 2.2: Initialize disk cache if enabled
+    if (config_.useDiskCache && !config_.cacheDir.empty()) {
+        cacheDir_ = config_.cacheDir + "/ge_mesh";
+        diskCache_ = std::make_unique<NodeDataDiskCache>(cacheDir_);
+        if (!diskCache_->Init()) {
+            std::cerr << "[RockMesh] Failed to initialize disk cache at " << cacheDir_ << "\n";
+            diskCache_.reset();  // Continue without cache
+        } else {
+            std::cout << "[RockMesh] Disk cache initialized at " << cacheDir_ << "\n";
+        }
+    }
+    
     workerThread_ = std::thread(&RockMeshManager::WorkerLoop, this);
     return true;
 }
@@ -41,6 +56,19 @@ void RockMeshManager::Shutdown() {
     
     if (workerThread_.joinable()) {
         workerThread_.join();
+    }
+    
+    // Phase 6: Cleanup any remaining entries in non-terminal states
+    // to prevent visual/log artifacts during shutdown
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        for (auto& [id, entry] : entries_) {
+            if (entry.state == RockMeshState::Fetching || 
+                entry.state == RockMeshState::Queued) {
+                entry.state = RockMeshState::Failed;
+                entry.error = "Shutdown";
+            }
+        }
     }
     
     // Destroy all GPU meshes
@@ -94,12 +122,16 @@ void RockMeshManager::Request(const std::string& nodeKey) {
 }
 
 // Sprint 2: Update visible tile set and generate mesh requests
-void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleLeaves) {
+// Sprint 2.3: Added global dedupe via queuedOrPendingKeys_
+// Sprint 3: Added camera position for distance-based LOD selection
+void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleLeaves,
+                                            const glm::dvec3& cameraPosEcef) {
     uint64_t generation = currentGeneration_.load();
     std::unordered_set<std::string> visibleKeys;
     visibleKeys.reserve(visibleLeaves.size() * 2);  // Parent + self
     
     // Generate candidate keys from visible leaves plus margin
+    int childRequestsThisFrame = 0;
     for (const auto& leaf : visibleLeaves) {
         // Add the leaf itself
         visibleKeys.insert(TileKeyToNodeKey(leaf));
@@ -109,7 +141,40 @@ void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleL
             visibleKeys.insert(TileKeyToNodeKey(leaf.Parent()));
         }
         
-        // Sprint 2 TODO: Add children if camera is close (LOD selection)
+        // Sprint 3: Child-LOD proximity selection with distance check
+        // Request children for high-detail tiles near camera
+        // Phase 6: Clamp to max zoom bounds to prevent over-expansion
+        if (config_.geMeshEnableChildLod && 
+            leaf.level >= 10 &&  // Only for detailed tiles
+            leaf.level < config_.maxZoom &&  // Don't expand beyond max zoom
+            childRequestsThisFrame < config_.geMeshMaxChildRequestsPerFrame) {
+            
+            // Calculate distance from camera to tile center
+            // Phase 6 Fix: Both cameraPosEcef and CenterEcef() are in km
+            bool isNearCamera = true;  // Default to true if no camera position
+            if (cameraPosEcef != glm::dvec3(0.0)) {
+                glm::dvec3 tileCenter = leaf.CenterEcef();  // km
+                double distMeters = glm::length(tileCenter - cameraPosEcef) * 1000.0;  // km -> m
+                isNearCamera = distMeters <= config_.geMeshChildLodDistance;
+            }
+            
+            if (isNearCamera) {
+                auto children = leaf.Children();
+                for (const auto& child : children) {
+                    std::string childKey = TileKeyToNodeKey(child);
+                    if (visibleKeys.find(childKey) == visibleKeys.end()) {
+                        visibleKeys.insert(childKey);
+                        childRequestsThisFrame++;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Sprint 2.3: Update final visible mesh keys
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        visibleMeshKeys_ = visibleKeys;
     }
     
     // Mark entries not in visible set as stale
@@ -121,45 +186,57 @@ void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleL
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         std::lock_guard<std::mutex> reqLock(requestMutex_);
+        std::lock_guard<std::mutex> queuedLock(queuedMutex_);
         
         for (const auto& key : visibleKeys) {
-            // Check if already in priority queue or in-flight
-            bool alreadyPending = false;
+            // Sprint 2.3: Check global dedupe set first
+            if (queuedOrPendingKeys_.find(key) != queuedOrPendingKeys_.end()) {
+                // Already queued or in-flight - update generation
+                auto it = entries_.find(key);
+                if (it != entries_.end()) {
+                    it->second.generation = generation;
+                }
+                deduped++;
+                continue;
+            }
             
-            // Check existing entries
+            // Check existing entries for state
             auto it = entries_.find(key);
             if (it != entries_.end()) {
-                if (it->second.state == RockMeshState::Queued ||
-                    it->second.state == RockMeshState::Fetching ||
+                if (it->second.state == RockMeshState::Fetching ||
                     it->second.state == RockMeshState::Uploaded) {
                     // Update generation for existing entry
                     it->second.generation = generation;
-                    alreadyPending = true;
                     deduped++;
+                    continue;
                 }
             }
             
-            if (!alreadyPending) {
-                // Create entry first
-                if (it == entries_.end()) {
-                    RockMeshEntry entry;
-                    entry.state = RockMeshState::Queued;
-                    entry.generation = generation;
-                    entry.lastAccessTime = glfwGetTime();
-                    entry.priority = static_cast<int>(visibleLeaves.size()) - requested;  // Simple priority
-                    entries_[key] = std::move(entry);
-                    UpdateLRU(key);
-                }
-                
-                // Add to priority queue
-                MeshRequest req;
-                req.nodeKey = key;
-                req.priority = static_cast<int>(visibleLeaves.size()) - requested;  // Higher = more recent
-                req.lod = 0;  // TODO: Calculate actual LOD
-                req.generation = generation;
-                pendingRequests_.push(req);
-                requested++;
+            // Create entry if needed
+            if (it == entries_.end()) {
+                RockMeshEntry entry;
+                entry.state = RockMeshState::Queued;
+                entry.generation = generation;
+                entry.lastAccessTime = glfwGetTime();
+                entry.priority = static_cast<int>(visibleLeaves.size()) - requested;
+                entries_[key] = std::move(entry);
+                UpdateLRU(key);
+            } else {
+                it->second.state = RockMeshState::Queued;
+                it->second.generation = generation;
             }
+            
+            // Add to global dedupe set
+            queuedOrPendingKeys_.insert(key);
+            
+            // Add to priority queue
+            MeshRequest req;
+            req.nodeKey = key;
+            req.priority = static_cast<int>(visibleLeaves.size()) - requested;
+            req.lod = 0;
+            req.generation = generation;
+            pendingRequests_.push(req);
+            requested++;
         }
     }
     
@@ -208,6 +285,11 @@ int RockMeshManager::ProcessPriorityQueue(double budgetMs) {
         if (req.generation < currentGen - 1) {
             std::lock_guard<std::mutex> lock(statsMutex_);
             stats_.staleDropCount++;
+            // Phase 6 Fix: Remove from dedupe set so visible tiles can be re-queued
+            {
+                std::lock_guard<std::mutex> queuedLock(queuedMutex_);
+                queuedOrPendingKeys_.erase(req.nodeKey);
+            }
             continue;
         }
         
@@ -218,6 +300,11 @@ int RockMeshManager::ProcessPriorityQueue(double budgetMs) {
             if (it == entries_.end() || 
                 (it->second.state != RockMeshState::Queued &&
                  it->second.state != RockMeshState::Stale)) {
+                // Phase 6 Fix: Remove from dedupe set
+                {
+                    std::lock_guard<std::mutex> queuedLock(queuedMutex_);
+                    queuedOrPendingKeys_.erase(req.nodeKey);
+                }
                 continue;
             }
             
@@ -227,35 +314,58 @@ int RockMeshManager::ProcessPriorityQueue(double budgetMs) {
         }
         
         // Try non-blocking push to requestQueue
-        // If full, try to drop oldest stale/low-priority
-        if (!requestQueue_.Push(req.nodeKey)) {
-            // Queue full - mark as failed and update stats
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            auto it = entries_.find(req.nodeKey);
-            if (it != entries_.end()) {
-                it->second.state = RockMeshState::Failed;
-                it->second.error = "Request queue full";
+        if (!requestQueue_.TryPush(req.nodeKey)) {
+            // Queue full - revert state and requeue for later
+            {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                auto it = entries_.find(req.nodeKey);
+                if (it != entries_.end()) {
+                    // Revert to Queued (or Stale if generation outdated)
+                    if (req.generation < currentGeneration_.load() - 1) {
+                        it->second.state = RockMeshState::Stale;
+                    } else {
+                        it->second.state = RockMeshState::Queued;
+                    }
+                }
+            }
+            // Add back to priority queue with slightly lower priority
+            // Phase 6: Key stays in queuedOrPendingKeys_ to prevent re-queueing by UpdateVisibleQuadKeys
+            {
+                std::lock_guard<std::mutex> lock(requestMutex_);
+                MeshRequest retryReq = req;
+                retryReq.priority -= 10;  // Lower priority for retry
+                pendingRequests_.push(retryReq);
             }
             std::lock_guard<std::mutex> statsLock(statsMutex_);
             stats_.droppedFullQueueCount++;
             continue;
         }
         
-        // Track in-flight
+        // Track in-flight and enqueued
         {
             std::lock_guard<std::mutex> lock(inFlightMutex_);
             inFlightSet_.insert(req.nodeKey);
+        }
+        {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.enqueuedCount++;
+        }
+        
+        // Sprint 2.3: Remove from global dedupe (now tracked by inFlightSet_)
+        {
+            std::lock_guard<std::mutex> queuedLock(queuedMutex_);
+            queuedOrPendingKeys_.erase(req.nodeKey);
         }
         
         dispatched++;
     }
     
-    // Update stats
+    // Update stats (with proper locking)
     if (dispatched > 0) {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.priorityDispatchedCount += dispatched;
-        stats_.inFlightCount = static_cast<int>(inFlightSet_.size());
     }
+    // inFlightCount is calculated on-demand in GetStats()
     
     return dispatched;
 }
@@ -273,6 +383,26 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
     
     RockMeshCpu cpu;
     while (uploadQueue_.TryPop(cpu)) {
+        // Always remove from in-flight at the end, regardless of outcome
+        struct InFlightGuard {
+            std::unordered_set<std::string>* set;
+            std::mutex* mutex;
+            std::string id;
+            bool cleared = false;
+            
+            void clear() {
+                if (!cleared && set && mutex) {
+                    std::lock_guard<std::mutex> lock(*mutex);
+                    set->erase(id);
+                    cleared = true;
+                }
+            }
+            ~InFlightGuard() { clear(); }
+        } guard;
+        guard.set = &inFlightSet_;
+        guard.mutex = &inFlightMutex_;
+        guard.id = cpu.id;
+        
         if (!cpu.valid) {
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
@@ -282,7 +412,7 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             }
             failed++;
             didWork = true;
-            continue;
+            continue;  // guard destructor will clean in-flight
         }
         
         // Check generation - drop stale uploads
@@ -297,7 +427,7 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
                     std::lock_guard<std::mutex> statsLock(statsMutex_);
                     stats_.staleDropCount++;
                 }
-                continue;
+                continue;  // guard destructor will clean in-flight
             }
         }
         
@@ -309,13 +439,11 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             if (it != entries_.end()) {
                 it->second.gpu = std::move(gpu);
                 it->second.state = RockMeshState::Uploaded;
+                // Sprint 3: Start with fade=0 for seamless transition
+                it->second.fade = 0.0f;
                 uploaded++;
             }
-            // Remove from in-flight (success)
-            {
-                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
-                inFlightSet_.erase(cpu.id);
-            }
+            guard.clear();  // Explicit clear for success path
         } else {
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
@@ -324,11 +452,7 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
                 it->second.error = "GPU upload failed";
                 failed++;
             }
-            // Remove from in-flight (failure)
-            {
-                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
-                inFlightSet_.erase(cpu.id);
-            }
+            guard.clear();  // Explicit clear for failure path
         }
         
         didWork = true;
@@ -351,12 +475,35 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
     return didWork;
 }
 
-void RockMeshManager::Render() {
-    // Sprint 2: Snapshot pattern - copy GPU handles under lock, draw outside
+// Sprint 3: Per-frame fade update
+void RockMeshManager::UpdateFades(float deltaTime) {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    
+    for (auto& [id, entry] : entries_) {
+        if (entry.state == RockMeshState::Uploaded) {
+            // Fade in new meshes
+            if (entry.fade < 1.0f) {
+                entry.fade += entry.fadeRate * deltaTime;
+                if (entry.fade > 1.0f) entry.fade = 1.0f;
+            }
+        } else if (entry.state == RockMeshState::Stale) {
+            // Fade out stale meshes
+            if (entry.fade > 0.0f) {
+                entry.fade -= entry.fadeRate * deltaTime;
+                if (entry.fade < 0.0f) entry.fade = 0.0f;
+            }
+        }
+    }
+}
+
+// Phase 6: Added shaderProgram parameter for per-mesh fade
+void RockMeshManager::Render(GLuint shaderProgram) {
+    // Sprint 3: Snapshot pattern with fade support
     struct DrawCmd {
         GLuint vao;
         GLuint texture;
         uint32_t indexCount;
+        float fade;
     };
     std::vector<DrawCmd> cmds;
     
@@ -365,11 +512,14 @@ void RockMeshManager::Render() {
         cmds.reserve(entries_.size());
         
         for (const auto& [id, entry] : entries_) {
-            if (entry.state == RockMeshState::Uploaded && entry.gpu.valid) {
+            // Sprint 3: Render if uploaded and visible (fade > 0)
+            if ((entry.state == RockMeshState::Uploaded || entry.state == RockMeshState::Stale) 
+                && entry.gpu.valid && entry.fade > 0.01f) {
                 cmds.push_back({
                     entry.gpu.vao,
                     entry.gpu.texture,
-                    entry.gpu.indexCount
+                    entry.gpu.indexCount,
+                    entry.fade
                 });
                 // Update access time for LRU
                 const_cast<RockMeshEntry&>(entry).lastAccessTime = glfwGetTime();
@@ -377,9 +527,20 @@ void RockMeshManager::Render() {
         }
     }
     
+    // Phase 6: Get fade uniform location if shader program provided
+    GLint fadeLoc = -1;
+    if (shaderProgram != 0) {
+        fadeLoc = glGetUniformLocation(shaderProgram, "uFade");
+    }
+    
     // Draw outside lock
     for (const auto& cmd : cmds) {
         if (cmd.vao == 0 || cmd.indexCount == 0) continue;
+        
+        // Phase 6: Set per-mesh fade uniform
+        if (fadeLoc >= 0) {
+            glUniform1f(fadeLoc, cmd.fade);
+        }
         
         glBindVertexArray(cmd.vao);
         if (cmd.texture) {
@@ -449,7 +610,7 @@ RockMeshManager::Stats RockMeshManager::GetStats() const {
     std::lock_guard<std::mutex> lock(statsMutex_);
     Stats s = stats_;
     s.cachedCount = static_cast<int>(lruList_.size());
-    // Update in-flight count
+    // Calculate in-flight count on-demand (proper locking order)
     {
         std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
         s.inFlightCount = static_cast<int>(inFlightSet_.size());
@@ -492,8 +653,33 @@ void RockMeshManager::WorkerLoop() {
             }
         }
         
-        // Fetch
-        NodeDataResult fetchResult = client.FetchNodeData(nodeKey);
+        // Sprint 2.2: Try disk cache first
+        NodeDataResult fetchResult;
+        bool cacheHit = false;
+        
+        if (diskCache_) {
+            std::vector<uint8_t> cachedData = diskCache_->Read(config_.geMeshEndpoint, nodeKey);
+            if (!cachedData.empty()) {
+                fetchResult.success = true;
+                fetchResult.data = std::move(cachedData);
+                fetchResult.fromCache = true;
+                cacheHit = true;
+                {
+                    std::lock_guard<std::mutex> statsLock(statsMutex_);
+                    stats_.diskCacheHits++;
+                }
+            } else {
+                {
+                    std::lock_guard<std::mutex> statsLock(statsMutex_);
+                    stats_.diskCacheMisses++;
+                }
+            }
+        }
+        
+        // Fetch from network if cache miss
+        if (!cacheHit) {
+            fetchResult = client.FetchNodeData(nodeKey);
+        }
         if (!fetchResult.success) {
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
@@ -511,6 +697,17 @@ void RockMeshManager::WorkerLoop() {
                 inFlightSet_.erase(nodeKey);
             }
             continue;
+        }
+        
+        // Sprint 2.2: Write to disk cache on network success (not from cache)
+        if (!cacheHit && diskCache_ && !fetchResult.data.empty()) {
+            if (diskCache_->Write(config_.geMeshEndpoint, nodeKey, fetchResult.data)) {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.diskCacheWrites++;
+            } else {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.diskCacheErrors++;
+            }
         }
         
         // Check generation again after fetch
@@ -787,23 +984,9 @@ bool RockMeshManager::CreateFallbackTexture() {
 }
 
 // Sprint 2: Helper methods
+// Sprint 2.3: Use canonical TileKey::ToQuadKey() for consistency
 std::string RockMeshManager::TileKeyToNodeKey(const TileKey& key) const {
-    // Convert TileKey to quadkey string (Bing style: 0=NW, 1=NE, 2=SW, 3=SE)
-    if (key.level == 0) return "";
-    
-    std::string digits;
-    digits.reserve(key.level);
-    int tx = key.x, ty = key.y;
-    
-    for (int z = key.level; z > 0; --z) {
-        int digit = ((tx & 1) << 1) | (ty & 1);  // 0=NW, 1=NE, 2=SW, 3=SE
-        digits.push_back('0' + digit);
-        tx >>= 1;
-        ty >>= 1;
-    }
-    
-    std::reverse(digits.begin(), digits.end());
-    return digits;
+    return key.ToQuadKey();
 }
 
 void RockMeshManager::MarkStaleEntries(const std::unordered_set<std::string>& visibleKeys) {

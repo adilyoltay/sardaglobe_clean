@@ -1913,12 +1913,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
         rockMeshManager_->SetViewportVersion(viewportVersion);
         
         // Convert visible leaves to TileKeys and update
+        // Phase 6: Pass camera position for distance-based child-LOD selection
         std::vector<TileKey> visibleLeaves;
         visibleLeaves.reserve(renderLeafSet_.size());
         for (const auto& key : renderLeafSet_) {
             visibleLeaves.push_back(key);
         }
-        rockMeshManager_->UpdateVisibleQuadKeys(visibleLeaves);
+        rockMeshManager_->UpdateVisibleQuadKeys(visibleLeaves, cameraPosD);
         
         // Process priority queue (dispatch requests within budget)
         int dispatched = rockMeshManager_->ProcessPriorityQueue(config_.geMeshRequestBudgetMs);
@@ -1933,6 +1934,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
         if (rockUploaded) {
             frameRequested_ = true;  // Request render frame for new mesh
         }
+        // Phase 6: Update fade values for seamless transitions
+        rockMeshManager_->UpdateFades(static_cast<float>(dt));
     }
     
     frameTimings_.meshBuildMs = (glfwGetTime() * 1000.0) - meshStartMs;
@@ -2509,7 +2512,8 @@ void GlobeEngine::Render() {
         }
         
         // Draw all rockmeshes
-        rockMeshManager_->Render();
+        // Phase 6: Pass shader program for per-mesh fade
+        rockMeshManager_->Render(tileProgram);
         
         // Restore state
         if (cullWasEnabled) {

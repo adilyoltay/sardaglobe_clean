@@ -76,6 +76,18 @@ struct Config {
     double geMeshRequestBudgetMs = 5.0;                       // Per-frame request budget
     int geMeshCacheSize = 64;                                 // Max cached meshes (LRU eviction)
     
+    // Sprint 2.3: Child-LOD proximity selection
+    bool geMeshEnableChildLod = true;                         // Enable child LOD for close tiles
+    float geMeshChildLodDistance = 5000.0f;                   // Distance threshold for child LOD (meters)
+    int geMeshMaxChildRequestsPerFrame = 2;                   // Max child requests per frame
+    
+    // Sprint 3: HTTP/2 transport configuration
+    bool geMeshEnableHttp2 = true;                            // Prefer HTTP/2
+    bool geMeshAllowHttp1Fallback = true;                     // Allow HTTP/1.1 fallback
+    long geMeshTcpKeepAliveSec = 30;                          // TCP keep-alive interval
+    long geMeshTcpKeepAliveIdleSec = 15;                      // TCP keep-alive idle time
+    bool geMeshEnableConnectionReuse = true;                  // Enable connection reuse
+    
     bool geMeshEnabled() const { 
         // Sprint 2: requires endpoint with {quadkey} placeholder
         // geMeshQuadKeys is optional seed set (can be empty for camera-driven loading)

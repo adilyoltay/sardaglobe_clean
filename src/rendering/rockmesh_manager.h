@@ -11,6 +11,7 @@
 #include "../core/config.h"
 #include "../core/bounded_queue.h"
 #include "../core/tile_key.h"
+#include <glm/glm.hpp>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -19,6 +20,11 @@
 #include <atomic>
 #include <queue>
 #include <list>
+
+// Sprint 2.2: Forward declare for disk cache
+namespace globe {
+class NodeDataDiskCache;
+}
 
 namespace globe {
 
@@ -43,6 +49,12 @@ struct RockMeshEntry {
     uint64_t generation = 0;         // Visibility generation token
     double lastAccessTime = 0.0;     // For LRU cache eviction
     int priority = 0;                // Screen-space priority (higher = more important)
+    
+    // Sprint 2.3: Seamless rendering fade
+    float fade = 1.0f;               // Current fade value (0.0 = invisible, 1.0 = fully visible)
+    float fadeRate = 3.0f;           // Fade speed (units per second)
+    int targetLod = -1;              // Target LOD level (for transitions)
+    bool hasAncestorChildrenMask = false;  // True if children of this node are rendering
 };
 
 // Request struct for priority queue
@@ -74,7 +86,9 @@ public:
     void Request(const std::string& nodeKey);
     
     // Sprint 2: Update visible tile set and generate mesh requests
-    void UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleLeaves);
+    // Sprint 3: Added camera position for distance-based LOD selection
+    void UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleLeaves, 
+                               const glm::dvec3& cameraPosEcef = glm::dvec3(0.0));
     
     // Sprint 2: Set current viewport generation (invalidates stale requests)
     void SetViewportVersion(uint64_t version);
@@ -84,7 +98,11 @@ public:
     bool ProcessUploads(double budgetMs);
     
     // Render all uploaded meshes
-    void Render();
+    // Phase 6: Added shaderProgram parameter for fade uniform
+    void Render(GLuint shaderProgram = 0);
+    
+    // Sprint 3: Update fade values (call each frame before Render)
+    void UpdateFades(float deltaTime);
     
     // Check if any work pending (for request-driven frame)
     bool HasPendingWork() const;
@@ -116,6 +134,12 @@ public:
         int failureCount = 0;             // Failed (network, parse, build)
         int cachedCount = 0;              // Stale but cached for quick return
         int inFlightCount = 0;            // Currently fetching
+        
+        // Sprint 2.2: Disk cache metrics
+        int diskCacheHits = 0;            // Served from disk cache
+        int diskCacheMisses = 0;          // Network fetch required
+        int diskCacheWrites = 0;          // Written to disk cache
+        int diskCacheErrors = 0;          // Disk cache read/write errors
     };
     Stats GetStats() const;
     
@@ -153,6 +177,17 @@ private:
     
     // Fallback texture (1x1 gray)
     GLuint fallbackTexture_ = 0;
+    
+    // Sprint 2.2: Disk cache for NodeData responses
+    std::unique_ptr<NodeDataDiskCache> diskCache_;
+    std::string cacheDir_;  // From config
+    
+    // Sprint 2.3: Global dedupe - tracks keys already queued or in-flight
+    mutable std::mutex queuedMutex_;
+    std::unordered_set<std::string> queuedOrPendingKeys_;
+    
+    // Sprint 2.3: Final visible mesh keys after hierarchy processing
+    std::unordered_set<std::string> visibleMeshKeys_;
     
     // Worker main loop
     void WorkerLoop();

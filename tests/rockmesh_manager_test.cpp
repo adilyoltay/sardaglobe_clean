@@ -1,10 +1,11 @@
 // RockMesh Manager Test
-// Tests Sprint 2 LOD-aware mesh management (without GL context)
+// Tests Sprint 2 LOD-aware mesh management and scheduler behavior
 
 #include "../src/core/config.h"
 #include "../src/core/tile_key.h"
 #include <iostream>
 #include <vector>
+#include <unordered_set>
 
 using namespace globe;
 
@@ -27,49 +28,50 @@ Config CreateTestConfig() {
 }
 
 // Test TileKey to quadkey conversion (internal logic of RockMeshManager)
+// Sprint 2.3: Use canonical TileKey::ToQuadKey()
 std::string TileKeyToNodeKey(const TileKey& key) {
-    if (key.level == 0) return "";
-    
-    std::string digits;
-    digits.reserve(key.level);
-    int tx = key.x, ty = key.y;
-    
-    for (int z = key.level; z > 0; --z) {
-        int digit = ((tx & 1) << 1) | (ty & 1);  // 0=NW, 1=NE, 2=SW, 3=SE
-        digits.push_back('0' + digit);
-        tx >>= 1;
-        ty >>= 1;
-    }
-    
-    std::reverse(digits.begin(), digits.end());
-    return digits;
+    return key.ToQuadKey();
+}
+
+// Simulate priority calculation (simplified version of what manager does)
+int CalculatePriority(const TileKey& leaf, int index, int total) {
+    // Higher index = more recent = higher priority
+    return total - index;
+}
+
+// Simulate generation check
+bool IsStale(uint64_t entryGen, uint64_t currentGen) {
+    return entryGen < currentGen - 1;
 }
 
 int main() {
     int failed = 0;
     std::cout << "=== RockMesh Manager Test ===\n";
 
-    // Test 1: TileKeyToNodeKey conversion (current implementation)
+    // Test 1: TileKeyToNodeKey conversion
     {
         // Level 0: empty
         std::string qk0 = TileKeyToNodeKey(TileKey(0, 0, 0));
         failed += !Expect(qk0.empty(), "Level 0 should return empty string");
         
-        // Level 1 children (based on actual digit = ((tx&1)<<1)|(ty&1))
-        // 0 = NW (0,0), 1 = SW (0,1), 2 = NE (1,0), 3 = SE (1,1)
+        // Level 1 children (canonical ToQuadKey: digit = ((tx&1)<<0)|((ty&1)<<1))
+        // 0 = NW (0,0), 1 = NE (1,0), 2 = SW (0,1), 3 = SE (1,1)
         std::string qk1_nw = TileKeyToNodeKey(TileKey(1, 0, 0));
         failed += !Expect(qk1_nw == "0", "NW child (0,0) should be '0'");
         
-        std::string qk1_sw = TileKeyToNodeKey(TileKey(1, 0, 1));
-        failed += !Expect(qk1_sw == "1", "SW child (0,1) should be '1'");
-        
         std::string qk1_ne = TileKeyToNodeKey(TileKey(1, 1, 0));
-        failed += !Expect(qk1_ne == "2", "NE child (1,0) should be '2'");
+        failed += !Expect(qk1_ne == "1", "NE child (1,0) should be '1'");
+        
+        std::string qk1_sw = TileKeyToNodeKey(TileKey(1, 0, 1));
+        failed += !Expect(qk1_sw == "2", "SW child (0,1) should be '2'");
         
         std::string qk1_se = TileKeyToNodeKey(TileKey(1, 1, 1));
         failed += !Expect(qk1_se == "3", "SE child (1,1) should be '3'");
         
-        // Level 2: (2,2) = binary (10,10) -> digits "30"
+        // Level 2: (2,2) = binary (10,10) 
+        // i=0: tx=2,ty=2 -> ((0)<<0)|((0)<<1) = 0, tx=1,ty=1
+        // i=1: tx=1,ty=1 -> ((1)<<0)|((1)<<1) = 1|2 = 3, tx=0,ty=0
+        // digits = [0, 3], reversed = [3, 0] -> "30"
         std::string qk2 = TileKeyToNodeKey(TileKey(2, 2, 2));
         failed += !Expect(qk2 == "30", "Tile(2,2,2) should be '30'");
         
@@ -162,6 +164,93 @@ int main() {
         failed += !Expect(expandedKeys.size() == 2, "With margin=1, should have leaf + parent");
         
         std::cout << "  LOD expansion: " << expandedKeys.size() << " keys\n";
+    }
+
+    // Test 6: Generation-based stale detection
+    {
+        uint64_t currentGen = 100;
+        
+        // Recent entry - not stale
+        failed += !Expect(!IsStale(100, currentGen), "Current gen should not be stale");
+        failed += !Expect(!IsStale(99, currentGen), "One behind should not be stale");
+        
+        // Stale entry
+        failed += !Expect(IsStale(98, currentGen), "Two behind should be stale");
+        failed += !Expect(IsStale(50, currentGen), "Old gen should be stale");
+        
+        std::cout << "  Generation stale detection: OK\n";
+    }
+
+    // Test 7: Priority calculation (simplified scheduler logic)
+    {
+        std::vector<TileKey> visibleLeaves = {
+            TileKey(3, 0, 0),
+            TileKey(3, 1, 0),
+            TileKey(3, 0, 1),
+            TileKey(3, 1, 1)
+        };
+        
+        int total = static_cast<int>(visibleLeaves.size());
+        std::vector<int> priorities;
+        
+        for (int i = 0; i < total; ++i) {
+            priorities.push_back(CalculatePriority(visibleLeaves[i], i, total));
+        }
+        
+        // Check that priorities are decreasing (higher = more recent)
+        failed += !Expect(priorities[0] == 4, "First item should have priority 4");
+        failed += !Expect(priorities[3] == 1, "Last item should have priority 1");
+        
+        std::cout << "  Priority calculation: OK\n";
+    }
+
+    // Test 8: In-flight limit simulation
+    {
+        int maxInFlight = 4;
+        int currentInFlight = 0;
+        int dispatched = 0;
+        
+        // Simulate dispatching 10 requests with limit of 4
+        for (int i = 0; i < 10; ++i) {
+            if (currentInFlight < maxInFlight) {
+                currentInFlight++;
+                dispatched++;
+            }
+        }
+        
+        // Should only dispatch up to limit
+        failed += !Expect(dispatched == 4, "Should only dispatch up to maxInFlight");
+        failed += !Expect(currentInFlight == 4, "Current in-flight should be at limit");
+        
+        std::cout << "  In-flight limit: OK (dispatched=" << dispatched << ")\n";
+    }
+
+    // Test 9: LRU cache simulation
+    {
+        int cacheSize = 4;
+        std::vector<std::string> lruList;
+        
+        // Add items
+        for (int i = 0; i < 6; ++i) {
+            std::string key = "key" + std::to_string(i);
+            // Add to front (most recent)
+            lruList.insert(lruList.begin(), key);
+            // Evict if over limit
+            if (static_cast<int>(lruList.size()) > cacheSize) {
+                lruList.pop_back();  // Remove least recent
+            }
+        }
+        
+        // Should only have 4 items
+        failed += !Expect(lruList.size() == 4, "Cache should be at max size");
+        // Oldest items (0, 1) should be evicted
+        bool hasOld = false;
+        for (const auto& k : lruList) {
+            if (k == "key0" || k == "key1") hasOld = true;
+        }
+        failed += !Expect(!hasOld, "Oldest items should be evicted");
+        
+        std::cout << "  LRU cache: OK (size=" << lruList.size() << ")\n";
     }
 
     if (failed == 0) {

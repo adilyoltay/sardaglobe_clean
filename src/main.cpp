@@ -10,6 +10,66 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <iomanip>
+#include <string>
+#include <charconv>
+#include <system_error>
+
+// Phase 6: Strict numeric parsing helper for CLI flags
+// Returns true on success, false on parse failure
+template<typename T>
+bool ParseNumeric(const char* str, T& out, const char* name) {
+    if (!str || str[0] == '\0' || str[0] == '-') {
+        // Reject empty strings and flag-like values starting with '-'
+        if (str && str[0] == '-') {
+            std::cerr << "Error: " << name << " expects a numeric value, got flag '" << str << "'\n";
+        } else {
+            std::cerr << "Error: " << name << " expects a numeric value\n";
+        }
+        return false;
+    }
+    
+    // Check for non-numeric characters (except leading + or - for signed types)
+    const char* p = str;
+    if (*p == '+' || *p == '-') p++;  // Allow sign for signed types
+    bool hasDigit = false;
+    bool hasDecimal = false;
+    
+    for (; *p; ++p) {
+        if (*p >= '0' && *p <= '9') {
+            hasDigit = true;
+        } else if (*p == '.' && !hasDecimal) {
+            hasDecimal = true;  // Allow one decimal point for floats
+        } else {
+            std::cerr << "Error: " << name << " contains invalid character '" << *p << "' in '" << str << "'\n";
+            return false;
+        }
+    }
+    
+    if (!hasDigit) {
+        std::cerr << "Error: " << name << " must contain at least one digit\n";
+        return false;
+    }
+    
+    // Parse based on type
+    if constexpr (std::is_integral_v<T>) {
+        char* endptr = nullptr;
+        long val = std::strtol(str, &endptr, 10);
+        if (endptr && *endptr != '\0') {
+            std::cerr << "Error: " << name << " has trailing characters\n";
+            return false;
+        }
+        out = static_cast<T>(val);
+    } else {
+        char* endptr = nullptr;
+        double val = std::strtod(str, &endptr);
+        if (endptr && *endptr != '\0') {
+            std::cerr << "Error: " << name << " has trailing characters\n";
+            return false;
+        }
+        out = static_cast<T>(val);
+    }
+    return true;
+}
 
 // Track A: #8 Precision Baseline Report
 // Compares double vs float projection accuracy without GPU/OpenGL
@@ -232,6 +292,38 @@ int main(int argc, char** argv) {
             config.geMeshQuadKeys.push_back(qk);
         } else if (std::strcmp(argv[i], "--ge-mesh-no-flip-v") == 0) {
             config.geMeshFlipV = false;
+        } else if (std::strcmp(argv[i], "--ge-mesh-enable-http2") == 0) {
+            config.geMeshEnableHttp2 = true;
+        } else if (std::strcmp(argv[i], "--ge-mesh-no-http2") == 0) {
+            config.geMeshEnableHttp2 = false;
+        } else if (std::strcmp(argv[i], "--ge-mesh-http1-fallback") == 0) {
+            config.geMeshAllowHttp1Fallback = true;
+        } else if (std::strcmp(argv[i], "--ge-mesh-no-http1-fallback") == 0) {
+            config.geMeshAllowHttp1Fallback = false;
+        } else if (std::strcmp(argv[i], "--ge-mesh-tcp-keepalive") == 0 && i + 1 < argc) {
+            long keepalive;
+            if (!ParseNumeric(argv[++i], keepalive, "--ge-mesh-tcp-keepalive")) return 1;
+            if (keepalive <= 0 || keepalive > 3600) {
+                std::cerr << "Error: --ge-mesh-tcp-keepalive must be between 1 and 3600 seconds\n";
+                return 1;
+            }
+            config.geMeshTcpKeepAliveSec = keepalive;
+        } else if (std::strcmp(argv[i], "--ge-mesh-child-lod-dist") == 0 && i + 1 < argc) {
+            float dist;
+            if (!ParseNumeric(argv[++i], dist, "--ge-mesh-child-lod-dist")) return 1;
+            if (dist < 0 || dist > 1000000) {
+                std::cerr << "Error: --ge-mesh-child-lod-dist must be between 0 and 1000000 meters\n";
+                return 1;
+            }
+            config.geMeshChildLodDistance = dist;
+        } else if (std::strcmp(argv[i], "--ge-mesh-max-child-req") == 0 && i + 1 < argc) {
+            int maxReq;
+            if (!ParseNumeric(argv[++i], maxReq, "--ge-mesh-max-child-req")) return 1;
+            if (maxReq < 0 || maxReq > 100) {
+                std::cerr << "Error: --ge-mesh-max-child-req must be between 0 and 100\n";
+                return 1;
+            }
+            config.geMeshMaxChildRequestsPerFrame = maxReq;
         } else if (std::strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             config.cacheDir = argv[++i];
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
@@ -290,6 +382,13 @@ int main(int argc, char** argv) {
                       << "  --ge-elevation-type TYPE     Elevation type: ellipsoid | terrain | sea_level\n"
                       << "  --ge-mesh-quadkey QK         RockTree NodeData quadkey (Sprint 1, repeatable, digits 0-7)\n"
                       << "  --ge-mesh-no-flip-v          Disable V coordinate flip for texture (default: flip enabled)\n"
+                      << "  --ge-mesh-enable-http2       Enable HTTP/2 for mesh requests (default: enabled)\n"
+                      << "  --ge-mesh-no-http2           Disable HTTP/2 for mesh requests\n"
+                      << "  --ge-mesh-http1-fallback     Allow HTTP/1.1 fallback (default: enabled)\n"
+                      << "  --ge-mesh-no-http1-fallback  Disable HTTP/1.1 fallback\n"
+                      << "  --ge-mesh-tcp-keepalive SEC  TCP keep-alive interval in seconds (default: 30)\n"
+                      << "  --ge-mesh-child-lod-dist M   Child LOD distance threshold in meters (default: 5000)\n"
+                      << "  --ge-mesh-max-child-req N    Max child requests per frame (default: 2)\n"
                       << "  --cache-dir DIR   Tile cache directory\n"
                       << "  --no-cache        Disable disk cache\n"
                       << "  --no-dem          Disable DEM\n"

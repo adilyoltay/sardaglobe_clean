@@ -5,8 +5,38 @@
 #include <array>
 #include <functional>
 #include <algorithm>
+#include <glm/glm.hpp>
+#include <cmath>
+#include "constants.h"
 
 namespace globe {
+
+// Forward declarations for coordinate conversion
+namespace {
+    constexpr double PI = 3.14159265358979323846;
+    
+    // Web Mercator projection helpers
+    inline double TileXToLon(int x, int z) {
+        return (x / std::pow(2.0, z)) * 360.0 - 180.0;
+    }
+    
+    inline double TileYToLat(int y, int z) {
+        double n = PI - 2.0 * PI * y / std::pow(2.0, z);
+        return 180.0 / PI * std::atan(0.5 * (std::exp(n) - std::exp(-n)));
+    }
+    
+    // Lat/Lon to ECEF (Earth-Centered Earth-Fixed) in km
+    inline glm::dvec3 LatLonToEcef(double lat, double lon, double altKm = 0.0) {
+        double latRad = lat * PI / 180.0;
+        double lonRad = lon * PI / 180.0;
+        double r = EARTH_RADIUS_KM + altKm;
+        return glm::dvec3(
+            r * std::cos(latRad) * std::cos(lonRad),
+            r * std::cos(latRad) * std::sin(lonRad),
+            r * std::sin(latRad)
+        );
+    }
+}
 
 // Immutable tile identifier using quadkey addressing
 struct TileKey {
@@ -97,6 +127,22 @@ struct TileKey {
         // Reverse to get MSB first (root to leaf)
         std::reverse(quadkey.begin(), quadkey.end());
         return quadkey;
+    }
+    
+    // Sprint 3: Calculate tile center in ECEF coordinates (km)
+    glm::dvec3 CenterEcef() const {
+        if (level <= 0) return glm::dvec3(0.0);
+        
+        // Tile center in lat/lon
+        double lon = TileXToLon(x + 0.5, level);
+        double lat = TileYToLat(y + 0.5, level);
+        
+        return LatLonToEcef(lat, lon);
+    }
+    
+    // Calculate tile center in ECEF coordinates (meters)
+    glm::dvec3 CenterEcefMeters() const {
+        return CenterEcef() * 1000.0;
     }
 
     static TileKey FromString(const std::string& s) {
