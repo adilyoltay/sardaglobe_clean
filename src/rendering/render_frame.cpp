@@ -12,6 +12,7 @@ namespace {
 bool HasRenderableSurface(const Tile& tile) {
     return tile.hasMesh && tile.surfaceVertexCount > 0;
 }
+std::size_t gInvalidUnpopTargetFallbacks = 0;
 
 } // namespace
 
@@ -78,7 +79,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         Tile* unpopAncestor = nullptr;     // Used in shader-level crossfade
         glm::vec4 unpopUvTransform{1.0f};  // scale.xy + offset.zw
         int unpopTextureLayer = -1;
-        bool unpopTextureTargetIsArray = false;
+        TileRenderer::TextureTarget unpopTarget = TileRenderer::TextureTarget::k2D;
         bool useShaderCrossfade = false;
     };
     
@@ -243,12 +244,20 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                     glm::vec4 relativeUnpopUv = ComputeUnpopUvTransform(tile.key, ancestor->key);
                     leaf.unpopUvTransform = ComposeUvTransform(ancestor->texScaleOffset, relativeUnpopUv);
                     leaf.unpopTextureLayer = ancestor->textureArrayLayer;
-                    leaf.unpopTextureTargetIsArray =
-                        useTextureArray &&
-                        ancestor->usesTextureArray &&
-                        ancestor->textureArrayLayer >= 0 &&
-                        ancestor->textureId != 0 &&
-                        ancestor->textureArrayTier >= 0;
+                    const bool useUnpopArray = useTextureArray &&
+                                              ancestor->usesTextureArray &&
+                                              ancestor->textureArrayLayer >= 0 &&
+                                              ancestor->textureArrayTier >= 0 &&
+                                              ancestor->textureId != 0;
+                    leaf.unpopTarget = useUnpopArray
+                        ? TileRenderer::TextureTarget::kArray
+                        : TileRenderer::TextureTarget::k2D;
+                    if (leaf.unpopTarget == TileRenderer::TextureTarget::kArray &&
+                        leaf.unpopTextureLayer < 0) {
+                        // Defensive guard: malformed state should never block rendering.
+                        ++gInvalidUnpopTargetFallbacks;
+                        leaf.unpopTarget = TileRenderer::TextureTarget::k2D;
+                    }
                 } else {
                     // No parent available -> avoid temporary transparency holes.
                     leaf.alpha = 1.0f;
@@ -446,7 +455,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 *leaf.tile,
                 leaf.unpopAncestor->textureId,
                 leaf.unpopTextureLayer,
-                leaf.unpopTextureTargetIsArray,
+                leaf.unpopTarget,
                 leaf.unpopUvTransform,
                 leaf.alpha,
                 hasHeightmap ? hmTex.textureId : 0,

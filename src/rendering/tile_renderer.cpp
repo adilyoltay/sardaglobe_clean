@@ -49,6 +49,8 @@ inline void ResetCrossfadeState(ShaderManager& shaderManager, bool useTextureArr
     }
 }
 
+std::size_t gUnpopArrayTo2DFallbacks = 0;
+
 struct DrawCallBreakdown {
     int drawCalls = 0;
     int triangles = 0;
@@ -371,6 +373,7 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
     if (useTextureArray) {
         glUniform1i(shaderManager_.GetTextureArrayLocation(), 0);
         glUniform1i(shaderManager_.GetUseTexture2DLocation(), 0);  // Default to array mode
+        glUniform1i(shaderManager_.GetPhotoTileTextureUnpopArrayLocation(), 2);
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 0);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), 0);
         // uTextureLayer will be set per-tile in RenderTile
@@ -545,7 +548,7 @@ void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapI
 void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
                                            uint32_t unpopTextureId,
                                            int unpopTextureLayer,
-                                           bool unpopUsesArray,
+                                           TextureTarget unpopTarget,
                                            const glm::vec4& texScaleOffsetUnpop,
                                            float unpopBlend,
                                            uint32_t heightmapId,
@@ -555,7 +558,14 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
                                            float terrainMorph) {
     if (!batchActive_) return;
     if (!useTextureArrayBatch_) {
-        unpopUsesArray = false;
+        unpopTarget = TextureTarget::k2D;
+    }
+    if (useTextureArrayBatch_ &&
+        unpopTarget == TextureTarget::kArray &&
+        unpopTextureLayer < 0) {
+        assert(false && "RenderTileWithCrossfade received array target without valid array layer");
+        ++gUnpopArrayTo2DFallbacks;
+        unpopTarget = TextureTarget::k2D;
     }
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) {
         if (useTextureArrayBatch_) {
@@ -576,7 +586,9 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     // Safety: if caller marks ancestor as array-backed but omits valid layer index,
     // avoid binding array id to GL_TEXTURE_2D sampler (undefined behavior).
     // Degrade gracefully to non-crossfade tile render in this edge case.
-    if (useTextureArrayBatch_ && unpopUsesArray && unpopTextureLayer < 0) {
+    if (useTextureArrayBatch_ &&
+        unpopTarget == TextureTarget::kArray &&
+        unpopTextureLayer < 0) {
         ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
         if (heightmapId != 0) {
             RenderTileWithHeightmap(tile, heightmapId, heightMin, heightMax, heightmapUvTransform, terrainMorph);
@@ -611,7 +623,7 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     // Bind unpop (ancestor) texture on unit 2 (array or 2D)
     glActiveTexture(GL_TEXTURE2);
     const bool useUnpopArray = useTextureArrayBatch_ &&
-                               unpopUsesArray &&
+                               unpopTarget == TextureTarget::kArray &&
                                unpopTextureLayer >= 0 &&
                                unpopTextureId != 0;
     if (useUnpopArray) {
