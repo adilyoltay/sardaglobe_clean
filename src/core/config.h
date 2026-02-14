@@ -186,8 +186,10 @@ struct Config {
     int lodHysteresisFrames = 3;             // Frames to wait before LOD change
     
     // DEM/Terrain settings
-    // Default: MapTiler Terrain-RGB v2 tiles (Mapbox Terrain-RGB encoding).
-    std::string demBaseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw?access_token={MAPBOX_ACCESS_TOKEN}";
+    // Default: Mapbox Terrain-RGB tile template (token provided via env/CLI)
+    std::string demBaseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
+    std::string demApiKey;                                    // Added via --dem-api-key / env var
+    std::string demApiKeyEnv = "NATIVE_GLOBE_DEM_TOKEN";      // Env var for DEM API key
     // DEM Provider: terrain-rgb (default, public) | google-earth (internal, requires auth)
     std::string demProvider = "terrain-rgb";  // earth-pa.clients6.google.com blocked for native clients
     int demMaxZoom = 15;               // Clamp DEM requests above provider max zoom

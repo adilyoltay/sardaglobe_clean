@@ -165,7 +165,7 @@ void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleL
     // Generate candidate keys from visible leaves plus margin
     int childRequestsThisFrame = 0;
 
-    // Octree mode: use octree index for node key mapping
+    // Octree mode: use deterministic octree path mapping
     if (octreeIndex_ && octreeIndex_->IsInitialized()) {
         for (const auto& leaf : visibleLeaves) {
             // Map TMS tile to approximate octree paths

@@ -82,7 +82,7 @@ struct Tile {
     uint32_t indexCount = 0;
     uint32_t mainIndexCount = 0;
     uint32_t skirtIndexCount = 0;
-    uint32_t surfaceVertexCount = 0;  // Surface vertices (skirt excluded) for culling bounds
+    uint32_t surfaceVertexCount = 0;  // Surface vertices (skirt excluded), renderability metadata
     bool hasMesh = false;
     bool ownsEBO = true;
     bool meshPending = false;

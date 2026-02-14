@@ -90,6 +90,28 @@ bool ParseNumeric(const char* str, T& out, const char* name) {
     return true;
 }
 
+std::string RedactSensitiveUrlParams(const std::string& input) {
+    std::string masked = input;
+    auto redact = [](std::string& value, const std::string& key) {
+        size_t pos = value.find(key + "=");
+        while (pos != std::string::npos) {
+            if (pos == 0 || (value[pos - 1] != '?' && value[pos - 1] != '&')) {
+                break;
+            }
+            size_t valueStart = pos + key.size() + 1;
+            size_t valueEnd = value.find('&', valueStart);
+            if (valueEnd == std::string::npos) {
+                valueEnd = value.size();
+            }
+            value.replace(valueStart, valueEnd - valueStart, "***");
+            pos = value.find(key + "=", valueEnd);
+        }
+    };
+    redact(masked, "access_token");
+    redact(masked, "key");
+    return masked;
+}
+
 // Track A: #8 Precision Baseline Report
 // Compares double vs float projection accuracy without GPU/OpenGL
 int RunPrecisionReport() {
@@ -228,6 +250,9 @@ int main(int argc, char** argv) {
     if (const char* env = std::getenv("NATIVE_GLOBE_DEM_AUTH")) {
         config.demAuth = env;
     }
+    if (const char* env = std::getenv(config.demApiKeyEnv.c_str())) {
+        config.demApiKey = env;
+    }
     
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
@@ -254,6 +279,10 @@ int main(int argc, char** argv) {
             return 1;
         } else if (std::strcmp(argv[i], "--dem-auth") == 0 && i + 1 < argc) {
             config.demAuth = argv[++i];
+        } else if (std::strcmp(argv[i], "--dem-api-key") == 0 && i + 1 < argc) {
+            config.demApiKey = argv[++i];
+        } else if (std::strcmp(argv[i], "--dem-api-key-env") == 0 && i + 1 < argc) {
+            config.demApiKeyEnv = argv[++i];
         } else if (std::strcmp(argv[i], "--dem-max-zoom") == 0 && i + 1 < argc) {
             config.demMaxZoom = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--dem-mesh-n") == 0 && i + 1 < argc) {
@@ -355,6 +384,10 @@ int main(int argc, char** argv) {
             config.geRateLimitMs = rateMs;
         } else if (std::strcmp(argv[i], "--ge-no-octree") == 0) {
             config.geOctreeEnabled = false;
+        } else if (std::strcmp(argv[i], "--fallback-parent-until-children-ready") == 0) {
+            config.fallbackRequireParentUntilChildrenReady = true;
+        } else if (std::strcmp(argv[i], "--no-fallback-parent-until-children-ready") == 0) {
+            config.fallbackRequireParentUntilChildrenReady = false;
         } else if (std::strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             config.cacheDir = argv[++i];
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
@@ -405,6 +438,8 @@ int main(int argc, char** argv) {
                       << "  --dem-url URL     DEM server URL (elevation)\n"
                       << "  --dem-provider P  DEM provider: terrain-rgb | google-earth (default: terrain-rgb)\n"
                       << "  --dem-auth U:P    DEM HTTP basic auth (user:password)\n"
+                      << "  --dem-api-key KEY DEM Terrain-RGB API key (optional)\n"
+                      << "  --dem-api-key-env ENV DEM API key env var (default: NATIVE_GLOBE_DEM_TOKEN)\n"
                       << "  --dem-max-zoom N  Max DEM source zoom level (default 15)\n"
                       << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
                       << "  --ge-elevation-endpoint URL  Google Earth elevation endpoint\n"
@@ -420,6 +455,8 @@ int main(int argc, char** argv) {
                       << "  --ge-mesh-tcp-keepalive SEC  TCP keep-alive interval in seconds (default: 30)\n"
                       << "  --ge-mesh-child-lod-dist M   Child LOD distance threshold in meters (default: 5000)\n"
                       << "  --ge-mesh-max-child-req N    Max child requests per frame (default: 2)\n"
+                      << "  --fallback-parent-until-children-ready    Keep parent tile until child tiles are fully ready (default: enabled)\n"
+                      << "  --no-fallback-parent-until-children-ready Disable parent hold during child loading\n"
                       << "  --cache-dir DIR   Tile cache directory\n"
                       << "  --no-cache        Disable disk cache\n"
                       << "  --no-dem          Disable DEM\n"
@@ -439,6 +476,7 @@ int main(int argc, char** argv) {
                       << "\nEnvironment:\n"
                       << "  NATIVE_GLOBE_TILE_AUTH  Tile HTTP basic auth (user:password)\n"
                       << "  NATIVE_GLOBE_DEM_AUTH   DEM HTTP basic auth (user:password)\n"
+                      << "  NATIVE_GLOBE_DEM_TOKEN  Terrain-RGB API key\n"
                       << "  NATIVE_GLOBE_GE_TOKEN   Google Earth auth token (for --dem-provider google-earth)\n"
                       ;
             return 0;
@@ -470,11 +508,16 @@ int main(int argc, char** argv) {
         std::cout << "GE Elevation Endpoint: " << config.geElevationEndpoint << "\n";
         std::cout << "GE Mesh Endpoint: " << (config.geMeshEndpoint.empty() ? "(not set)" : config.geMeshEndpoint) << "\n";
     } else {
-        std::cout << "DEM URL: " << (config.demUrl.empty() ? config.demBaseUrl : config.demUrl) << "\n";
+        const std::string demDisplayUrl = RedactSensitiveUrlParams(
+            config.demUrl.empty() ? config.demBaseUrl : config.demUrl);
+        std::cout << "DEM URL: " << demDisplayUrl << "\n";
     }
     std::cout << "DEM Provider: " << config.demProvider << "\n";
+    std::cout << "DEM API Key: " << (config.demApiKey.empty() ? "env/none" : "configured") << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";
     std::cout << "DEM Auth: " << (config.demAuth.empty() ? "none" : "basic") << "\n";
+    std::cout << "Fallback parent while children stream: "
+              << (config.fallbackRequireParentUntilChildrenReady ? "enabled" : "disabled") << "\n";
     
     // Handle precision report first (CPU-only, no GPU/GUI needed)
     if (runPrecisionReport) {

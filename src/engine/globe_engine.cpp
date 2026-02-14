@@ -154,6 +154,8 @@ bool GlobeEngine::Init() {
         DemManager::Config demConfig;
         demConfig.baseUrl = config_.demUrl.empty() ? config_.demBaseUrl : config_.demUrl;
         demConfig.basicAuthUserPwd = config_.demAuth;
+        demConfig.apiKey = config_.demApiKey;
+        demConfig.apiKeyEnv = config_.demApiKeyEnv;
         auto providerOpt = ParseDemProvider(config_.demProvider);
         if (!providerOpt.has_value()) {
             std::cerr << "[DEM] ERROR: Unknown provider '" << config_.demProvider << "'. "

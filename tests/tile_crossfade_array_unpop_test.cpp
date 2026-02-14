@@ -26,7 +26,7 @@ int main() {
         const globe::Tile&,
         uint32_t,
         int,
-        bool,
+        globe::TileRenderer::TextureTarget,
         const glm::vec4&,
         float,
         uint32_t,
@@ -35,7 +35,7 @@ int main() {
         const glm::vec4&,
         float);
     if (!Expect(std::is_same_v<decltype(&globe::TileRenderer::RenderTileWithCrossfade), CrossfadeSig>,
-                "RenderTileWithCrossfade must accept unpopTextureLayer + unpopUsesArray")) {
+                "RenderTileWithCrossfade must accept explicit unpop target enum")) {
         failures++;
     } else {
         std::cerr << "PASSED: TileRendererCrossfadeSignature\n";

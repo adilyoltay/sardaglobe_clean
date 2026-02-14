@@ -85,9 +85,12 @@ struct DemStats {
 
 // DEM Manager configuration
 struct DemManagerConfig {
-    std::string baseUrl = "https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key=YGPXGCyXf6kh5TO9dJ7l";
+    std::string baseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
     // Optional HTTP basic auth, format: "user:password"
     std::string basicAuthUserPwd;
+    // Terrain-RGB API key (optional). If empty, read from demApiKeyEnv at runtime.
+    std::string apiKey;
+    std::string apiKeyEnv = "NATIVE_GLOBE_DEM_TOKEN";
     DemProviderType providerType = DemProviderType::TerrainRGB;
     int meshN = 17;                   // Grid resolution per tile (GE parity: 17x17)
     int maxZoom = 15;                 // Terrain-RGB providers often cap DEM detail below raster max

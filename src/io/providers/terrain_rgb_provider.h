@@ -12,7 +12,7 @@ namespace globe {
 
 // Configuration for TerrainRGBProvider
 struct TerrainRGBConfig {
-    std::string baseUrl = "https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png";
+    std::string baseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
     std::string apiKey;                    // Optional API key appended to URL
     std::string basicAuthUserPwd;          // Optional HTTP basic auth
     long timeoutSec = 30;

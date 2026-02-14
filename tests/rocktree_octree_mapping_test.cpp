@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <iostream>
+#include <random>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -152,7 +153,50 @@ int main() {
         }
     }
 
-    // Test 4c: one-digit keys should not generate deeper candidates (short-key fallback contract)
+    // Test 4c: random keys should remain stable across repeated calls
+    {
+        std::mt19937 rng(0xC0FFEE);
+        std::uniform_int_distribution<int> lenDist(1, 6);
+        std::uniform_int_distribution<int> digitDist(0, 3);
+
+        bool stableAll = true;
+        for (int i = 0; i < 300; ++i) {
+            int len = lenDist(rng);
+            std::string key;
+            key.reserve(static_cast<std::size_t>(len));
+            for (int j = 0; j < len; ++j) {
+                key.push_back(static_cast<char>('0' + digitDist(rng)));
+            }
+
+            auto first = index.TileQuadKeyToOctreePaths(key);
+            auto second = index.TileQuadKeyToOctreePaths(key);
+            if (first != second) {
+                stableAll = false;
+                break;
+            }
+
+            const int expectedMinDepth = 2;
+            const int expectedMaxDepth = len + 1;
+            for (const auto& path : first) {
+                if (static_cast<int>(path.size()) < expectedMinDepth ||
+                    static_cast<int>(path.size()) > expectedMaxDepth) {
+                    stableAll = false;
+                    break;
+                }
+            }
+            if (!stableAll) {
+                break;
+            }
+        }
+
+        if (!Expect(stableAll, "Random key inputs should be stable and depth-bounded")) {
+            failures++;
+        } else {
+            std::cerr << "PASSED: OctreeMappingRandomInputsStable\n";
+        }
+    }
+
+    // Test 4d: one-digit keys should not generate deeper candidates (short-key fallback contract)
     {
         auto oneDigit = index.TileQuadKeyToOctreePaths("0");
         if (!ExpectEq(oneDigit, {}, "One-digit keys should not expand to deeper paths")) {

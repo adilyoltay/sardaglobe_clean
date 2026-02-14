@@ -40,6 +40,16 @@ void ReplaceAllInPlace(std::string& text, const std::string& from, const std::st
     }
 }
 
+bool HasQueryParam(const std::string& url, const std::string& key) {
+    if (url.find("?" + key + "=") != std::string::npos) {
+        return true;
+    }
+    if (url.find("&" + key + "=") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
 } // anonymous namespace
 
 TerrainRGBProvider::TerrainRGBProvider(const TerrainRGBConfig& config) 
@@ -62,10 +72,15 @@ std::string TerrainRGBProvider::BuildUrl(const TileKey& key, int effectiveLevel)
     ReplaceAllInPlace(url, "{x}", std::to_string(x));
     ReplaceAllInPlace(url, "{y}", std::to_string(y));
     
-    // Append API key if present
-    if (!config_.apiKey.empty()) {
-        url += (url.find('?') == std::string::npos ? "?" : "&");
-        url += "key=" + config_.apiKey;
+    // Append API key/token if present and not already in URL.
+    if (!config_.apiKey.empty() &&
+        !HasQueryParam(url, "access_token") &&
+        !HasQueryParam(url, "key")) {
+        const bool isMapbox = url.find("api.mapbox.com") != std::string::npos;
+        const char separator = (url.find('?') == std::string::npos) ? '?' : '&';
+        url += separator;
+        url += isMapbox ? "access_token=" : "key=";
+        url += config_.apiKey;
     }
     
     return url;

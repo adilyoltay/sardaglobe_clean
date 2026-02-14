@@ -7,6 +7,29 @@
 
 namespace globe {
 
+namespace {
+constexpr int kMinTmsQuadKeyDepth = 2;
+
+bool IsValidTmsQuadKey(const std::string& key) {
+    if (key.size() < static_cast<std::size_t>(kMinTmsQuadKeyDepth)) {
+        return false;
+    }
+    for (char digit : key) {
+        if (digit < '0' || digit > '3') {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool HasPrefix(const std::string& value, const std::string& prefix) {
+    return !prefix.empty() &&
+           value.size() >= prefix.size() &&
+           value.compare(0, prefix.size(), prefix) == 0;
+}
+
+} // namespace
+
 RockTreeOctreeIndex::RockTreeOctreeIndex(const Config& config,
                                          GeRateLimiter* rateLimiter)
     : config_(config),
@@ -338,39 +361,22 @@ size_t RockTreeOctreeIndex::GetMeshNodeCount() const {
 
 std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
     const std::string& tileQuadKey) const {
-
-    
-    auto isValidTmsQuadKey = [](const std::string& key) {
-        if (key.size() < 2) return false;
-        for (char digit : key) {
-            if (digit < '0' || digit > '3') {
-                return false;
-            }
-        }
-        return true;
-    };
-    std::vector<std::string> result;
-
     const int tileDepth = static_cast<int>(tileQuadKey.length());
-    if (!isValidTmsQuadKey(tileQuadKey)) {
-        return result;
+    if (!IsValidTmsQuadKey(tileQuadKey)) {
+        return {};
     }
 
-    const int minDepth = std::max(2, tileDepth - 1);
+    const int minDepth = std::max(kMinTmsQuadKeyDepth, tileDepth - 1);
     const int maxDepth = tileDepth + 1;
+    const std::string facePrefix = tileQuadKey.substr(0, kMinTmsQuadKeyDepth);
 
-    // For short keys, direct lookup
+    // For short keys, keep deterministic behavior constrained to exact depth candidates.
     if (tileDepth <= 2) {
-        std::lock_guard<std::mutex> lock(nodesMutex_);
-        auto it = nodes_.find(tileQuadKey);
-        if (it != nodes_.end() && it->second.hasNodeData) {
-            result.push_back(tileQuadKey);
-        }
-        return result;
+        return CollectRenderableNodesByDepthRange(tileDepth, tileDepth, facePrefix);
     }
 
     // For deeper tiles, filter to matching face prefix and sort deterministically.
-    return CollectRenderableNodesByDepthRange(minDepth, maxDepth, tileQuadKey.substr(0, 2));
+    return CollectRenderableNodesByDepthRange(minDepth, maxDepth, facePrefix);
 }
 
 std::vector<std::string> RockTreeOctreeIndex::CollectRenderableNodesByDepthRange(
@@ -388,8 +394,6 @@ std::vector<std::string> RockTreeOctreeIndex::CollectRenderableNodesByDepthRange
     std::vector<std::string> result;
 
     const bool filterByPrefix = !facePrefix.empty();
-    const std::size_t prefixLen = facePrefix.size();
-
     for (const auto& [path, info] : nodes_) {
         if (!info.hasNodeData) continue;
 
@@ -398,11 +402,7 @@ std::vector<std::string> RockTreeOctreeIndex::CollectRenderableNodesByDepthRange
             continue;
         }
 
-        if (filterByPrefix) {
-            if (path.size() < prefixLen || path.compare(0, prefixLen, facePrefix) != 0) {
-                continue;
-            }
-        }
+        if (filterByPrefix && !HasPrefix(path, facePrefix)) continue;
 
         byDepth[static_cast<std::size_t>(pathDepth - minDepth)].push_back(path);
     }

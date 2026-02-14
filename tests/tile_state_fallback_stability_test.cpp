@@ -181,6 +181,18 @@ int main() {
         failed += !Expect(tile.state == TileState::Scheduled, "state should be Scheduled after re-request");
     }
 
+    // Test 6: Fallback policy toggle remains deterministic and explicit.
+    {
+        Config cfg;
+        cfg.fallbackRequireParentUntilChildrenReady = false;
+        failed += !Expect(!cfg.fallbackRequireParentUntilChildrenReady,
+            "fallback flag can be disabled");
+
+        cfg.fallbackRequireParentUntilChildrenReady = true;
+        failed += !Expect(cfg.fallbackRequireParentUntilChildrenReady,
+            "fallback flag can be re-enabled");
+    }
+
     if (failed == 0) {
         std::cout << "tile_state_fallback_stability_test: ALL PASSED" << std::endl;
     } else {

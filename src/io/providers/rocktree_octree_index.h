@@ -89,8 +89,9 @@ public:
     size_t GetMeshNodeCount() const;
 
     // Convert a TileKey-style quadkey (digits 0-3) to deterministic candidate octree paths.
-    // Returns candidate octree paths in deterministic ascending order:
-    // depth (shorter first), then lexicographic path.
+    // Returns candidates in deterministic ascending order:
+    // - increasing path depth (minDepth..maxDepth), then
+    // - lexicographically within each depth bucket.
     std::vector<std::string> TileQuadKeyToOctreePaths(const std::string& tileQuadKey) const;
 
 #ifdef NATIVE_GLOBE_TESTING

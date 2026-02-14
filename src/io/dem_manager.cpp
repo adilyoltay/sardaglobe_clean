@@ -40,6 +40,12 @@ DemManager::DemManager(const Config& config) : config_(config) {
             TerrainRGBConfig trConfig;
             trConfig.baseUrl = config_.baseUrl;
             trConfig.basicAuthUserPwd = config_.basicAuthUserPwd;
+            trConfig.apiKey = config_.apiKey;
+            if (trConfig.apiKey.empty() && !config_.apiKeyEnv.empty()) {
+                if (const char* env = std::getenv(config_.apiKeyEnv.c_str())) {
+                    trConfig.apiKey = env;
+                }
+            }
             trConfig.timeoutSec = config_.timeoutSec;
             trConfig.connectTimeoutSec = config_.connectTimeoutSec;
             trConfig.meshN = config_.meshN;

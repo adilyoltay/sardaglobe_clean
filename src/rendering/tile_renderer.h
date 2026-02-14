@@ -25,6 +25,11 @@ public:
         int instancedBatches = 0;
         int instancedTiles = 0;
     };
+
+    enum class TextureTarget : uint8_t {
+        k2D,
+        kArray,
+    };
     
     explicit TileRenderer(ShaderManager& shaderManager);
     ~TileRenderer();
@@ -50,7 +55,7 @@ public:
     void RenderTileWithCrossfade(const Tile& tile,
                                  uint32_t unpopTextureId,
                                  int unpopTextureLayer,
-                                 bool unpopUsesArray,
+                                 TextureTarget unpopTarget,
                                  const glm::vec4& texScaleOffsetUnpop,
                                  float unpopBlend,
                                  uint32_t heightmapId = 0,

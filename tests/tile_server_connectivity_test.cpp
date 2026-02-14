@@ -137,6 +137,8 @@ int main() {
 
     const char* demAuthEnv = std::getenv("NATIVE_GLOBE_DEM_AUTH");
     const std::string demAuth = demAuthEnv ? std::string(demAuthEnv) : std::string();
+    const char* demTokenEnv = std::getenv("NATIVE_GLOBE_DEM_TOKEN");
+    const std::string demApiKey = demTokenEnv ? std::string(demTokenEnv) : std::string();
 
     // ---------------------------------------------------------------
     // 1. Terrain-RGB DEM Server (MapTiler default)
@@ -144,7 +146,10 @@ int main() {
     std::cout << "--- 1. MapTiler Terrain-RGB DEM Server ---\n";
     {
         // Use a known terrain-rgb tile (z=5, x=16, y=11 - covers Turkey/Europe region)
-        std::string url = "https://api.maptiler.com/tiles/terrain-rgb-v2/5/16/11.png?key=YGPXGCyXf6kh5TO9dJ7l";
+        std::string url = "https://api.maptiler.com/tiles/terrain-rgb-v2/5/16/11.png";
+        if (!demApiKey.empty()) {
+            url += "?key=" + demApiKey;
+        }
         auto r = HttpGet(url, demAuth);
         std::cout << "  URL: " << url << "\n";
         std::cout << "  Auth: " << (demAuth.empty() ? "none" : "basic") << "\n";

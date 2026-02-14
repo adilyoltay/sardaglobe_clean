@@ -52,6 +52,10 @@ int main() {
             "demNoDataMinHeightM should default to -11000");
         failed += !Expect(Near(cfg.demNoDataReplacementM, 0.0f),
             "demNoDataReplacementM should default to 0");
+        failed += !Expect(cfg.demBaseUrl.find("access_token=") == std::string::npos,
+            "Config.demBaseUrl should not hardcode an access token");
+        failed += !Expect(cfg.demBaseUrl.find("pk.") == std::string::npos,
+            "Config.demBaseUrl should not contain token material");
     }
 
     // Test 3: Fallback config defaults

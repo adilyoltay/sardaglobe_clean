@@ -16,6 +16,9 @@ namespace globe {
 // Clear, pivot, ImGui remain in GlobeEngine
 class RenderFrame {
 public:
+    // Explicit unpop texture target selector mirrors TileRenderer semantics.
+    using TextureTarget = TileRenderer::TextureTarget;
+
     struct TileDrawStats {
         int renderableLeaves = 0;   // Leaf tiles rendered normally
         int crossfadingLeaves = 0;  // Leaves currently blending from parent

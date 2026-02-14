@@ -153,6 +153,9 @@ int main() {
             "config: demNoDataReplacementM default=0");
         failed += !Expect(cfg.fallbackRequireParentUntilChildrenReady == true,
             "config: fallbackRequireParentUntilChildrenReady default=true");
+        cfg.fallbackRequireParentUntilChildrenReady = false;
+        failed += !Expect(cfg.fallbackRequireParentUntilChildrenReady == false,
+            "config: fallbackRequireParentUntilChildrenReady can be disabled");
 
         // Existing critical defaults
         failed += !Expect(cfg.useRteRender == true,
