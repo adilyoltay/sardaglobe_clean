@@ -568,7 +568,7 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
 
     // Bind unpop (ancestor) texture on unit 2 (array or 2D)
     glActiveTexture(GL_TEXTURE2);
-    if (useTextureArrayBatch_ && unpopUsesArray && unpopTextureLayer >= 0) {
+    if (unpopUsesArray && unpopTextureLayer >= 0) {
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 1);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), unpopTextureLayer);
         glBindTexture(GL_TEXTURE_2D_ARRAY, unpopTextureId);

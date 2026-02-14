@@ -58,6 +58,8 @@ int main() {
     nodes["0210"] = Node(true);
     nodes["0211"] = Node(true);
     nodes["0230"] = Node(true);
+    nodes["02310"] = Node(true);
+    nodes["0240"] = Node(true);
     nodes["033"] = Node(true);  // different face; must not leak in.
 
 #ifdef NATIVE_GLOBE_TESTING
@@ -98,6 +100,24 @@ int main() {
         }
         if (!Expect(ok, "Depth and face-prefix filters should be enforced")) {
             failures++;
+        }
+    }
+
+    {
+        auto paths = index.TileQuadKeyToOctreePaths("023");
+        bool has02310 = false;
+        bool has0240 = false;
+        for (const auto& path : paths) {
+            if (path == "02310") has02310 = true;
+            if (path == "0240") has0240 = true;
+        }
+        if (!Expect(!has02310, "Paths deeper than maxDepth should be filtered")) {
+            failures++;
+        }
+        if (!Expect(!has0240, "Different face prefix paths should be filtered")) {
+            failures++;
+        } else {
+            std::cerr << "PASSED: OctreeMappingDepthAndFaceFilters\n";
         }
     }
 

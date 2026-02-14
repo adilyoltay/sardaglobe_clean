@@ -352,17 +352,22 @@ std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
 
     std::lock_guard<std::mutex> lock(nodesMutex_);
     std::vector<std::string> result;
+    std::vector<std::vector<std::string>> byDepth;
 
     // TMS quadkeys use digits 0-3, octree uses 0-7
     // At level 2, TMS quadkeys happen to map to valid octree paths
     // (02, 03, 12, 13, 20, 21, 30, 31 are the 8 root faces)
     //
-    // For deeper levels, we need to find octree nodes that spatially
-    // overlap with the tile. As a heuristic, search for nodes at
-    // similar depths that share a common prefix.
+    // For deeper levels, map tile keys to candidate octree nodes by:
+    // 1) shared face prefix (first 2 chars),
+    // 2) candidate depth window [tileDepth-1, tileDepth+1],
+    // 3) deterministic sorting by depth then lexicographic order.
 
-    int tileDepth = static_cast<int>(tileQuadKey.length());
-    int octreeDepth = tileDepth;  // Approximate: 1:1 depth mapping
+    const int tileDepth = static_cast<int>(tileQuadKey.length());
+    const int octreeDepth = tileDepth;  // Approximate: 1:1 depth mapping
+    const int minDepth = std::max(2, octreeDepth - 1);
+    const int maxDepth = octreeDepth + 1;
+    byDepth.assign(static_cast<std::size_t>(maxDepth - minDepth + 1), {});
 
     // For short keys, direct lookup
     if (tileDepth <= 2) {
@@ -373,29 +378,29 @@ std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
         return result;
     }
 
-    // For deeper tiles, find octree nodes at similar depth
-    // that share the first 2 characters (face node)
+    // For deeper tiles, find octree nodes with the same face prefix and
+    // stable, deterministic output ordering.
+    // Result is sorted deterministically by depth, then lexicographically.
     std::string facePrefix = tileQuadKey.substr(0, 2);
 
     for (const auto& [path, info] : nodes_) {
         if (!info.hasNodeData) continue;
 
         int pathDepth = static_cast<int>(path.length());
-        if (pathDepth < octreeDepth - 1 || pathDepth > octreeDepth + 1) continue;
+        if (pathDepth < minDepth || pathDepth > maxDepth) continue;
 
         // Must share face prefix
-        if (path.length() >= 2 && path.substr(0, 2) == facePrefix) {
-            result.push_back(path);
+        if (path.substr(0, 2) == facePrefix) {
+            byDepth[static_cast<std::size_t>(pathDepth - minDepth)].push_back(path);
         }
     }
 
-    std::sort(result.begin(), result.end(), [](const std::string& a, const std::string& b) {
-        if (a.size() != b.size()) {
-            return a.size() < b.size();
+    for (auto& bucket : byDepth) {
+        std::sort(bucket.begin(), bucket.end());
+        for (const auto& candidate : bucket) {
+            result.push_back(candidate);
         }
-        return a < b;
-    });
-    result.erase(std::unique(result.begin(), result.end()), result.end());
+    }
 
     return result;
 }

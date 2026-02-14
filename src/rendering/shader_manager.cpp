@@ -98,9 +98,6 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     
     // Faz 2B: Texture array support
     bool useArray = HasFlag(flags, ShaderFlags::UseTextureArray);
-    if (useArray) {
-        // GL 330 core contains sampler2DArray natively; extension pragma is unnecessary.
-    }
     
     ss << "in vec2 vTexCoord;\n";
     ss << "in vec3 vNormal;\n";

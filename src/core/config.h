@@ -57,7 +57,7 @@ struct Config {
     std::string demAuth;
     
     // Google Earth provider configuration (only used when demProvider="google-earth")
-    std::string geElevationEndpoint = "https://earth-pa.clients6.google.com/v1/earth/elevation?alt=proto&key=AIzaSyD8Ja5AIIiHVmgDANhp5ygOAkbIi2hBZ5A"; // Default GE elevation endpoint
+    std::string geElevationEndpoint = "https://earth-pa.clients6.google.com/v1/earth/elevation?alt=proto&key="; // Default GE elevation endpoint
     std::string geMeshEndpoint = "https://kh.google.com/rt/earth/NodeData/pb=!1m2!1s{quadkey}!2u{epoch}!2e1!3u1031!4b0"; // Default GE NodeData endpoint (dynamic epoch)
     std::vector<std::pair<std::string, std::string>> geHeaders; // GE-only headers (allowlisted)
     std::string geTokenEnv = "NATIVE_GLOBE_GE_TOKEN";         // Env var for auth token

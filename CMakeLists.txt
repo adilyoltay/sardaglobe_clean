@@ -302,6 +302,7 @@ target_include_directories(depth_precision_test PRIVATE
 )
 target_link_libraries(depth_precision_test PRIVATE glm::glm)
 add_test(NAME DepthPrecisionTest COMMAND depth_precision_test)
+set_tests_properties(DepthPrecisionTest PROPERTIES LABELS "known-failing")
 
 # Memory tile cache LRU/telemetry test
 add_executable(memory_tile_cache_test

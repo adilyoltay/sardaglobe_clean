@@ -712,6 +712,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                    key.level,
                    effectiveSkirtMask,
                    config,
+                   tileOriginECEF,
                    heightRange);
     result.skirtMask = effectiveSkirtMask;
     result.stitchMask = config.edgeStitching ? stitchMask : 0;
@@ -742,6 +743,7 @@ void TileMeshBuilder::GenerateSkirts(
     int level,
     uint8_t skirtMask,
     const Config& config,
+    const glm::dvec3& tileOrigin,
     double heightRange
 ) {
     const unsigned int mainVertexCount = static_cast<unsigned int>((segments + 1) * (segments + 1));
