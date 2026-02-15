@@ -21,7 +21,8 @@ struct DemFetchResult {
         None,           // Success
         Network,        // Connection/DNS (CURLE_* errors)
         Timeout,        // Request timeout (CURLE_OPERATION_TIMEDOUT=28)
-        Auth,           // 401/403
+        Auth,           // Auth token/header issue
+        Blocked,        // Automated/bot protection response (e.g., CAPTCHA HTML)
         HttpError,      // Other HTTP 4xx/5xx
         Decode,         // Image decode failure
         Unknown
@@ -37,7 +38,12 @@ struct DemFetchResult {
     
     // Helper to determine if this is an auth failure
     bool IsAuthFailure() const {
-        return errorType == ErrorType::Auth || httpStatusCode == 401 || httpStatusCode == 403;
+        return errorType == ErrorType::Auth;
+    }
+
+    // Helper to determine if this is an anti-bot/blocked failure
+    bool IsBlockedFailure() const {
+        return errorType == ErrorType::Blocked;
     }
     
     // Helper to determine if this is a timeout
@@ -55,6 +61,7 @@ struct DemFetchResult {
     static DemFetchResult NetworkError(int curlCode, const std::string& msg, double elapsedMs);
     static DemFetchResult TimeoutError(int curlCode, const std::string& msg, double elapsedMs);
     static DemFetchResult AuthError(long httpCode, const std::string& msg);
+    static DemFetchResult BlockedError(long httpCode, const std::string& msg);
     static DemFetchResult HttpError(long httpCode, const std::string& msg);
     static DemFetchResult DecodeError(const std::string& msg);
 };

@@ -179,6 +179,48 @@ bool GlobeEngine::Init() {
                       << "Expected: terrain-rgb, google-earth" << std::endl;
             return false;
         }
+
+        // Resolve GE epoch from RockMesh octree when requested.
+        std::string resolvedGeEpoch = config_.geEpoch;
+        const bool wantGeEpochAutoDetect = (providerOpt.value() == DemProviderType::GoogleEarth) &&
+                                          config_.geEpochAutoDetect &&
+                                          config_.geMeshEnabled() &&
+                                          resolvedGeEpoch.empty();
+
+        if (wantGeEpochAutoDetect) {
+            if (!rockMeshManager_) {
+                rockMeshManager_ = std::make_unique<RockMeshManager>(config_);
+                if (!rockMeshManager_->Init()) {
+                    std::cerr << "[DEM] Warning: RockMesh manager init failed while resolving GE epoch\n";
+                    rockMeshManager_.reset();
+                } else {
+                    for (const auto& qk : config_.geMeshQuadKeys) {
+                        rockMeshManager_->Request(qk);
+                    }
+                }
+            }
+
+            if (rockMeshManager_) {
+                const auto start = std::chrono::steady_clock::now();
+                const auto deadline = start + std::chrono::milliseconds(900);
+
+                while (std::chrono::steady_clock::now() < deadline) {
+                    resolvedGeEpoch = rockMeshManager_->GetResolvedEpoch();
+                    if (!resolvedGeEpoch.empty()) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                }
+            }
+
+            if (!resolvedGeEpoch.empty()) {
+                std::cout << "[DEM] Auto-resolved GE epoch from RockMesh: "
+                          << resolvedGeEpoch << "\n";
+            } else {
+                std::cerr << "[DEM] GE epoch auto-detect timed out; using default endpoint epoch token\n";
+            }
+        }
+
         demConfig.providerType = providerOpt.value();
         demConfig.meshN = config_.demMeshN;
         demConfig.maxZoom = config_.demMaxZoom;
@@ -191,28 +233,65 @@ bool GlobeEngine::Init() {
         demConfig.connectTimeoutSec = 10;
         // Wire GE config fields
         demConfig.geElevationEndpoint = config_.geElevationEndpoint;
+        demConfig.geElevationPath = config_.geElevationPath;
         demConfig.geMeshEndpoint = config_.geMeshEndpoint;  // Phase 5 wiring
         demConfig.geHeaders = config_.geHeaders;
         demConfig.geTokenEnv = config_.geTokenEnv;
         demConfig.geElevationType = config_.geElevationType;
-        demConfig.geEpoch = config_.geEpoch;
+        demConfig.geEpoch = resolvedGeEpoch;
+        demConfig.geEpochAutoDetect = config_.geEpochAutoDetect;
         demConfig.geChannel = config_.geChannel;
         demManager_ = std::make_unique<DemManager>(demConfig);
         
         // Startup health check
         auto health = demManager_->CheckHealth();
+        static bool didAutoFallback = false;  // Guard: prevent recursive fallback loops
+        
         if (health != DemHealthStatus::Healthy) {
-            // google-earth provider requires hard-fail on init
-            if (demConfig.providerType == DemProviderType::GoogleEarth) {
+            // CRITICAL FIX: Auto-fallback from google-earth to terrain-rgb on auth failure
+            if (demConfig.providerType == DemProviderType::GoogleEarth && 
+                (health == DemHealthStatus::AuthFailed ||
+                 health == DemHealthStatus::BadResponse ||
+                 health == DemHealthStatus::Blocked) &&
+                !didAutoFallback) {
+                
+                didAutoFallback = true;  // Mark fallback as attempted
+                std::cerr << "[DEM] GE Elevation unavailable (auth/blocked). "
+                          << "Auto-fallback to terrain-rgb..." << std::endl;
+                
+                // Destroy failed GE provider and recreate with terrain-rgb
+                demManager_.reset();
+                
+                DemManager::Config fallbackConfig = demConfig;
+                fallbackConfig.providerType = DemProviderType::TerrainRGB;
+                // Use default terrain-rgb URL if not provided
+                if (fallbackConfig.baseUrl.empty() || 
+                    fallbackConfig.baseUrl.find("earth-pa.clients6.google.com") != std::string::npos) {
+                    fallbackConfig.baseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
+                }
+                
+                demManager_ = std::make_unique<DemManager>(fallbackConfig);
+                health = demManager_->CheckHealth();
+                
+                if (health == DemHealthStatus::Healthy) {
+                    std::cerr << "[DEM] Auto-fallback to terrain-rgb SUCCESSFUL." << std::endl;
+                } else {
+                    std::cerr << "[DEM] Auto-fallback to terrain-rgb also failed (" 
+                              << DemHealthStatusToString(health) 
+                              << "). Set NATIVE_GLOBE_DEM_TOKEN for terrain-rgb." << std::endl;
+                }
+            } else if (demConfig.providerType == DemProviderType::GoogleEarth && !didAutoFallback) {
+                // Other GE failures (not auth) - hard fail
                 std::cerr << "[DEM] ERROR: google-earth provider initialization failed (" 
                           << DemHealthStatusToString(health) << "). "
                           << "Use --dem-provider terrain-rgb or check configuration." << std::endl;
                 return false;
+            } else {
+                // terrain-rgb can continue with flat terrain
+                std::cerr << "[DEM] WARNING: DEM endpoint not healthy (" 
+                          << DemHealthStatusToString(health) 
+                          << "). Terrain will be flat until DEM becomes available." << std::endl;
             }
-            // terrain-rgb can continue with flat terrain
-            std::cerr << "[DEM] WARNING: DEM endpoint not healthy (" 
-                      << DemHealthStatusToString(health) 
-                      << "). Terrain will be flat until DEM becomes available." << std::endl;
         }
         
         // Init heightmap manager for GPU terrain displacement
@@ -222,7 +301,7 @@ bool GlobeEngine::Init() {
     meshScheduler_ = std::make_unique<TileMeshScheduler>(config_, demManager_.get());
     
     // Init RockMesh manager for NodeData meshes (Phase 5 Sprint 1)
-    if (config_.geMeshEnabled()) {
+    if (config_.geMeshEnabled() && !rockMeshManager_) {
         rockMeshManager_ = std::make_unique<RockMeshManager>(config_);
         if (!rockMeshManager_->Init()) {
             std::cerr << "[RockMesh] Failed to initialize manager\n";
@@ -776,8 +855,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
             return RenderBlockReason::NoMesh;
         }
         const bool hasRealTexture = tile.textureId != 0 && tile.textureId != loadingTextureId;
-        // Black nodata tiles should not be considered renderable (consistency with RenderFrame)
-        if (!hasRealTexture || tile.mostlyBlackOpaqueRaster) {
+        // Keep mostly-black tiles in the render-set so DrawTiles can do
+        // per-tile fallback instead of collapsing the whole sibling quad.
+        if (!hasRealTexture) {
             return RenderBlockReason::NoTexture;
         }
         if (requireTerrainForQuorum) {
@@ -821,7 +901,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
     if (anyBlocked) {
         for (int pass = 0; pass < kMaxQuorumPasses; ++pass) {
             // Parents to collapse this pass (standard quadtree quorum).
-            // If ANY child is blocked, collapse the full sibling set to parent.
+            // Collapse only when a sibling quad has multiple blocked children;
+            // single-child misses are handled by DrawTiles via per-tile fallback.
             // The terrainExpected guard in classifyRenderBlockReason prevents
             // over-collapse for regions with no DEM coverage.
             std::unordered_set<TileKey> candidateParents;
@@ -841,6 +922,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 auto children = parent.Children();
                 bool fullSiblingSet = true;
                 bool anyBlocked = false;
+                int blockedCount = 0;
                 for (const TileKey& child : children) {
                     if (effectiveLeafSet.count(child) == 0) {
                         fullSiblingSet = false;
@@ -848,9 +930,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     }
                     if (classifyRenderBlockReason(child) != RenderBlockReason::None) {
                         anyBlocked = true;
+                        ++blockedCount;
                     }
                 }
-                if (fullSiblingSet && anyBlocked) {
+                // Avoid over-collapse when only one child is temporarily blocked.
+                // In that case, keep other crisp children visible and let
+                // DrawTiles fill only the missing child via ancestor fallback.
+                if (fullSiblingSet && anyBlocked && blockedCount >= 2) {
                     collapseList.push_back(parent);
                 }
             }
@@ -2234,7 +2320,12 @@ void GlobeEngine::Render() {
         for (const TileKey& leafKey : sceneSnapshot_.leafSet) {
             TileKey parent = leafKey;
             int chainDepth = 0;
-            const int maxChainDepth = 3;  // Sadece 3 seviye yukarı pin'le
+            // High zoom levels need a deeper pin chain so shared ancestors survive
+            // while children stream in; keep depth proportional to tile level.
+            const int maxChainDepth = std::max(
+                3,
+                std::min(10, static_cast<int>(leafKey.level) / 2 + 2)
+            );
             while (parent.level > 0 && chainDepth < maxChainDepth) {
                 parent = parent.Parent();
                 // Eğer henüz pin'lenmemişse pin'le
@@ -2750,6 +2841,27 @@ void GlobeEngine::Render() {
     debugStats_.heading = camera_->GetHeading();
     debugStats_.tilt = camera_->GetTilt();
     
+    // RockMesh (Google Earth 3D Buildings) telemetry
+    debugStats_.rockMeshEnabled = (rockMeshManager_ != nullptr);
+    if (rockMeshManager_) {
+        auto rockStats = rockMeshManager_->GetStats();
+        debugStats_.rockMeshUploaded = rockStats.uploadedCount;
+        debugStats_.rockMeshPending = rockStats.enqueuedCount + rockStats.inFlightCount;
+        debugStats_.rockMeshInFlight = rockStats.inFlightCount;
+        debugStats_.rockMeshFailed = rockStats.failureCount;
+        debugStats_.rockMeshDiskCacheHits = rockStats.diskCacheHits;
+        debugStats_.rockMeshDiskCacheMisses = rockStats.diskCacheMisses;
+        debugStats_.rockMeshStaleDrops = rockStats.staleDropCount;
+    } else {
+        debugStats_.rockMeshUploaded = 0;
+        debugStats_.rockMeshPending = 0;
+        debugStats_.rockMeshInFlight = 0;
+        debugStats_.rockMeshFailed = 0;
+        debugStats_.rockMeshDiskCacheHits = 0;
+        debugStats_.rockMeshDiskCacheMisses = 0;
+        debugStats_.rockMeshStaleDrops = 0;
+    }
+    
     // Render ImGui debug panel
     RenderDebugPanel();
 
@@ -3115,13 +3227,42 @@ void GlobeEngine::RenderDebugPanel() {
                         debugStats_.memoryCacheWriteRejects,
                         debugStats_.memoryCacheEvictions);
             ImGui::Text("Pinned Tiles: %d", debugStats_.pinnedTileCount);
-                        debugStats_.memoryCacheEvictions);
             ImGui::Text("Disk Cache Hit/Miss: %zu / %zu",
                         debugStats_.diskCacheReadHits, debugStats_.diskCacheReadMisses);
             ImGui::Text("Disk Cache Writes/Fails: %zu / %zu",
                         debugStats_.diskCacheWrites, debugStats_.diskCacheWriteFails);
             ImGui::Text("Network Fetches: %zu / %zu req",
                         debugStats_.networkFetches, debugStats_.totalFetchRequests);
+            
+            // DEM State
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.8f, 0.4f, 0.8f, 1.0f), "DEM State");
+            ImGui::Separator();
+            if (demManager_) {
+                auto demHealth = demManager_->GetHealthStatus();
+                const char* healthStr = DemHealthStatusToString(demHealth);
+                switch (demHealth) {
+                    case DemHealthStatus::Healthy:
+                        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Status: %s", healthStr);
+                        break;
+                    case DemHealthStatus::Blocked:
+                    case DemHealthStatus::AuthFailed:
+                        ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Status: %s", healthStr);
+                        break;
+                    case DemHealthStatus::BadResponse:
+                    case DemHealthStatus::Unreachable:
+                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Status: %s", healthStr);
+                        break;
+                    default:
+                        ImGui::Text("Status: %s", healthStr);
+                }
+                ImGui::Text("Provider: %s", config_.demProvider.c_str());
+                if (!config_.geEpoch.empty()) {
+                    ImGui::Text("GE Epoch: %s", config_.geEpoch.c_str());
+                }
+            } else {
+                ImGui::TextDisabled("DEM: disabled");
+            }
             if (debugStats_.fetchAuthFails > 0) {
                 ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Raster Auth Fails: %zu", debugStats_.fetchAuthFails);
             } else {
@@ -3136,6 +3277,21 @@ void GlobeEngine::RenderDebugPanel() {
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Raster HTTP Errors: %zu", debugStats_.fetchHttpErrors);
             } else {
                 ImGui::Text("Raster HTTP Errors: %zu", debugStats_.fetchHttpErrors);
+            }
+            
+            ImGui::Spacing();
+            
+            // RockMesh (Google Earth 3D Buildings)
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "RockMesh (GE 3D Buildings)");
+            ImGui::Separator();
+            if (debugStats_.rockMeshEnabled) {
+                ImGui::Text("Uploaded: %d", debugStats_.rockMeshUploaded);
+                ImGui::Text("Pending: %d | InFlight: %d", debugStats_.rockMeshPending, debugStats_.rockMeshInFlight);
+                ImGui::Text("Failed: %d | Stale Drops: %d", debugStats_.rockMeshFailed, debugStats_.rockMeshStaleDrops);
+                ImGui::Text("Disk Cache Hit/Miss: %d / %d", 
+                            debugStats_.rockMeshDiskCacheHits, debugStats_.rockMeshDiskCacheMisses);
+            } else {
+                ImGui::TextDisabled("RockMesh disabled (no endpoint configured)");
             }
             
             // Gap-free telemetry
@@ -3331,6 +3487,20 @@ void GlobeEngine::RenderDebugPanel() {
     // Render ImGui
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    
+    // CRITICAL FIX: GL State Isolation - Prevent Render State Leak
+    // After UI rendering, reset all GL states to default before 3D world rendering
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    glUseProgram(0);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
 }
 
 // ============================================================================

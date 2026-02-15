@@ -1,6 +1,7 @@
 #include "protobuf_wire.h"
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 namespace globe {
 namespace protobuf {
@@ -252,27 +253,35 @@ std::vector<uint8_t> BuildElevationRequest(const std::vector<double>& lats,
     
     ProtobufEncoder encoder;
     
-    // RE-based schema: repeated LatitudeLongitude points = 1 (embedded messages)
-    // Each point: { latitude=1 (double), longitude=2 (double) }
+    // Schema Hypothesis V3 (Google E7 Standard):
+    // Field 1: Repeated Message (Point)
+    //   Field 1: Latitude E7 (sint32/int32 varint) -> degrees * 1e7
+    //   Field 2: Longitude E7 (sint32/int32 varint) -> degrees * 1e7
+    // Field 2: ElevationType (int32)
+    
     for (size_t i = 0; i < lats.size(); ++i) {
         // Encode each point as embedded message
-        // Field 1 (points), wire type 2 (length-delimited)
-        // First, build the embedded message
         ProtobufEncoder pointEncoder;
-        // latitude = field 1, fixed64 (double)
-        pointEncoder.EncodeTag(1, WireType::Fixed64);
-        pointEncoder.EncodeFixed64(lats[i]);
-        // longitude = field 2, fixed64 (double)
-        pointEncoder.EncodeTag(2, WireType::Fixed64);
-        pointEncoder.EncodeFixed64(lons[i]);
         
-        // Now encode as length-delimited field 1
+        // E7 conversion
+        int32_t latE7 = static_cast<int32_t>(lats[i] * 1e7);
+        int32_t lonE7 = static_cast<int32_t>(lons[i] * 1e7);
+        
+        // latitude = field 1, varint (E7)
+        pointEncoder.EncodeTag(1, WireType::Varint);
+        pointEncoder.EncodeVarint(static_cast<int64_t>(latE7));
+        
+        // longitude = field 2, varint (E7)
+        pointEncoder.EncodeTag(2, WireType::Varint);
+        pointEncoder.EncodeVarint(static_cast<int64_t>(lonE7));
+        
+        // Encode as length-delimited field 1 (Repeated)
         std::vector<uint8_t> pointBytes = pointEncoder.TakeBytes();
         encoder.EncodeTag(1, WireType::LengthDelimited);
         encoder.EncodeLengthDelimited(pointBytes);
     }
     
-    // Encode elevation type (field 2, varint) - RE: int32 elevation_type = 2
+    // Field 2: Elevation Type (int32)
     encoder.EncodeTag(2, WireType::Varint);
     encoder.EncodeVarint(static_cast<uint64_t>(elevationType));
     

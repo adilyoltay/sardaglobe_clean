@@ -274,6 +274,16 @@ private:
         float tiltFactor = 0.0f;
         int staleTileCount = 0;
         uint64_t stallFrames = 0;
+        // RockMesh (Google Earth 3D Buildings) telemetry
+        int rockMeshUploaded = 0;        // Successfully uploaded meshes
+        int rockMeshPending = 0;         // Pending requests in queue
+        int rockMeshInFlight = 0;        // Currently fetching
+        int rockMeshFailed = 0;          // Failed to load
+        int rockMeshDiskCacheHits = 0;   // Served from disk cache
+        int rockMeshDiskCacheMisses = 0; // Network fetch required
+        int rockMeshStaleDrops = 0;      // Dropped due to stale generation
+        float rockMeshFade = 1.0f;       // Current fade value (0.0-1.0)
+        bool rockMeshEnabled = false;    // Whether RockMesh system is active
     };
     DebugStats debugStats_;
     DisplacementMode lastTerrainMode_ = DisplacementMode::CPU_MESH_BAKE;

@@ -76,6 +76,7 @@ target_include_directories(imgui PRIVATE
 target_compile_definitions(imgui PRIVATE IMGUI_IMPL_OPENGL_LOADER_GLAD)
 
 find_package(CURL REQUIRED)
+find_package(ZLIB REQUIRED)
 
 add_library(glad STATIC
   third_party/glad/src/glad.c
@@ -177,6 +178,7 @@ target_link_libraries(native_globe PRIVATE
   CURL::libcurl
   glm::glm
   imgui
+  ZLIB::ZLIB
 )
 
 if (APPLE)
@@ -487,7 +489,7 @@ add_executable(dem_fallback_test
 target_include_directories(dem_fallback_test PRIVATE
   src
 )
-target_link_libraries(dem_fallback_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(dem_fallback_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME DemFallbackTest COMMAND dem_fallback_test)
 
 # DEM continuity test (exact + ancestor mixed path)
@@ -506,7 +508,7 @@ add_executable(dem_continuity_test
 target_include_directories(dem_continuity_test PRIVATE
   src
 )
-target_link_libraries(dem_continuity_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(dem_continuity_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME DemContinuityTest COMMAND dem_continuity_test)
 
 # DEM edge equalization fallback regression test
@@ -529,7 +531,7 @@ target_include_directories(dem_edge_equalization_fallback_test PRIVATE
   src
   third_party/glad/include
 )
-target_link_libraries(dem_edge_equalization_fallback_test PRIVATE glm::glm glad CURL::libcurl)
+target_link_libraries(dem_edge_equalization_fallback_test PRIVATE glm::glm glad CURL::libcurl ZLIB::ZLIB)
 add_test(NAME DemEdgeEqualizationFallbackTest COMMAND dem_edge_equalization_fallback_test)
 
 # Mesh template stitch/skirt mask variant test
@@ -564,7 +566,7 @@ target_include_directories(selective_skirt_mask_test PRIVATE
   src
   third_party/glad/include
 )
-target_link_libraries(selective_skirt_mask_test PRIVATE glm::glm glad CURL::libcurl)
+target_link_libraries(selective_skirt_mask_test PRIVATE glm::glm glad CURL::libcurl ZLIB::ZLIB)
 add_test(NAME SelectiveSkirtMaskTest COMMAND selective_skirt_mask_test)
 
 # LOD child quorum policy test
@@ -620,7 +622,7 @@ add_executable(dem_effective_level_policy_test
 target_include_directories(dem_effective_level_policy_test PRIVATE
   src
 )
-target_link_libraries(dem_effective_level_policy_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(dem_effective_level_policy_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME DemEffectiveLevelPolicyTest COMMAND dem_effective_level_policy_test)
 
 # DEM grid row-order test (south->north service ordering)
@@ -639,7 +641,7 @@ add_executable(dem_grid_row_order_test
 target_include_directories(dem_grid_row_order_test PRIVATE
   src
 )
-target_link_libraries(dem_grid_row_order_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(dem_grid_row_order_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME DemGridRowOrderTest COMMAND dem_grid_row_order_test)
 
 # DEM/raster co-eviction behavior test
@@ -658,7 +660,7 @@ add_executable(dem_co_eviction_test
 target_include_directories(dem_co_eviction_test PRIVATE
   src
 )
-target_link_libraries(dem_co_eviction_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(dem_co_eviction_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME DemCoEvictionTest COMMAND dem_co_eviction_test)
 
 # Adaptive mesh segments policy test
@@ -687,7 +689,7 @@ add_executable(seam_metric_truth_test
 target_include_directories(seam_metric_truth_test PRIVATE
   src
 )
-target_link_libraries(seam_metric_truth_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(seam_metric_truth_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME SeamMetricTruthTest COMMAND seam_metric_truth_test)
 
 # Tile server connectivity diagnostic test
@@ -730,7 +732,7 @@ target_include_directories(auth_backoff_reset_test PRIVATE
   src
 )
 target_compile_definitions(auth_backoff_reset_test PRIVATE NATIVE_GLOBE_TESTING)
-target_link_libraries(auth_backoff_reset_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(auth_backoff_reset_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME AuthBackoffResetTest COMMAND auth_backoff_reset_test)
 
 # Decode metadata preservation test
@@ -755,7 +757,7 @@ add_executable(ge_elevation_provider_test
 target_include_directories(ge_elevation_provider_test PRIVATE
   src
 )
-target_link_libraries(ge_elevation_provider_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(ge_elevation_provider_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME GeElevationProviderTest COMMAND ge_elevation_provider_test)
 
 # Google Earth DEM Grid Order test
@@ -771,7 +773,7 @@ add_executable(ge_dem_grid_order_test
 target_include_directories(ge_dem_grid_order_test PRIVATE
   src
 )
-target_link_libraries(ge_dem_grid_order_test PRIVATE glm::glm CURL::libcurl)
+target_link_libraries(ge_dem_grid_order_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME GeDemGridOrderTest COMMAND ge_dem_grid_order_test)
 
 # TileKey QuadKey conversion test (Track B: #9)

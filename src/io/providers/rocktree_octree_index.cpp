@@ -58,13 +58,24 @@ RockTreeOctreeIndex::~RockTreeOctreeIndex() = default;
 
 std::vector<std::pair<std::string, std::string>>
 RockTreeOctreeIndex::BuildHeaders() const {
+    // Google Earth Web spoofing headers
+    // These headers mimic the official Google Earth web client to avoid CAPTCHA
     return {
         {"Accept", "application/x-protobuf"},
+        {"Accept-Language", "en-US,en;q=0.9"},
+        {"Accept-Encoding", "gzip, deflate, br"},
         {"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/121.0.0.0 Safari/537.36"},
         {"Referer", "https://earth.google.com/"},
-        {"Origin", "https://earth.google.com"}
+        {"Origin", "https://earth.google.com"},
+        {"Sec-Ch-Ua", "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\""},
+        {"Sec-Ch-Ua-Mobile", "?0"},
+        {"Sec-Ch-Ua-Platform", "\"macOS\""},
+        {"Sec-Fetch-Dest", "empty"},
+        {"Sec-Fetch-Mode", "cors"},
+        {"Sec-Fetch-Site", "cross-site"},
+        {"X-Client-Data", "CI+2yQEIprbJAQipncoBCKDhygEIkqHLAQj6mM0B"}  // Base64 encoded client capabilities
     };
 }
 
@@ -98,8 +109,19 @@ bool RockTreeOctreeIndex::Init() {
 bool RockTreeOctreeIndex::FetchPlanetoidMetadata() {
     if (rateLimiter_) rateLimiter_->WaitForSlot();
 
+    std::cout << "[Octree] Fetching PlanetoidMetadata from: " << planetoidMetadataUrl_ << std::endl;
+    
     auto headers = BuildHeaders();
+    std::cout << "[Octree] Request headers:" << std::endl;
+    for (const auto& [key, value] : headers) {
+        std::cout << "  " << key << ": " << value << std::endl;
+    }
+    
     HttpResponse response = transport_->Get(planetoidMetadataUrl_, headers);
+
+    std::cout << "[Octree] PlanetoidMetadata response: HTTP " << response.httpCode 
+              << ", success=" << response.success 
+              << ", body=" << response.body.size() << " bytes" << std::endl;
 
     if (!response.success) {
         std::cerr << "[Octree] PlanetoidMetadata HTTP error: "
@@ -114,17 +136,33 @@ bool RockTreeOctreeIndex::FetchPlanetoidMetadata() {
         std::cerr << "[Octree] PlanetoidMetadata CAPTCHA/block detected (HTTP "
                   << response.httpCode << ", body=" << response.body.size() << " bytes)"
                   << std::endl;
+        // Log first 500 chars of body for debugging
+        if (!response.body.empty()) {
+            std::string preview(response.body.begin(), 
+                               response.body.begin() + std::min(size_t(500), response.body.size()));
+            std::cerr << "[Octree] Response preview: " << preview << std::endl;
+        }
         return false;
     }
 
     PlanetoidMetadata meta = PlanetoidMetadataParser::Parse(response.body);
     if (!meta.valid) {
         std::cerr << "[Octree] PlanetoidMetadata parse error: " << meta.error << std::endl;
+        // Log hex dump of first 100 bytes for debugging
+        if (!response.body.empty()) {
+            std::cerr << "[Octree] Response hex (first 100 bytes): ";
+            for (size_t i = 0; i < std::min(size_t(100), response.body.size()); ++i) {
+                printf("%02x ", static_cast<unsigned char>(response.body[i]));
+            }
+            std::cerr << std::endl;
+        }
         return false;
     }
 
     epoch_ = meta.epoch;
     earthRadiusM_ = static_cast<double>(meta.earthRadiusM);
+    std::cout << "[Octree] PlanetoidMetadata OK: epoch=" << epoch_ 
+              << " earthRadius=" << earthRadiusM_ << "m" << std::endl;
     return true;
 }
 

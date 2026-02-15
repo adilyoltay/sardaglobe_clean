@@ -117,37 +117,58 @@ size_t MemoryTileCache::GetPinnedCount() const {
 }
 
 void MemoryTileCache::EvictIfNeededLocked() {
+    const auto isPinnedInCache = [this](const CacheKey& key) {
+        return pinned_.find(key) != pinned_.end();
+    };
+
+    // Track how many cache entries are currently pinned.
+    size_t pinnedInCacheCount = 0;
+    for (const auto& pair : map_) {
+        const CacheKey& key = pair.first;
+        if (isPinnedInCache(key)) {
+            ++pinnedInCacheCount;
+        }
+    }
+
     while (map_.size() > maxEntries_ || bytesUsed_ > maxBytes_) {
         if (lru_.empty()) {
             break;
         }
 
-        const CacheKey& victim = lru_.back();
-        
-        // P2: Pin'lenmiş entry'leri asla silme (O(1) lookup)
-        if (pinned_.find(victim) != pinned_.end()) {
-            // Tümü pin'liyse çık (deadlock önleme)
-            bool allPinned = std::all_of(lru_.begin(), lru_.end(),
-                [&](const CacheKey& k) { return pinned_.find(k) != pinned_.end(); });
-            if (allPinned) {
-                break;  // Hepsi pin'li, daha fazla eviction yapma
-            }
-            
-            // Sonraki victim'a geç
-            lru_.splice(lru_.begin(), lru_, std::prev(lru_.end()));
-            continue;
+        // All entries are pinned -> no legal victim exists.
+        if (pinnedInCacheCount >= map_.size()) {
+            break;
         }
-        
-        auto it = map_.find(victim);
-        if (it == map_.end()) {
-            lru_.pop_back();
+
+        auto it = std::prev(lru_.end());
+        const CacheKey& victimKey = *it;
+
+        if (isPinnedInCache(victimKey)) {
+            // Move pinned tail entries forward so stale pins are crossed quickly
+            // and we keep scanning old unpinned candidates in O(N).
+            lru_.splice(lru_.begin(), lru_, it);
             continue;
         }
 
-        bytesUsed_ -= it->second.data.size();
-        map_.erase(it);
-        lru_.pop_back();
+        auto mapIt = map_.find(victimKey);
+        if (mapIt == map_.end()) {
+            lru_.erase(it);
+            continue;
+        }
+
+        bytesUsed_ -= mapIt->second.data.size();
+        map_.erase(mapIt);
+        lru_.erase(it);
         ++stats_.evictions;
+    }
+
+    // Remove any stale LRU nodes that were never synchronized from map state.
+    for (auto it = lru_.begin(); it != lru_.end();) {
+        if (map_.find(*it) == map_.end()) {
+            it = lru_.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

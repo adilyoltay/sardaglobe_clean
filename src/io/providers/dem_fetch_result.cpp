@@ -41,6 +41,15 @@ DemFetchResult DemFetchResult::AuthError(long httpCode, const std::string& msg) 
     return r;
 }
 
+DemFetchResult DemFetchResult::BlockedError(long httpCode, const std::string& msg) {
+    DemFetchResult r;
+    r.success = false;
+    r.httpStatusCode = httpCode;
+    r.errorMessage = msg;
+    r.errorType = ErrorType::Blocked;
+    return r;
+}
+
 DemFetchResult DemFetchResult::HttpError(long httpCode, const std::string& msg) {
     DemFetchResult r;
     r.success = false;

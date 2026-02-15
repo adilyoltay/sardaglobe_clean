@@ -57,17 +57,33 @@ struct Config {
     std::string demAuth;
     
     // Google Earth provider configuration (only used when demProvider="google-earth")
-    std::string geElevationEndpoint = "https://earth-pa.clients6.google.com/v1/earth/elevation?alt=proto&key="; // Default GE elevation endpoint
+    std::string geElevationEndpoint = "https://kh.google.com/rt/earth/Elevation/pb=!1m2!1s{path}!2u{epoch}"; // Default GE elevation endpoint (Google Earth Pro style)
+    std::string geElevationPath = "Elevation";                // Override {path} placeholder in elevation URL
     std::string geMeshEndpoint = "https://kh.google.com/rt/earth/NodeData/pb=!1m2!1s{quadkey}!2u{epoch}!2e1!3u1031!4b0"; // Default GE NodeData endpoint (dynamic epoch)
     std::vector<std::pair<std::string, std::string>> geHeaders; // GE-only headers (allowlisted)
     std::string geTokenEnv = "NATIVE_GLOBE_GE_TOKEN";         // Env var for auth token
     int geElevationType = 1;                                  // 0=ELLIPSOID, 1=TERRAIN (GE Default), 2=SEA_LEVEL
     std::string geEpoch = "";                                  // Dataset epoch (auto-detected from PlanetoidMetadata)
+    bool geEpochAutoDetect = true;                            // Auto-fetch epoch from PlanetoidMetadata
     std::string geChannel = "default";                        // Service channel
     
     // Phase 5 Sprint 1: RockTree/NodeData mesh (single quadkey mode)
     // Phase 5 Sprint 2: LOD-aware mesh management (geMeshQuadKeys acts as seed set)
-    std::vector<std::string> geMeshQuadKeys;                  // Seed quadkeys for mesh loading
+    // Default seeds: San Francisco (0213), New York (0320), London (0132), Tokyo (1230)
+    std::vector<std::string> geMeshQuadKeys = {
+        "0213",   // San Francisco, CA
+        "0212",   // San Francisco Bay Area
+        "0320",   // New York, NY
+        "0321",   // New York Metro
+        "0132",   // London, UK
+        "0133",   // London Metro
+        "1230",   // Tokyo, Japan
+        "1231",   // Tokyo Metro
+        "0302",   // Chicago, IL
+        "0310",   // Washington DC
+        "1201",   // Beijing, China
+        "1220",   // Seoul, Korea
+    };  // Seed quadkeys for mesh loading
     bool geMeshFlipV = true;                                  // Flip V coordinate for texture
     
     // Sprint 2: LOD-aware mesh configuration
@@ -106,8 +122,8 @@ struct Config {
     std::string cacheDir = "tile_cache";
     bool useDiskCache = true;
     bool useMemoryCache = true;
-    size_t memoryCacheMaxEntries = 8192;                    // 4x artırıldı
-    size_t memoryCacheMaxBytes = 512 * 1024 * 1024;         // 512 MB (4x) compressed tile bytes
+    size_t memoryCacheMaxEntries = 16384;                   // 8x - Cache thrashing önlemi
+    size_t memoryCacheMaxBytes = 1024 * 1024 * 1024;        // 1 GB (8x) compressed tile bytes
     bool useDecodedMemoryCache = true;
     size_t decodedMemoryCacheMaxEntries = 4096;             // 4x artırıldı
     size_t decodedMemoryCacheMaxBytes = 1024 * 1024 * 1024; // 1 GB (4x) RGBA payload
@@ -143,7 +159,7 @@ struct Config {
     bool adaptiveResourceLimits = false;
     
     // Features
-    bool demEnabled = true;           // Enable terrain elevation
+    bool demEnabled = true;           // Enable terrain by default (uses GE elevation API)
     bool vectorEnabled = false;
     bool wireframeMode = false;
     bool is2D = false;
@@ -191,7 +207,7 @@ struct Config {
     std::string demApiKey;                                    // Added via --dem-api-key / env var
     std::string demApiKeyEnv = "NATIVE_GLOBE_DEM_TOKEN";      // Env var for DEM API key
     // DEM Provider: terrain-rgb (default, public) | google-earth (internal, requires auth)
-    std::string demProvider = "terrain-rgb";  // earth-pa.clients6.google.com blocked for native clients
+    std::string demProvider = "google-earth";  // Default: Google Earth elevation API (may require browser context)
     int demMaxZoom = 15;               // Clamp DEM requests above provider max zoom
     int demMeshN = 17;                // Grid resolution per tile (17x17 = 289 samples, GE parity)
                                       // Old: 5x5 = 25 samples (blocky terrain)

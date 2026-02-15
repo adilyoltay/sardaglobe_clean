@@ -117,6 +117,16 @@ void RockMeshManager::Shutdown() {
     }
 }
 
+std::string RockMeshManager::GetResolvedEpoch() const {
+    std::lock_guard<std::mutex> lock(epochMutex_);
+    return resolvedEpoch_;
+}
+
+bool RockMeshManager::HasResolvedEpoch() const {
+    std::lock_guard<std::mutex> lock(epochMutex_);
+    return !resolvedEpoch_.empty();
+}
+
 // Sprint 2: Internal request - adds to priority queue, not directly to worker queue
 void RockMeshManager::Request(const std::string& nodeKey) {
     std::lock_guard<std::mutex> lock(stateMutex_);

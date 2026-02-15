@@ -110,6 +110,11 @@ public:
     
     // Check if any work pending (for request-driven frame)
     bool HasPendingWork() const;
+    // Returns the currently resolved GE dataset epoch for NodeData endpoints.
+    // Empty string means no epoch is resolved yet.
+    std::string GetResolvedEpoch() const;
+    // Convenience check for epoch availability.
+    bool HasResolvedEpoch() const;
     
     // Sprint 2: Check if any inflight work (fetching or uploading)
     bool HasInflightWork() const;

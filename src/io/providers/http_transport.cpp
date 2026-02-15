@@ -77,6 +77,7 @@ HttpResponse CurlHttpTransport::DoRequest(const std::string& url,
     long sslVerify = (config_.verifySsl && !config_.insecureMode) ? 1L : 0L;
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, sslVerify);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, sslVerify ? 2L : 0L);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
     
     // User agent
     curl_easy_setopt(curl, CURLOPT_USERAGENT, config_.userAgent.c_str());

@@ -289,6 +289,8 @@ int main(int argc, char** argv) {
             config.demMeshN = std::max(2, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--ge-elevation-endpoint") == 0 && i + 1 < argc) {
             config.geElevationEndpoint = argv[++i];
+        } else if (std::strcmp(argv[i], "--ge-elevation-path") == 0 && i + 1 < argc) {
+            config.geElevationPath = argv[++i];  // Override {path} placeholder in elevation URL
         } else if (std::strcmp(argv[i], "--ge-mesh-endpoint") == 0 && i + 1 < argc) {
             config.geMeshEndpoint = argv[++i];
         } else if (std::strcmp(argv[i], "--ge-header") == 0 && i + 1 < argc) {
@@ -299,7 +301,7 @@ int main(int argc, char** argv) {
                 std::string key = header.substr(0, colonPos);
                 std::string value = header.substr(colonPos + 1);
                 // Allowlist check: only specific headers allowed
-                if (key == "Authorization" || key == "X-Custom-Auth") {
+                if (key == "Authorization" || key == "X-Custom-Auth" || key == "X-Client-Data") {
                     config.geHeaders.push_back({key, value});
                 } else {
                     std::cerr << "Warning: Header '" << key << "' not in GE allowlist. Ignored.\n";
@@ -374,6 +376,7 @@ int main(int argc, char** argv) {
             config.geMeshMaxChildRequestsPerFrame = maxReq;
         } else if (std::strcmp(argv[i], "--ge-epoch") == 0 && i + 1 < argc) {
             config.geEpoch = argv[++i];
+            config.geEpochAutoDetect = false;
         } else if (std::strcmp(argv[i], "--ge-rate-limit") == 0 && i + 1 < argc) {
             int rateMs;
             if (!ParseNumeric(argv[++i], rateMs, "--ge-rate-limit")) return 1;
@@ -382,6 +385,10 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.geRateLimitMs = rateMs;
+        } else if (std::strcmp(argv[i], "--ge-epoch-auto-detect") == 0) {
+            config.geEpochAutoDetect = true;
+        } else if (std::strcmp(argv[i], "--no-ge-epoch-auto-detect") == 0) {
+            config.geEpochAutoDetect = false;
         } else if (std::strcmp(argv[i], "--ge-no-octree") == 0) {
             config.geOctreeEnabled = false;
         } else if (std::strcmp(argv[i], "--fallback-parent-until-children-ready") == 0) {
@@ -436,15 +443,19 @@ int main(int argc, char** argv) {
                       << "  --tile-url URL    Tile server URL template\n"
                       << "  --tile-auth U:P   Tile HTTP basic auth (user:password)\n"
                       << "  --dem-url URL     DEM server URL (elevation)\n"
-                      << "  --dem-provider P  DEM provider: terrain-rgb | google-earth (default: terrain-rgb)\n"
+                      << "  --dem-provider P  DEM provider: google-earth | terrain-rgb (default: google-earth)\n"
                       << "  --dem-auth U:P    DEM HTTP basic auth (user:password)\n"
                       << "  --dem-api-key KEY DEM Terrain-RGB API key (optional)\n"
                       << "  --dem-api-key-env ENV DEM API key env var (default: NATIVE_GLOBE_DEM_TOKEN)\n"
                       << "  --dem-max-zoom N  Max DEM source zoom level (default 15)\n"
                       << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
                       << "  --ge-elevation-endpoint URL  Google Earth elevation endpoint\n"
+                      << "  --ge-elevation-path PATH     Override {path} in elevation URL (default: Elevation)\n"
+                      << "  --ge-epoch EPOCH             Manual GE dataset epoch override\n"
+                      << "  --ge-epoch-auto-detect       Auto-detect epoch from PlanetoidMetadata (default: enabled)\n"
+                      << "  --no-ge-epoch-auto-detect    Disable GE epoch auto-detection\n"
                       << "  --ge-mesh-endpoint URL       Google Earth mesh endpoint (Phase 5)\n"
-                      << "  --ge-header K:V              GE custom header (allowlist: Authorization, X-Custom-Auth)\n"
+                      << "  --ge-header K:V              GE custom header (allowlist: Authorization, X-Custom-Auth, X-Client-Data)\n"
                       << "  --ge-elevation-type TYPE     Elevation type: ellipsoid | terrain | sea_level\n"
                       << "  --ge-mesh-quadkey QK         RockTree NodeData quadkey (Sprint 1, repeatable, digits 0-7)\n"
                       << "  --ge-mesh-no-flip-v          Disable V coordinate flip for texture (default: flip enabled)\n"
@@ -516,6 +527,19 @@ int main(int argc, char** argv) {
     std::cout << "DEM API Key: " << (config.demApiKey.empty() ? "env/none" : "configured") << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";
     std::cout << "DEM Auth: " << (config.demAuth.empty() ? "none" : "basic") << "\n";
+    if (config.demProvider == "google-earth") {
+        bool hasAuthHeader = false;
+        for (const auto& header : config.geHeaders) {
+            if (header.first == "Authorization") {
+                hasAuthHeader = true;
+            }
+        }
+        bool hasEnvToken = !config.geTokenEnv.empty() && std::getenv(config.geTokenEnv.c_str()) != nullptr;
+        if (!hasAuthHeader && !hasEnvToken) {
+            std::cout << "WARNING: Google Earth elevation likely needs auth. "
+                         "Set NATIVE_GLOBE_GE_TOKEN or pass --ge-header Authorization:Bearer <token>.\n";
+        }
+    }
     std::cout << "Fallback parent while children stream: "
               << (config.fallbackRequireParentUntilChildrenReady ? "enabled" : "disabled") << "\n";
     

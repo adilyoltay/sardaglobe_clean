@@ -13,11 +13,37 @@
 
 namespace globe {
 
+namespace {
+
+std::string ResolveGeElevationEndpoint(const std::string& endpointTemplate,
+                                      const std::string& epoch,
+                                      const std::string& path = "Elevation") {
+    std::string endpoint = endpointTemplate;
+    const auto replaceToken = [](std::string& source, const std::string& token,
+                                const std::string& value) {
+        size_t pos = source.find(token);
+        if (pos != std::string::npos) {
+            source.replace(pos, token.size(), value);
+        }
+    };
+
+    const std::string pathValue = path.empty() ? std::string("Elevation") : path;
+    replaceToken(endpoint, "{path}", pathValue);
+
+    const std::string epochValue = epoch.empty() ? std::string("latest") : epoch;
+    replaceToken(endpoint, "{epoch}", epochValue);
+
+    return endpoint;
+}
+
+} // namespace
+
 const char* DemHealthStatusToString(DemHealthStatus s) {
     switch (s) {
         case DemHealthStatus::Unknown:     return "Unknown";
         case DemHealthStatus::Healthy:     return "Healthy";
         case DemHealthStatus::AuthFailed:  return "AuthFailed";
+        case DemHealthStatus::Blocked:     return "Blocked";
         case DemHealthStatus::Unreachable: return "Unreachable";
         case DemHealthStatus::BadResponse: return "BadResponse";
         case DemHealthStatus::Disabled:    return "Disabled";
@@ -60,7 +86,8 @@ DemManager::DemManager(const Config& config) : config_(config) {
         case DemProviderType::GoogleEarth: {
             // Create Google Earth DEM provider
             GoogleEarthDemConfig geConfig;
-            geConfig.elevationEndpoint = config_.geElevationEndpoint;
+            geConfig.elevationEndpoint = ResolveGeElevationEndpoint(
+                config_.geElevationEndpoint, config_.geEpoch, config_.geElevationPath);
             geConfig.headers = config_.geHeaders;
             geConfig.authToken = std::getenv(config_.geTokenEnv.c_str()) ? 
                                  std::getenv(config_.geTokenEnv.c_str()) : "";
@@ -547,6 +574,23 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
                 std::cerr << "[DEM] Auth failed " << fails << " times, backoff " 
                           << config_.authBackoffSec << "s" << std::endl;
             }
+        } else if (result.errorType == DemFetchResult::ErrorType::Blocked) {
+            if (!terminalError_.load()) {
+                std::cerr << "[DEM] Elevation requests blocked by provider anti-automation policy. "
+                          << "Disabling DEM fetch queue and using available fallbacks."
+                          << std::endl;
+                terminalError_.store(true);
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex_);
+                    // Clear queue by popping all elements
+                    while (!requestQueue_.empty()) {
+                        requestQueue_.pop();
+                    }
+                    pendingRanks_.clear();
+                    pendingCount_.store(0);
+                }
+            }
+            consecutiveAuthFails_.store(0);
         } else if (result.IsTimeout()) {
             stats_.fetchTimeout++;
         }

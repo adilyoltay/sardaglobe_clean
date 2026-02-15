@@ -43,13 +43,21 @@ std::vector<std::pair<std::string, std::string>>
 GoogleEarthNodeDataClient::BuildHeaders() const {
     std::vector<std::pair<std::string, std::string>> result;
     
-    // Accept protobuf format
+    // Google Earth Web spoofing headers
+    // These headers mimic the official Google Earth web client to avoid CAPTCHA
     result.push_back({"Accept", "application/x-protobuf"});
-
-    // Add Google Earth spoofing headers (Required for access)
+    result.push_back({"Accept-Language", "en-US,en;q=0.9"});
+    result.push_back({"Accept-Encoding", "gzip, deflate, br"});
     result.push_back({"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"});
     result.push_back({"Referer", "https://earth.google.com/"});
     result.push_back({"Origin", "https://earth.google.com"});
+    result.push_back({"Sec-Ch-Ua", "\"Not A(Brand)\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\""});
+    result.push_back({"Sec-Ch-Ua-Mobile", "?0"});
+    result.push_back({"Sec-Ch-Ua-Platform", "\"macOS\""});
+    result.push_back({"Sec-Fetch-Dest", "empty"});
+    result.push_back({"Sec-Fetch-Mode", "cors"});
+    result.push_back({"Sec-Fetch-Site", "cross-site"});
+    result.push_back({"X-Client-Data", "CI+2yQEIprbJAQipncoBCKDhygEIkqHLAQj6mM0B"});
     
     // Check if custom Authorization header is provided
     bool hasCustomAuth = false;

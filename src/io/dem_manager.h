@@ -45,7 +45,8 @@ using HeightSampler = std::function<bool(double lonDeg, double latDeg, int level
 enum class DemHealthStatus {
     Unknown,      // Not yet checked
     Healthy,      // Endpoint reachable, data valid
-    AuthFailed,   // 401/403 - credentials/origin issue
+    AuthFailed,   // Explicit auth/token issue
+    Blocked,      // Anti-bot/captcha block (403 with HTML response)
     Unreachable,  // Network/DNS/timeout error
     BadResponse,  // 200 but unparseable data
     Disabled      // DEM explicitly disabled
@@ -113,11 +114,13 @@ struct DemManagerConfig {
     
     // Google Earth provider configuration (Phase 4/5)
     std::string geElevationEndpoint;                          // Elevation service endpoint (empty = GE disabled)
+    std::string geElevationPath = "Elevation";                // Override {path} placeholder in elevation URL
     std::string geMeshEndpoint;                               // Mesh/NodeData endpoint (Phase 5)
     std::vector<std::pair<std::string, std::string>> geHeaders; // GE-only headers (allowlisted)
     std::string geTokenEnv = "NATIVE_GLOBE_GE_TOKEN";         // Env var for auth token
     int geElevationType = 0;                                  // 0=ELLIPSOID, 1=TERRAIN, 2=SEA_LEVEL
     std::string geEpoch = "latest";                           // Dataset epoch
+    bool geEpochAutoDetect = true;                            // Auto-fetch epoch from PlanetoidMetadata
     std::string geChannel = "default";                        // Service channel
 };
 
@@ -274,7 +277,7 @@ private:
     std::unordered_map<TileKey, std::chrono::steady_clock::time_point> failedUntil_;  // TTL cache
     static constexpr double FAIL_RETRY_SEC = 30.0;  // Retry failed tiles after 30s
     
-    // Auth backoff (401/403) - currently only for TerrainRGB
+    // Auth backoff (explicit auth failures, typically 401/403)
     std::atomic<int> consecutiveAuthFails_{0};
     std::atomic<bool> authBackoff_{false};
     std::chrono::steady_clock::time_point backoffUntil_;

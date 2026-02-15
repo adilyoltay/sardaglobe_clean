@@ -131,13 +131,15 @@ bool GoogleEarthDemProvider::FetchDemTile(const TileKey& key, DemGridData& outDa
         // No substring matching - rely on errorType set by elevation provider
         switch (outResult.errorType) {
             case DemFetchResult::ErrorType::Auth:
-            case DemFetchResult::ErrorType::HttpError:
                 if (outResult.httpStatusCode == 401 || outResult.httpStatusCode == 403) {
                     healthStatus_.store(DemHealthStatus::AuthFailed);
                 } else {
-                    // Other HTTP errors (4xx/5xx except 401/403)
                     healthStatus_.store(DemHealthStatus::BadResponse);
                 }
+                break;
+            case DemFetchResult::ErrorType::Blocked:
+            case DemFetchResult::ErrorType::HttpError:
+                healthStatus_.store(DemHealthStatus::BadResponse);
                 break;
             case DemFetchResult::ErrorType::Network:
             case DemFetchResult::ErrorType::Timeout:
@@ -194,13 +196,21 @@ DemHealthStatus GoogleEarthDemProvider::CheckHealth() {
         return DemHealthStatus::Healthy;
     }
     
-    // WARN: Relaxed health check for development.
-    // If the endpoint fails (e.g. 400/403), we still report Healthy to allow engine startup.
-    // Real failures will be handled per-tile with standard retry/backoff.
-    std::cerr << "[GE DEM] WARNING: Health check failed (" 
+    DemHealthStatus status = DemHealthStatus::BadResponse;
+    if (result.fetch.errorType == DemFetchResult::ErrorType::Auth &&
+        (result.fetch.httpStatusCode == 401 || result.fetch.httpStatusCode == 403)) {
+        status = DemHealthStatus::AuthFailed;
+    } else if (result.fetch.errorType == DemFetchResult::ErrorType::Network) {
+        status = DemHealthStatus::Unreachable;
+    } else if (result.fetch.errorType == DemFetchResult::ErrorType::Timeout) {
+        status = DemHealthStatus::Unreachable;
+    }
+    
+    healthStatus_.store(status);
+    std::cerr << "[GE DEM] Health check failed (" 
               << result.fetch.httpStatusCode << ": " << result.fetch.errorMessage 
-              << "). Continuing anyway (Soft Fail)." << std::endl;
-    return DemHealthStatus::Healthy;
+              << "), status=" << DemHealthStatusToString(status) << std::endl;
+    return status;
 }
 
 } // namespace globe

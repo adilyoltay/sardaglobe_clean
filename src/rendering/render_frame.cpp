@@ -37,8 +37,7 @@ Tile* RenderFrame::FindRenderableAncestor(const TileKey& key,
             Tile& tile = it->second;
             const bool hasSurfaceGeometry = HasRenderableSurface(tile);
             const bool hasTexture = tile.textureId != 0 &&
-                                    (allowPlaceholder || tile.textureId != loadingTexture) &&
-                                    !tile.mostlyBlackOpaqueRaster;
+                                    (allowPlaceholder || tile.textureId != loadingTexture);
             if (hasSurfaceGeometry && hasTexture) {
                 return &tile;
             }
