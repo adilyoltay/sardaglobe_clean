@@ -1093,7 +1093,8 @@ target_link_libraries(pbo_callback_integration_test PRIVATE glm::glm)
 add_test(NAME PboCallbackIntegrationTest COMMAND pbo_callback_integration_test)
 
 # RockMesh Sanity Test - P0 Distance Check Regression Pack
-# Minimal test - directly tests distance check logic without full RockMeshManager
+# NOTE: This test replicates BuildMesh distance check logic to avoid heavy deps.
+# If rockmesh_manager.cpp BuildMesh() changes, update this test!
 add_executable(rockmesh_sanity_test
   tests/rockmesh_sanity_test.cpp
 )

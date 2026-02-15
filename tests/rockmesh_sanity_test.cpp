@@ -1,28 +1,35 @@
 // RockMesh Sanity Tests - P0 Distance Check Regression Pack
-// Tests the mesh-origin based distance gate (not world origin)
-// Minimal test - directly tests the distance check logic without full RockMeshManager
+// 
+// IMPORTANT: This test replicates the distance check logic from BuildMesh() to avoid
+// pulling in heavy dependencies (GL, GLFW, workers, network). 
+// If BuildMesh() implementation changes, this test MUST be updated to match.
+//
+// The test validates the P0 fix semantics:
+// - OLD: distance from world origin (Earth center)
+// - NEW: distance from mesh origin (bbox center)
 
-#include "../src/io/providers/rocktree_node_data_parser.h"
-#include "../src/core/config.h"
 #include <glm/glm.hpp>
 #include <iostream>
-#include <cassert>
-#include <cmath>
+#include <algorithm>
 
-using namespace globe;
+// Replicate BuildMesh distance check logic for testing
+// NOTE: This must match src/rendering/rockmesh_manager.cpp BuildMesh() implementation
+struct DistanceCheckResult {
+    bool valid;
+    std::string error;
+    bool discarded;
+};
 
-// P0: Standalone distance check test (replicates BuildMesh logic)
-// Returns: pair<isValid, errorMessage>
-std::pair<bool, std::string> TestDistanceCheck(
+DistanceCheckResult TestDistanceCheck(
     const std::vector<glm::dvec3>& worldPositions,
     double maxVertexDistanceFromMeshOriginKm,
     bool sanityEnabled
 ) {
     if (!sanityEnabled) {
-        return {true, ""};  // Sanity disabled = always pass
+        return {true, "", false};
     }
     
-    // Compute mesh origin (center of bounding box)
+    // Compute mesh origin (center of bounding box) - P0 Fix
     glm::dvec3 bboxMin(std::numeric_limits<double>::max());
     glm::dvec3 bboxMax(std::numeric_limits<double>::lowest());
     for (const auto& pos : worldPositions) {
@@ -38,63 +45,56 @@ std::pair<bool, std::string> TestDistanceCheck(
             std::string error = "Invalid mesh: vertex distance from mesh origin exceeds threshold (" +
                                std::to_string(static_cast<int>(distFromMeshOrigin)) + " km > " +
                                std::to_string(static_cast<int>(maxVertexDistanceFromMeshOriginKm)) + " km)";
-            return {false, error};
+            return {false, error, true};
         }
     }
     
-    return {true, ""};
+    return {true, "", false};
 }
 
-// Helper: Create a small mesh at Earth surface (~6378km from center)
-std::vector<glm::dvec3> CreateEarthSurfaceMesh(double sizeMeters = 100.0) {
-    // Earth radius ~6378 km
-    const double earthRadiusKm = 6378.0;
-    const double offsetKm = sizeMeters / 1000.0;  // Convert to km
-    
-    // Small square at Earth surface, centered at (0, 0, 6378)
+// Helper: Create a small mesh at specified location
+// The mesh origin (bbox center) will be at 'centerKm'
+std::vector<glm::dvec3> CreateSmallMeshAt(glm::dvec3 centerKm, double sizeKm = 0.1) {
     return {
-        { -offsetKm, -offsetKm, earthRadiusKm },  // bottom-left
-        {  offsetKm, -offsetKm, earthRadiusKm },  // bottom-right
-        {  offsetKm,  offsetKm, earthRadiusKm },  // top-right
-        { -offsetKm,  offsetKm, earthRadiusKm }   // top-left
+        { centerKm.x - sizeKm, centerKm.y - sizeKm, centerKm.z },
+        { centerKm.x + sizeKm, centerKm.y - sizeKm, centerKm.z },
+        { centerKm.x + sizeKm, centerKm.y + sizeKm, centerKm.z },
+        { centerKm.x - sizeKm, centerKm.y + sizeKm, centerKm.z }
     };
 }
 
-// Helper: Create mesh with local outlier (far from mesh origin but not Earth center)
-// The mesh origin is at Earth surface (~6378km from world center)
-// The outlier is outlierDistanceKm from the mesh origin (bbox center)
-std::vector<glm::dvec3> CreateMeshWithLocalOutlier(double outlierDistanceKm = 400.0) {
-    const double earthRadiusKm = 6378.0;
-    
-    // To get outlier at exactly outlierDistanceKm from mesh origin:
-    // Place base mesh at one extreme, outlier at opposite extreme
-    // Then origin is at midpoint, and outlier is outlierDistanceKm from origin
-    double baseX = -outlierDistanceKm;  // Base mesh at -400km
-    double outlierX = outlierDistanceKm; // Outlier at +400km
+// Helper: Create mesh with outlier
+// Base mesh at centerKm, outlier at centerKm + offsetKm
+// With mesh-origin check: outlier is |offsetKm| from origin
+std::vector<glm::dvec3> CreateMeshWithOutlier(glm::dvec3 centerKm, glm::dvec3 offsetKm) {
+    // Create base mesh at one extreme
+    double baseOffset = -glm::length(offsetKm);
+    glm::dvec3 baseDir = glm::normalize(offsetKm);
+    glm::dvec3 basePos = centerKm + baseDir * baseOffset;
     
     std::vector<glm::dvec3> positions = {
-        { baseX, 0.0, earthRadiusKm },  // Base mesh (tight cluster)
-        { baseX, 0.0, earthRadiusKm },
-        { baseX, 0.0, earthRadiusKm },
-        { baseX, 0.0, earthRadiusKm }
+        basePos, basePos, basePos, basePos  // Degenerate base
     };
     
     // Add outlier at opposite extreme
-    // Origin will be at (0, 0, 6378), outlier is at 400km from origin
-    positions.push_back({ outlierX, 0.0, earthRadiusKm });
+    // Mesh origin will be at centerKm, outlier is |offsetKm| from origin
+    positions.push_back(centerKm + offsetKm);
     
     return positions;
 }
 
-// Test 1: Normal mesh passes with default threshold (mesh-origin based)
-bool Test_DistanceCheckUsesMeshOrigin_DefaultThreshold() {
-    std::cout << "[TEST] DistanceCheckUsesMeshOrigin_DefaultThreshold..." << std::flush;
+// Test 1: Normal Earth surface mesh passes (mesh-origin based, not world-origin)
+bool Test_DistanceCheckUsesMeshOrigin() {
+    std::cout << "[TEST] DistanceCheckUsesMeshOrigin..." << std::flush;
     
-    auto positions = CreateEarthSurfaceMesh(100.0);  // 100m mesh
-    auto [valid, error] = TestDistanceCheck(positions, 300.0, true);
+    // Mesh at Earth surface (6378km from world center), but small (100m)
+    // With old world-origin check: distance = 6378km > 300km -> FAIL
+    // With new mesh-origin check: distance from bbox center = 0.05km < 300km -> PASS
+    auto positions = CreateSmallMeshAt({0, 0, 6378.0}, 0.05);
+    auto result = TestDistanceCheck(positions, 300.0, true);
     
-    if (!valid) {
-        std::cout << " FAIL (mesh rejected: " << error << ")" << std::endl;
+    if (!result.valid) {
+        std::cout << " FAIL (rejected: " << result.error << ")" << std::endl;
         return false;
     }
     
@@ -106,19 +106,23 @@ bool Test_DistanceCheckUsesMeshOrigin_DefaultThreshold() {
 bool Test_DistanceCheckRejectsLocalOutlier() {
     std::cout << "[TEST] DistanceCheckRejectsLocalOutlier..." << std::flush;
     
-    // Outlier at 400km from mesh origin, threshold is 300km
-    auto positions = CreateMeshWithLocalOutlier(400.0);
-    auto [valid, error] = TestDistanceCheck(positions, 300.0, true);
+    // Mesh center at (0, 0, 6378), outlier at (400, 0, 6378)
+    // Distance from mesh origin = 400km > 300km -> FAIL
+    auto positions = CreateMeshWithOutlier({0, 0, 6378.0}, {400.0, 0, 0});
+    auto result = TestDistanceCheck(positions, 300.0, true);
     
-    // Should fail - outlier exceeds 300km threshold from mesh origin
-    if (valid) {
-        std::cout << " FAIL (mesh should have been rejected)" << std::endl;
+    if (result.valid) {
+        std::cout << " FAIL (should have been rejected)" << std::endl;
         return false;
     }
     
-    // Check error message mentions mesh origin
-    if (error.find("mesh origin") == std::string::npos) {
-        std::cout << " FAIL (error message missing 'mesh origin': " << error << ")" << std::endl;
+    if (result.error.find("mesh origin") == std::string::npos) {
+        std::cout << " FAIL (wrong error: " << result.error << ")" << std::endl;
+        return false;
+    }
+    
+    if (!result.discarded) {
+        std::cout << " FAIL (discard flag not set)" << std::endl;
         return false;
     }
     
@@ -130,13 +134,12 @@ bool Test_DistanceCheckRejectsLocalOutlier() {
 bool Test_DistanceThresholdCustom() {
     std::cout << "[TEST] DistanceThresholdCustom..." << std::flush;
     
-    // Same outlier at 400km, but now threshold is 500km
-    auto positions = CreateMeshWithLocalOutlier(400.0);
-    auto [valid, error] = TestDistanceCheck(positions, 500.0, true);
+    // Same 400km outlier, but threshold is 500km -> PASS
+    auto positions = CreateMeshWithOutlier({0, 0, 6378.0}, {400.0, 0, 0});
+    auto result = TestDistanceCheck(positions, 500.0, true);
     
-    // Should pass - 400km < 500km threshold
-    if (!valid) {
-        std::cout << " FAIL (mesh rejected with higher threshold: " << error << ")" << std::endl;
+    if (!result.valid) {
+        std::cout << " FAIL (rejected: " << result.error << ")" << std::endl;
         return false;
     }
     
@@ -145,16 +148,15 @@ bool Test_DistanceThresholdCustom() {
 }
 
 // Test 4: Sanity disabled bypasses all checks
-bool Test_SanityDisabledBypassesChecks() {
-    std::cout << "[TEST] SanityDisabledBypassesChecks..." << std::flush;
+bool Test_SanityDisabled() {
+    std::cout << "[TEST] SanityDisabled..." << std::flush;
     
-    // Extreme outlier should pass when sanity is disabled
-    auto positions = CreateMeshWithLocalOutlier(1000.0);  // 1000km outlier
-    auto [valid, error] = TestDistanceCheck(positions, 300.0, false);  // Sanity disabled
+    // Extreme outlier should pass when sanity disabled
+    auto positions = CreateMeshWithOutlier({0, 0, 6378.0}, {1000.0, 0, 0});
+    auto result = TestDistanceCheck(positions, 300.0, false);
     
-    // Should pass - sanity checks disabled
-    if (!valid) {
-        std::cout << " FAIL (mesh rejected with sanity disabled: " << error << ")" << std::endl;
+    if (!result.valid) {
+        std::cout << " FAIL (rejected with sanity disabled)" << std::endl;
         return false;
     }
     
@@ -162,52 +164,25 @@ bool Test_SanityDisabledBypassesChecks() {
     return true;
 }
 
-// Test 5: Error message format verification
-bool Test_ErrorMessageFormat() {
-    std::cout << "[TEST] ErrorMessageFormat..." << std::flush;
+// Test 5: Various Earth locations work with mesh-origin check
+bool Test_VariousEarthLocations() {
+    std::cout << "[TEST] VariousEarthLocations..." << std::flush;
     
-    auto positions = CreateMeshWithLocalOutlier(400.0);
-    auto [valid, error] = TestDistanceCheck(positions, 300.0, true);
-    
-    // Verify error message contains expected components
-    bool hasMeshOrigin = error.find("mesh origin") != std::string::npos;
-    bool hasExceeds = error.find("exceeds") != std::string::npos;
-    bool hasKm = error.find("km") != std::string::npos;
-    bool hasThreshold = error.find("300") != std::string::npos;
-    
-    if (!hasMeshOrigin || !hasExceeds || !hasKm || !hasThreshold) {
-        std::cout << " FAIL (error message format incomplete: " << error << ")" << std::endl;
-        return false;
-    }
-    
-    std::cout << " PASS" << std::endl;
-    return true;
-}
-
-// Test 6: Verify mesh at various Earth locations passes (regression for world-origin check)
-bool Test_VariousEarthLocationsPass() {
-    std::cout << "[TEST] VariousEarthLocationsPass..." << std::flush;
-    
-    const double earthRadiusKm = 6378.0;
-    const double offsetKm = 0.05;  // 50 meters
-    
-    // Test meshes at different locations on Earth surface
-    std::vector<std::vector<glm::dvec3>> testMeshes = {
-        // North pole area
-        { {-offsetKm, -offsetKm, earthRadiusKm}, {offsetKm, -offsetKm, earthRadiusKm},
-          {offsetKm, offsetKm, earthRadiusKm}, {-offsetKm, offsetKm, earthRadiusKm} },
-        // Equator, different longitudes
-        { {earthRadiusKm, -offsetKm, -offsetKm}, {earthRadiusKm, offsetKm, -offsetKm},
-          {earthRadiusKm, offsetKm, offsetKm}, {earthRadiusKm, -offsetKm, offsetKm} },
-        // South pole area
-        { {-offsetKm, -offsetKm, -earthRadiusKm}, {offsetKm, -offsetKm, -earthRadiusKm},
-          {offsetKm, offsetKm, -earthRadiusKm}, {-offsetKm, offsetKm, -earthRadiusKm} },
+    // Test multiple locations on Earth - all should pass with small meshes
+    std::vector<glm::dvec3> locations = {
+        {0, 0, 6378.0},        // North pole area
+        {6378.0, 0, 0},        // Equator X
+        {0, 6378.0, 0},        // Equator Y
+        {-6378.0, 0, 0},       // Opposite side
+        {0, 0, -6378.0},       // South pole area
     };
     
-    for (size_t i = 0; i < testMeshes.size(); ++i) {
-        auto [valid, error] = TestDistanceCheck(testMeshes[i], 300.0, true);
-        if (!valid) {
-            std::cout << " FAIL (mesh " << i << " rejected: " << error << ")" << std::endl;
+    for (size_t i = 0; i < locations.size(); ++i) {
+        auto positions = CreateSmallMeshAt(locations[i], 0.05);
+        auto result = TestDistanceCheck(positions, 300.0, true);
+        
+        if (!result.valid) {
+            std::cout << " FAIL (location " << i << " rejected: " << result.error << ")" << std::endl;
             return false;
         }
     }
@@ -216,20 +191,47 @@ bool Test_VariousEarthLocationsPass() {
     return true;
 }
 
+// Test 6: Error message contains expected components
+bool Test_ErrorMessageFormat() {
+    std::cout << "[TEST] ErrorMessageFormat..." << std::flush;
+    
+    auto positions = CreateMeshWithOutlier({0, 0, 6378.0}, {400.0, 0, 0});
+    auto result = TestDistanceCheck(positions, 300.0, true);
+    
+    if (result.valid) {
+        std::cout << " FAIL (should have been rejected)" << std::endl;
+        return false;
+    }
+    
+    bool hasMeshOrigin = result.error.find("mesh origin") != std::string::npos;
+    bool hasExceeds = result.error.find("exceeds") != std::string::npos;
+    bool hasKm = result.error.find("km") != std::string::npos;
+    bool hasThreshold = result.error.find("300") != std::string::npos;
+    
+    if (!hasMeshOrigin || !hasExceeds || !hasKm || !hasThreshold) {
+        std::cout << " FAIL (incomplete: " << result.error << ")" << std::endl;
+        return false;
+    }
+    
+    std::cout << " PASS" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "=== RockMesh Sanity Tests (P0 Distance Check) ===" << std::endl;
-    std::cout << "Testing mesh-origin based distance gate (not world origin)" << std::endl;
+    std::cout << "NOTE: This test replicates BuildMesh() distance check logic." << std::endl;
+    std::cout << "If src/rendering/rockmesh_manager.cpp changes, update this test!" << std::endl;
     std::cout << std::endl;
     
     int passed = 0;
     int failed = 0;
     
-    if (Test_DistanceCheckUsesMeshOrigin_DefaultThreshold()) passed++; else failed++;
+    if (Test_DistanceCheckUsesMeshOrigin()) passed++; else failed++;
     if (Test_DistanceCheckRejectsLocalOutlier()) passed++; else failed++;
     if (Test_DistanceThresholdCustom()) passed++; else failed++;
-    if (Test_SanityDisabledBypassesChecks()) passed++; else failed++;
+    if (Test_SanityDisabled()) passed++; else failed++;
+    if (Test_VariousEarthLocations()) passed++; else failed++;
     if (Test_ErrorMessageFormat()) passed++; else failed++;
-    if (Test_VariousEarthLocationsPass()) passed++; else failed++;
     
     std::cout << std::endl;
     std::cout << "=== Results ===" << std::endl;
