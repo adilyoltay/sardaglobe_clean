@@ -296,6 +296,9 @@ bool GlobeEngine::Init() {
         
         // Init heightmap manager for GPU terrain displacement
         heightmapManager_ = std::make_unique<HeightmapManager>();
+        
+        // P1: Connect DEM manager to tile pyramid for strict DEM+RGB quorum
+        tilePyramid_.SetDemManager(demManager_.get());
     }
 
     meshScheduler_ = std::make_unique<TileMeshScheduler>(config_, demManager_.get());

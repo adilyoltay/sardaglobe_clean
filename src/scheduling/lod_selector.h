@@ -66,6 +66,9 @@ public:
         bool useHorizonCulling = true;           // Enable horizon culling
         float horizonSafetyMarginRad = 0.01f;    // Safety margin in radians
         float horizonNearHorizonInflation = 1.15f;  // Bounding radius inflation near horizon
+        
+        // P1: Strict DEM+RGB quorum - require both texture AND DEM ready for promotion
+        bool strictDemRgbQuorum = true;          // Enable strict DEM+RGB quorum (default: true)
     };
     
     LodSelector() = default;

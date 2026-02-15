@@ -17,8 +17,11 @@ const LodSelection& TilePyramid::Select(
     int viewportHeight,
     const TileMap& tiles
 ) {
-    // Create ready check function that captures tiles reference
-    auto isReady = [&tiles](const TileKey& key) -> bool {
+    // P1: Use strict DEM+RGB quorum if DEM manager is configured
+    auto isReady = [this, &tiles](const TileKey& key) -> bool {
+        if (demManager_ && settings_.strictDemRgbQuorum) {
+            return IsTileReadyStrict(key, tiles);
+        }
         return IsTileReady(key, tiles);
     };
     

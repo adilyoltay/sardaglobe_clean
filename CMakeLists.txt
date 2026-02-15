@@ -598,12 +598,23 @@ add_executable(tile_pyramid_child_ready_test
   tests/tile_pyramid_child_ready_test.cpp
   src/scheduling/tile_pyramid.cpp
   src/scheduling/lod_selector.cpp
+  src/io/dem_manager.cpp
+  src/io/providers/dem_fetch_result.cpp
+  src/io/providers/terrain_rgb_provider.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
+  src/core/ellipsoid.cpp
+  tests/stubs/network_panel_stub.cpp
 )
 target_include_directories(tile_pyramid_child_ready_test PRIVATE
   src
   third_party/glad/include
 )
-target_link_libraries(tile_pyramid_child_ready_test PRIVATE glm::glm)
+target_link_libraries(tile_pyramid_child_ready_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
 add_test(NAME TilePyramidChildReadyTest COMMAND tile_pyramid_child_ready_test)
 
 # DEM effective-level policy test
@@ -769,6 +780,11 @@ add_executable(ge_dem_grid_order_test
   src/io/providers/http_transport.cpp
   src/io/providers/protobuf_wire.cpp
   src/io/providers/dem_fetch_result.cpp
+  src/io/dem_manager.cpp
+  src/io/providers/terrain_rgb_provider.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
+  src/core/ellipsoid.cpp
 )
 target_include_directories(ge_dem_grid_order_test PRIVATE
   src
@@ -1038,12 +1054,31 @@ add_test(NAME BayerMatrixDitheringTest COMMAND bayer_matrix_dithering_test)
 # FAZ 6 KAPANIŞ: Instanced Array Rendering Test (Fix 1)
 add_executable(instanced_array_rendering_test
   tests/instanced_array_rendering_test.cpp
+  src/rendering/tile_renderer.cpp
+  src/rendering/shader_manager.cpp
+  src/rendering/pbo_upload_manager.cpp
+  src/rendering/texture_array_manager.cpp
+  src/rendering/texture_manager.cpp
+  src/io/memory_tile_cache.cpp
+  src/io/tile_cache.cpp
+  src/io/dem_manager.cpp
+  src/io/providers/dem_fetch_result.cpp
+  src/io/providers/terrain_rgb_provider.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
+  src/core/ellipsoid.cpp
+  src/scheduling/tile_pyramid.cpp
+  src/scheduling/lod_selector.cpp
 )
 target_include_directories(instanced_array_rendering_test PRIVATE
   src
   third_party
 )
-target_link_libraries(instanced_array_rendering_test PRIVATE glm::glm)
+target_link_libraries(instanced_array_rendering_test PRIVATE glm::glm glad imgui glfw CURL::libcurl ZLIB::ZLIB)
 add_test(NAME InstancedArrayRenderingTest COMMAND instanced_array_rendering_test)
 
 # FAZ 6 KAPANIŞ: PBO Callback Integration Test (Fix 2)
