@@ -65,7 +65,9 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     DemManager* demManager,
     bool useRte,
     bool fallbackRequireParentUntilChildrenReady,
-    bool useTextureArray
+    bool useTextureArray,
+    bool useDistanceBasedTerrainMorph,
+    float terrainMorphDistanceRangeKm
 ) {
     TileDrawStats stats;
     const float fadeDurationSec = ComputeUnpopDurationSec(cameraSpeedKmPerSec);
@@ -421,7 +423,12 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         glm::vec4 hmUvTransform{1.0f, 1.0f, 0.0f, 0.0f};
         bool hasHeightmap = resolveHeightmap(tile->key, hmTex, hmUvTransform);
         bool hasTerrainData = hasHeightmap || tile->demUsed;
-        float terrainMorph = tile->UpdateTerrainMorph(currentTime, hasTerrainData);
+        // P2: Calculate camera distance for distance-based morph
+        float distanceKm = glm::length(tile->center - cameraPos);
+        float terrainMorph = tile->UpdateTerrainMorph(
+            currentTime, hasTerrainData, distanceKm,
+            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm
+        );
         if (canBatchFlatTile(*tile, hasHeightmap, false)) {
             BatchKey key{tile->textureId, tile->builtSegments};
             fallbackInstancedBatches[key].push_back(TileRenderer::FlatTileInstance{tile, 1.0f});
@@ -446,7 +453,12 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         glm::vec4 hmUvTransform{1.0f, 1.0f, 0.0f, 0.0f};
         bool hasHeightmap = resolveHeightmap(leaf.tile->key, hmTex, hmUvTransform);
         bool hasTerrainData = hasHeightmap || leaf.tile->demUsed;
-        float terrainMorph = leaf.tile->UpdateTerrainMorph(currentTime, hasTerrainData);
+        // P2: Calculate camera distance for distance-based morph
+        float distanceKm = glm::length(leaf.tile->center - cameraPos);
+        float terrainMorph = leaf.tile->UpdateTerrainMorph(
+            currentTime, hasTerrainData, distanceKm,
+            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm
+        );
 
         if (leaf.useShaderCrossfade && leaf.unpopAncestor) {
             glUniform1f(shaderManager_.GetFadeLocation(), 1.0f);

@@ -2360,7 +2360,9 @@ void GlobeEngine::Render() {
         demManager_.get(),
         config_.useRteRender,
         config_.fallbackRequireParentUntilChildrenReady,
-        config_.useTexture2DArray  // Faz 2B: Texture array support
+        config_.useTexture2DArray,  // Faz 2B: Texture array support
+        config_.useDistanceBasedTerrainMorph,  // P2: Distance-based morph
+        config_.terrainMorphDistanceRangeKm     // P2: Morph band width
     );
     const auto& renderStats = tileRenderer_->GetStats();
 

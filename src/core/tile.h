@@ -150,6 +150,12 @@ struct Tile {
     // FIX 5: Max stagger spread so batch DEM arrivals don't all flash at once.
     static constexpr float TERRAIN_MORPH_MAX_STAGGER = 0.10f;  // 100ms
     
+    // P2: Distance-based terrain morph state
+    float terrainMorphSpawnDistanceKm = 0.0f;   // Camera distance when terrain data first appeared
+    float terrainMorphNearDistanceKm = 0.0f;    // Near threshold for morph band (spawn - range)
+    float terrainMorphFarDistanceKm = 0.0f;     // Far threshold for morph band (spawn)
+    static constexpr float TERRAIN_MORPH_DISTANCE_RANGE_KM = 0.2f;  // Default 200m morph band
+    
     // Update fade animation, returns current alpha
     float UpdateFade(double currentTime, float fadeDuration = FADE_DURATION) {
         if (fadeComplete) return 1.0f;
@@ -169,17 +175,62 @@ struct Tile {
     }
 
     // Update terrain morph state. Returns current morph factor in [0,1].
+    // P2: Supports both time-based (legacy) and distance-based morph modes.
     float UpdateTerrainMorph(double currentTime,
                              bool hasTerrainData,
+                             float cameraDistanceKm = 0.0f,
+                             bool useDistanceBased = false,
+                             float distanceRangeKm = TERRAIN_MORPH_DISTANCE_RANGE_KM,
                              float morphDuration = TERRAIN_MORPH_DURATION) {
         if (!hasTerrainData) {
             hadTerrainData = false;
             terrainMorphActive = false;
             terrainMorphStartTime = 0.0;
             terrainMorph = 0.0f;
+            // P2: Reset distance state too
+            terrainMorphSpawnDistanceKm = 0.0f;
+            terrainMorphNearDistanceKm = 0.0f;
+            terrainMorphFarDistanceKm = 0.0f;
             return terrainMorph;
         }
 
+        // P2: Distance-based mode
+        if (useDistanceBased) {
+            // Initialize on first terrain data
+            if (!hadTerrainData) {
+                hadTerrainData = true;
+                terrainMorphActive = true;
+                // Capture spawn distance - morph band starts here and extends toward camera
+                terrainMorphSpawnDistanceKm = cameraDistanceKm;
+                terrainMorphFarDistanceKm = cameraDistanceKm;
+                terrainMorphNearDistanceKm = std::max(0.0f, cameraDistanceKm - distanceRangeKm);
+                terrainMorph = 0.0f;
+            }
+            
+            if (terrainMorphActive) {
+                // Calculate candidate morph based on current distance
+                // Formula: morph = (distance - near) / (far - near), clamped to [0, 1]
+                float denom = terrainMorphFarDistanceKm - terrainMorphNearDistanceKm;
+                float candidateMorph = 1.0f;
+                if (denom > 0.0001f) {
+                    candidateMorph = std::clamp(
+                        (cameraDistanceKm - terrainMorphNearDistanceKm) / denom,
+                        0.0f, 1.0f
+                    );
+                }
+                
+                // Monotonic: only increase morph, never decrease (prevents popping when moving away)
+                terrainMorph = std::max(terrainMorph, candidateMorph);
+                
+                if (terrainMorph >= 1.0f) {
+                    terrainMorph = 1.0f;
+                    terrainMorphActive = false;
+                }
+            }
+            return terrainMorph;
+        }
+        
+        // Legacy: Time-based mode (original behavior preserved)
         if (!hadTerrainData) {
             hadTerrainData = true;
             terrainMorphActive = true;

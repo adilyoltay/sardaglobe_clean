@@ -50,7 +50,9 @@ public:
         DemManager* demManager = nullptr,              // Optional: DEM coverage for terrain gating
         bool useRte = true,                            // RTE/RTC jitter-free rendering
         bool fallbackRequireParentUntilChildrenReady = true, // Parent fallback control
-        bool useTextureArray = false                   // Faz 2B: Use GL_TEXTURE_2D_ARRAY
+        bool useTextureArray = false,                  // Faz 2B: Use GL_TEXTURE_2D_ARRAY
+        bool useDistanceBasedTerrainMorph = true,      // P2: Distance-based terrain morph
+        float terrainMorphDistanceRangeKm = 0.2f       // P2: Morph band width in km
     );
 
 private:

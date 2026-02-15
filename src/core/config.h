@@ -201,6 +201,11 @@ struct Config {
     float lodVarianceThreshold = 100.0f;     // Height variance threshold for LOD adjustment
     int lodHysteresisFrames = 3;             // Frames to wait before LOD change
     
+    // P2: Distance-based terrain morph (replaces time-based for smoother GE-style transitions)
+    bool useDistanceBasedTerrainMorph = true;        // Enable distance-based morph (default: true)
+    float terrainMorphDistanceRangeKm = 0.2f;        // Morph band width in km (default: 200m)
+    bool enableTerrainMorphTimeFallback = true;      // Allow time-based fallback if distance invalid
+    
     // DEM/Terrain settings
     // Default: Mapbox Terrain-RGB tile template (token provided via env/CLI)
     std::string demBaseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
