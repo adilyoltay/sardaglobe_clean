@@ -586,7 +586,6 @@ int PboUploadManager::ProcessUploads() {
     PollGpuCompletion();
     
     int processedCount = 0;
-    uint64_t bytesProcessed = 0;
     int attemptedCount = 0;        // P0 FIX: Track all attempts (success or fail)
     uint64_t attemptedBytes = 0;   // P0 FIX: Track all attempted bytes
     auto frameStartTime = std::chrono::high_resolution_clock::now();
@@ -703,7 +702,6 @@ int PboUploadManager::ProcessUploads() {
         
         if (success) {
             ++processedCount;
-            bytesProcessed += req.GetDataSize();
         }
         
         // P0: Time budget check after each upload

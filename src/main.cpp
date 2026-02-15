@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
     // Default tile URL: open satellite imagery (EOX Sentinel-2 cloudless mosaic).
     // OSM fallback:
     //   https://tile.openstreetmap.org/{z}/{x}/{y}.png
-    config.tileUrl = "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg";
+    config.tileUrl = "https://goksun.pirireis.com.tr/gorsun/gorsun/tile/HGM_Orthofoto/{z}/{x}/{y}";
 
     // Optional basic-auth via environment (avoids leaking credentials into shell history).
     // Format: "user:password"
