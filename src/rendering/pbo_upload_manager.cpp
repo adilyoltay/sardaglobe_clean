@@ -587,6 +587,8 @@ int PboUploadManager::ProcessUploads() {
     
     int processedCount = 0;
     uint64_t bytesProcessed = 0;
+    int attemptedCount = 0;        // P0 FIX: Track all attempts (success or fail)
+    uint64_t attemptedBytes = 0;   // P0 FIX: Track all attempted bytes
     auto frameStartTime = std::chrono::high_resolution_clock::now();
     bool budgetHit = false;
     
@@ -695,6 +697,10 @@ int PboUploadManager::ProcessUploads() {
             }
         }
         
+        // P0 FIX: Track attempted regardless of success
+        ++attemptedCount;
+        attemptedBytes += req.GetDataSize();
+        
         if (success) {
             ++processedCount;
             bytesProcessed += req.GetDataSize();
@@ -721,19 +727,21 @@ int PboUploadManager::ProcessUploads() {
     
     // P0: Update budget stats
     if (budgetHit) {
-        // P0 FIX: Calculate only for deferred (unprocessed) items
-        size_t deferredCount = toProcess.size() - processedCount;
+        // P0 FIX v3: Calculate only for truly deferred (unattempted) items
+        size_t deferredCount = toProcess.size() - attemptedCount;
         
-        // Calculate deferred bytes from total minus processed
+        // Calculate total bytes in toProcess
         uint64_t totalBytes = 0;
         for (const auto& qr : toProcess) {
             totalBytes += qr.request.GetDataSize();
         }
-        uint64_t deferredBytes = (bytesProcessed > totalBytes) ? 0 : (totalBytes - bytesProcessed);
+        
+        // P0 FIX v3: deferredBytes = total - attempted (not just successful)
+        uint64_t deferredBytes = (attemptedBytes > totalBytes) ? 0 : (totalBytes - attemptedBytes);
         
         std::lock_guard<std::mutex> statsLock(statsMutex_);
-        stats_.skippedByBudget += deferredCount;  // P0 FIX: Only deferred count
-        stats_.deferredBytes += deferredBytes;    // P0 FIX: Only deferred bytes
+        stats_.skippedByBudget += deferredCount;  // P0 FIX v3: Only truly deferred count
+        stats_.deferredBytes += deferredBytes;    // P0 FIX v3: Only truly deferred bytes
         stats_.budgetHits++;
     }
     
