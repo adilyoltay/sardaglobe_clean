@@ -580,13 +580,17 @@ void PboUploadManager::CompleteRequest(InFlightRequest& inflight, bool success) 
         stats_.staleUploadSkips++;
         stats_.staleUploadBytes += inflight.request.GetDataSize();
         
-        // Release PBO if used (but don't invoke callback)
+        // Release PBO if used
         if (inflight.pboEntry) {
             ReleasePbo(inflight.pboEntry);
             inflight.pboEntry = nullptr;
         }
         
-        // Don't invoke callback - resource has been evicted/invalidated
+        // P1 FIX: Always invoke callback to allow userData cleanup (prevents memory leak)
+        // The callback is responsible for cleaning up PboUploadContext
+        if (inflight.request.onComplete) {
+            inflight.request.onComplete(inflight.request.targetTexture, false, inflight.request.userData);
+        }
         return;
     }
     
@@ -730,7 +734,7 @@ int PboUploadManager::ProcessUploads() {
             pbo = AcquirePbo(req.GetDataSize());
         }
         
-        bool success;
+        bool success = false;  // P0 FIX: Initialize to avoid UB
         if (pbo) {
             success = ExecuteUploadPbo(req, pbo);
             if (success) {
@@ -769,10 +773,12 @@ int PboUploadManager::ProcessUploads() {
             }
             
             if (isStale) {
-                // Skip upload, count as stale
+                // P0 FIX: Skip upload, count as stale
+                success = false;  // P0 FIX: Explicitly set success
                 std::lock_guard<std::mutex> statsLock(statsMutex_);
                 stats_.staleUploadSkips++;
                 stats_.staleUploadBytes += req.GetDataSize();
+                // P1 FIX: Always call callback to allow userData cleanup
                 if (req.onComplete) {
                     req.onComplete(req.targetTexture, false, req.userData);
                 }
