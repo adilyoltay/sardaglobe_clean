@@ -127,6 +127,10 @@ private:
     std::unordered_map<TileKey, PendingFetchRank> pendingFetchRanks_;
     std::unordered_set<TileKey> pendingDecodes_;
     std::unordered_set<TileKey> canceledKeys_;
+    
+    // P0: CancelToken registry for pre-emptible decode cancellation
+    // Each in-flight tile has a token that can be marked cancelled
+    std::unordered_map<TileKey, std::shared_ptr<CancelToken>> decodeCancelTokens_;
     std::queue<TileKey> canceledTransitions_;
     std::mutex trackingMutex_;
     

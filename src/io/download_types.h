@@ -5,6 +5,8 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <atomic>    // P0: For std::atomic_bool in CancelToken
+#include <memory>    // P0: For std::shared_ptr in DecodeRequest
 
 namespace globe {
 

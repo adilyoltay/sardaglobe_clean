@@ -592,7 +592,6 @@ int PboUploadManager::ProcessUploads() {
     
     // Process pending uploads with budget controls
     std::vector<QueuedRequest> toProcess;
-    std::vector<QueuedRequest> deferred;  // P0: Budget aşımında ertelenenler
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         
@@ -618,11 +617,17 @@ int PboUploadManager::ProcessUploads() {
             
             size_t reqBytes = qr.request.GetDataSize();
             
-            // Byte budget check
-            if (selectedBytes + reqBytes > config_.maxBytesPerFrame && selected > 0) {
-                // Budget hit - defer remaining
-                budgetHit = true;
-                break;
+            // Byte budget check - P0: Check all items, but allow first even if over budget
+            if (selectedBytes + reqBytes > config_.maxBytesPerFrame) {
+                if (selected == 0) {
+                    // First item exceeds budget alone - still process it (must make progress)
+                    // But mark budget hit so we don't process anything after
+                    budgetHit = true;
+                } else {
+                    // Budget hit on subsequent items - defer remaining
+                    budgetHit = true;
+                    break;
+                }
             }
             
             selectedBytes += reqBytes;
@@ -716,9 +721,15 @@ int PboUploadManager::ProcessUploads() {
     
     // P0: Update budget stats
     if (budgetHit) {
+        // Calculate actual deferred bytes from remaining toProcess items
+        uint64_t actualDeferredBytes = 0;
+        for (auto& qr : toProcess) {
+            actualDeferredBytes += qr.request.GetDataSize();
+        }
+        
         std::lock_guard<std::mutex> statsLock(statsMutex_);
-        stats_.skippedByBudget += static_cast<uint64_t>(toProcess.size() - processedCount);
-        stats_.deferredBytes += static_cast<uint64_t>(toProcess.size() - processedCount) * 1024 * 1024; // Estimate
+        stats_.skippedByBudget += static_cast<uint64_t>(toProcess.size());
+        stats_.deferredBytes += actualDeferredBytes;  // P0: Use actual data size, not estimate
         stats_.budgetHits++;
     }
     
@@ -800,6 +811,11 @@ void PboUploadManager::SetConfig(const Config& config) {
     config_.orphanUnusedPbos = config.orphanUnusedPbos;
     config_.pboAgeThreshold = config.pboAgeThreshold;
     config_.useFences = config.useFences;
+    
+    // P0: Budget controls can be updated at runtime
+    config_.maxUploadsPerFrame = config.maxUploadsPerFrame;
+    config_.maxBytesPerFrame = config.maxBytesPerFrame;
+    config_.maxMsPerFrame = config.maxMsPerFrame;
 }
 
 void PboUploadManager::BeginFrame(uint64_t frameNumber) {

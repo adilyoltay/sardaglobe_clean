@@ -138,7 +138,15 @@ void TileScheduler::Cancel(const TileKey& key) {
     std::lock_guard<std::mutex> lock(trackingMutex_);
     pendingFetches_.erase(key);
     pendingFetchRanks_.erase(key);
+    
+    // P0: Mark cancel token if decode is in-flight
+    auto tokenIt = decodeCancelTokens_.find(key);
+    if (tokenIt != decodeCancelTokens_.end() && tokenIt->second) {
+        tokenIt->second->Cancel();
+    }
+    
     pendingDecodes_.erase(key);
+    decodeCancelTokens_.erase(key);  // Clean up token
     canceledKeys_.insert(key);
     canceledTransitions_.push(key);
 }
@@ -228,9 +236,14 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             }
             
             // Send to decoder
+            // P0: Create cancel token for pre-emptible decode
+            auto cancelToken = std::make_shared<CancelToken>();
+            cancelToken->ticketId = result.key.level * 1000000ULL + result.key.x * 1000ULL + result.key.y;
+            
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
                 pendingDecodes_.insert(result.key);
+                decodeCancelTokens_[result.key] = cancelToken;
             }
             
             DecodeRequest dreq;
@@ -238,6 +251,7 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             dreq.data = std::move(result.data);
             dreq.priority = result.priority;
             dreq.score = result.score;
+            dreq.cancelToken = cancelToken;  // P0: Pass token for cancellation checks
 
             // Transition tile to decoding lifecycle phase before worker decode begins.
             auto it = tiles.find(result.key);
@@ -258,6 +272,7 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
             {
                 std::lock_guard<std::mutex> tlock(trackingMutex_);
                 pendingDecodes_.erase(result.key);
+                decodeCancelTokens_.erase(result.key);  // P0: Clean up cancel token
                 canceled = (canceledKeys_.count(result.key) > 0);
             }
 
