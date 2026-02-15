@@ -68,6 +68,15 @@ float TilePyramid::ComputeScore(const TileKey& key, const glm::vec3& cameraPos,
     float distanceKm = std::max(1.0f, glm::length(tileCenter - cameraPos) - tileRadius);
     float distanceMeters = distanceKm * 1000.0f;
     
+    // P4: Check if weighted scheduler is enabled
+    if (!settings_.useWeightedScheduler) {
+        // Legacy scoring: SSE * (1 + centerBiasWeight * centerBias)
+        float sse = ComputeSSE(key, distanceMeters, viewportHeight, fovDegrees);
+        glm::vec3 dirToTile = glm::normalize(tileCenter - cameraPos);
+        float centerBias = std::max(0.0f, glm::dot(viewDir, dirToTile));
+        return sse * (1.0f + centerBiasWeight_ * centerBias);
+    }
+    
     // P4: Weighted score computation
     float score = 0.0f;
     
@@ -175,6 +184,7 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
     // Rank prefetch tiles
     rankedPrefetch_.reserve(selection_.prefetch.size());
     for (const TileKey& key : selection_.prefetch) {
+        // P4 FIX: Start with base score (includes distance and LOD terms if weights are set)
         float score = ComputeScore(key, cameraPos, viewDir, fovDegrees, viewportHeight);
         
         if (predictiveActive) {
@@ -182,16 +192,17 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
             float radius = TileBoundingRadius(key);
             float predictedDistance = glm::length(center - predictedCameraPos);
             predictedDistance = std::max(0.0f, predictedDistance - radius);
+            
+            // P4: Predictive score with configurable directional weight
             float predictedScore = 1.0f / (predictedDistance + 1.0f);
-
-            // P4: Directional bias with configurable weight
-            // Tiles along momentum vector are preferred
             glm::vec3 velDir = glm::normalize(cameraVelocity);
             glm::vec3 dirToTile = glm::normalize(center - cameraPos);
             float directional = std::max(0.0f, glm::dot(velDir, dirToTile));
             predictedScore *= (1.0f + settings_.schedulerDirectionalPredictiveWeight * directional);
-
-            score = predictedScore;
+            
+            // P4 FIX: Add predictive score to base score instead of replacing
+            // This ensures distanceWeight and lodWeight are still effective
+            score += predictedScore;
         }
         
         // P4: Apply aging boost to prefetch tiles too (AFTER predictive, so it multiplies)

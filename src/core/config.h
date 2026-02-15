@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstddef>
 #include <algorithm>
+#include <cmath>
 
 namespace globe {
 
@@ -268,6 +269,22 @@ struct Config {
         if (reversedZEnabled && logDepthEnabled) {
             logDepthEnabled = false;
             // Log mesajı uygulama başlangıcında yazılacak
+        }
+        
+        // P4: Scheduler weight validasyonu
+        auto ClampNonNegative = [](float& val) {
+            if (!std::isfinite(val) || val < 0.0f) val = 0.0f;
+        };
+        ClampNonNegative(schedulerSseWeight);
+        ClampNonNegative(schedulerCenterBiasWeight);
+        ClampNonNegative(schedulerDistanceWeight);
+        ClampNonNegative(schedulerLodWeight);
+        ClampNonNegative(schedulerAgingWeight);
+        ClampNonNegative(schedulerDirectionalPredictiveWeight);
+        
+        // Aging half-life sınırları
+        if (!std::isfinite(schedulerAgingHalfLifeMs) || schedulerAgingHalfLifeMs <= 0.0f) {
+            schedulerAgingHalfLifeMs = 5000.0f;  // Default fallback
         }
     }
 };
