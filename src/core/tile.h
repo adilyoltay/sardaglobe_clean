@@ -152,8 +152,8 @@ struct Tile {
     
     // P2: Distance-based terrain morph state
     float terrainMorphSpawnDistanceKm = 0.0f;   // Camera distance when terrain data first appeared
-    float terrainMorphNearDistanceKm = 0.0f;    // Near threshold for morph band (spawn - range)
-    float terrainMorphFarDistanceKm = 0.0f;     // Far threshold for morph band (spawn)
+    float terrainMorphNearDistanceKm = 0.0f;    // Near threshold = spawn distance (morph = 0)
+    float terrainMorphFarDistanceKm = 0.0f;     // Far threshold = spawn - range (morph = 1)
     static constexpr float TERRAIN_MORPH_DISTANCE_RANGE_KM = 0.2f;  // Default 200m morph band
     
     // Update fade animation, returns current alpha

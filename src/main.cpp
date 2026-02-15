@@ -401,6 +401,12 @@ int main(int argc, char** argv) {
             config.useDiskCache = false;
         } else if (std::strcmp(argv[i], "--no-dem") == 0) {
             config.demEnabled = false;
+        } else if (std::strcmp(argv[i], "--no-distance-morph") == 0) {
+            config.useDistanceBasedTerrainMorph = false;  // P2: Disable distance-based morph
+        } else if (std::strcmp(argv[i], "--morph-range") == 0 && i + 1 < argc) {
+            config.terrainMorphDistanceRangeKm = std::atof(argv[++i]);  // P2: Custom morph range (km)
+        } else if (std::strcmp(argv[i], "--no-morph-fallback") == 0) {
+            config.enableTerrainMorphTimeFallback = false;  // P2: Disable time fallback
         } else if (std::strcmp(argv[i], "--min-zoom") == 0 && i + 1 < argc) {
             config.minZoom = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--max-zoom") == 0 && i + 1 < argc) {
@@ -471,6 +477,9 @@ int main(int argc, char** argv) {
                       << "  --cache-dir DIR   Tile cache directory\n"
                       << "  --no-cache        Disable disk cache\n"
                       << "  --no-dem          Disable DEM\n"
+                      << "  --no-distance-morph   Disable distance-based terrain morph (use time-based)\n"
+                      << "  --morph-range KM      Terrain morph distance range in km (default: 0.2)\n"
+                      << "  --no-morph-fallback   Disable time-based fallback for invalid distance\n"
                       << "  --min-zoom N      Minimum zoom level\n"
                       << "  --max-zoom N      Maximum zoom level\n"
                       << "  --lod-refine-budget N  Max parent->child LOD refinements per frame (<=0 unlimited)\n"
