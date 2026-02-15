@@ -403,7 +403,11 @@ int main(int argc, char** argv) {
             config.demEnabled = false;
         } else if (std::strcmp(argv[i], "--no-distance-morph") == 0) {
             config.useDistanceBasedTerrainMorph = false;  // P2: Disable distance-based morph
-        } else if (std::strcmp(argv[i], "--morph-range") == 0 && i + 1 < argc) {
+        } else if (std::strcmp(argv[i], "--morph-range") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --morph-range requires a value (e.g., --morph-range 0.2)\n";
+                return 1;
+            }
             // P2: Parse and validate morph range
             char* end = nullptr;
             const char* val = argv[++i];
