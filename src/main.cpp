@@ -295,16 +295,49 @@ int main(int argc, char** argv) {
             config.schedulerUseAging = true;  // P3: Enable aging (default)
         } else if (std::strcmp(argv[i], "--no-scheduler-aging") == 0) {
             config.schedulerUseAging = false;  // P3: Disable aging
-        } else if (std::strcmp(argv[i], "--scheduler-aging-half-life") == 0 && i + 1 < argc) {
-            config.schedulerAgingHalfLifeMs = std::atof(argv[++i]);  // P3: Aging half-life (ms)
+        } else if (std::strcmp(argv[i], "--scheduler-aging-half-life") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --scheduler-aging-half-life requires a value (ms)\n";
+                return 1;
+            }
+            char* end = nullptr;
+            const char* val = argv[++i];
+            double halfLife = std::strtod(val, &end);
+            if (end == val || *end != '\0' || halfLife <= 0.0 || !std::isfinite(halfLife)) {
+                std::cerr << "ERROR: Invalid half-life '" << val << "'. Must be positive number (ms).\n";
+                return 1;
+            }
+            config.schedulerAgingHalfLifeMs = static_cast<float>(halfLife);
         } else if (std::strcmp(argv[i], "--adaptive-lod") == 0) {
             config.useAdaptiveLod = true;  // P3: Enable adaptive LOD (default)
         } else if (std::strcmp(argv[i], "--no-adaptive-lod") == 0) {
             config.useAdaptiveLod = false;  // P3: Disable adaptive LOD
-        } else if (std::strcmp(argv[i], "--lod-variance-threshold") == 0 && i + 1 < argc) {
-            config.lodVarianceThreshold = std::atof(argv[++i]);  // P3: Variance threshold
-        } else if (std::strcmp(argv[i], "--lod-hysteresis-frames") == 0 && i + 1 < argc) {
-            config.lodHysteresisFrames = std::atoi(argv[++i]);  // P3: Hysteresis frames
+        } else if (std::strcmp(argv[i], "--lod-variance-threshold") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --lod-variance-threshold requires a value (m²)\n";
+                return 1;
+            }
+            char* end = nullptr;
+            const char* val = argv[++i];
+            double threshold = std::strtod(val, &end);
+            if (end == val || *end != '\0' || threshold <= 0.0 || !std::isfinite(threshold)) {
+                std::cerr << "ERROR: Invalid variance threshold '" << val << "'. Must be positive number (m²).\n";
+                return 1;
+            }
+            config.lodVarianceThreshold = static_cast<float>(threshold);
+        } else if (std::strcmp(argv[i], "--lod-hysteresis-frames") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "ERROR: --lod-hysteresis-frames requires a value (frames)\n";
+                return 1;
+            }
+            char* end = nullptr;
+            const char* val = argv[++i];
+            long frames = std::strtol(val, &end, 10);
+            if (end == val || *end != '\0' || frames < 0 || frames > 60) {
+                std::cerr << "ERROR: Invalid hysteresis frames '" << val << "'. Must be 0-60.\n";
+                return 1;
+            }
+            config.lodHysteresisFrames = static_cast<int>(frames);
         } else if (std::strcmp(argv[i], "--ge-elevation-endpoint") == 0 && i + 1 < argc) {
             config.geElevationEndpoint = argv[++i];
         } else if (std::strcmp(argv[i], "--ge-elevation-path") == 0 && i + 1 < argc) {

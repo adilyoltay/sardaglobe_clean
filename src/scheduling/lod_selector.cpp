@@ -48,6 +48,15 @@ LodSelection LodSelector::Select(
     // Store tilt for horizon culling bypass
     tiltDegrees_ = tiltDegrees;
     
+    // P3: Decrement LOD hysteresis cooldown frames
+    for (auto it = lodCooldownFrames_.begin(); it != lodCooldownFrames_.end();) {
+        if (--(it->second) <= 0) {
+            it = lodCooldownFrames_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
     // Start traversal from root tiles (level 0)
     for (int x = 0; x < 1; ++x) {
         for (int y = 0; y < 1; ++y) {
@@ -217,6 +226,20 @@ bool LodSelector::TraverseTile(
         settings.minLodPixels,      // GE parity: min visible tile size
         settings.qualityMultiplier  // GE parity: quality mode
     );
+    
+    // P3: Apply LOD hysteresis frames (prevents rapid flip-flopping)
+    auto cooldownIt = lodCooldownFrames_.find(key);
+    bool inCooldown = (cooldownIt != lodCooldownFrames_.end() && cooldownIt->second > 0);
+    
+    if (subdivide && inCooldown) {
+        // In cooldown, prevent subdivision (stay at current LOD)
+        subdivide = false;
+    } else if (!subdivide && wasRefinedLastFrame && !inCooldown) {
+        // Just collapsed, start cooldown to prevent rapid re-subdivision
+        if (settings.lodHysteresisFrames > 0) {
+            lodCooldownFrames_[key] = settings.lodHysteresisFrames;
+        }
+    }
 
     // Progressive refinement budget (GE-style smoothness):
     // avoid large one-frame 4x leaf explosions by capping how many parent->child

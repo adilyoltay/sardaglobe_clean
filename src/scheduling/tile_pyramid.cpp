@@ -163,20 +163,6 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
     for (const TileKey& key : selection_.prefetch) {
         float score = ComputeScore(key, cameraPos, viewDir, fovDegrees, viewportHeight);
         
-        // P3: Apply aging boost to prefetch tiles too
-        if (settings_.useWeightedScheduler && settings_.schedulerUseAging) {
-            auto it = prefetchFirstSeenMs_.find(key);
-            if (it != prefetchFirstSeenMs_.end()) {
-                double ageMs = currentTimeMs_ - it->second;
-                float halfLifeMs = settings_.schedulerAgingHalfLifeMs;
-                if (halfLifeMs > 0.0f) {
-                    float ageFactor = 1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs));
-                    float ageBoost = 1.0f + ageFactor;
-                    score *= ageBoost;
-                }
-            }
-        }
-        
         if (predictiveActive) {
             glm::vec3 center = TileCenterWorld(key);
             float radius = TileBoundingRadius(key);
@@ -192,6 +178,21 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
 
             score = predictedScore;
         }
+        
+        // P3: Apply aging boost to prefetch tiles too (AFTER predictive, so it multiplies)
+        if (settings_.useWeightedScheduler && settings_.schedulerUseAging) {
+            auto it = prefetchFirstSeenMs_.find(key);
+            if (it != prefetchFirstSeenMs_.end()) {
+                double ageMs = currentTimeMs_ - it->second;
+                float halfLifeMs = settings_.schedulerAgingHalfLifeMs;
+                if (halfLifeMs > 0.0f) {
+                    float ageFactor = 1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs));
+                    float ageBoost = 1.0f + ageFactor;
+                    score *= ageBoost;
+                }
+            }
+        }
+        
         rankedPrefetch_.push_back({key, score});
     }
     

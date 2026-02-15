@@ -170,6 +170,9 @@ private:
     float tiltDegrees_ = 0.0f;  // For horizon culling bypass
     std::unordered_set<TileKey> previousLeafSet_;  // SSE hysteresis state
     
+    // P3: LOD hysteresis cooldown frames per tile (prevents rapid LOD flip-flopping)
+    std::unordered_map<TileKey, int> lodCooldownFrames_;
+    
     // Elevation-aware culling callback (optional)
     GetTileMaxHeightFn getMaxHeight_ = nullptr;
     
