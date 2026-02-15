@@ -308,6 +308,54 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.schedulerAgingHalfLifeMs = static_cast<float>(halfLife);
+        } else if (std::strcmp(argv[i], "--scheduler-sse-weight") == 0) {
+            if (i + 1 >= argc) { std::cerr << "ERROR: --scheduler-sse-weight requires a value\n"; return 1; }
+            char* end = nullptr; const char* val = argv[++i];
+            double w = std::strtod(val, &end);
+            if (end == val || *end != '\0' || w < 0.0 || !std::isfinite(w)) {
+                std::cerr << "ERROR: Invalid SSE weight '" << val << "'. Must be non-negative number.\n"; return 1;
+            }
+            config.schedulerSseWeight = static_cast<float>(w);
+        } else if (std::strcmp(argv[i], "--scheduler-center-bias-weight") == 0) {
+            if (i + 1 >= argc) { std::cerr << "ERROR: --scheduler-center-bias-weight requires a value\n"; return 1; }
+            char* end = nullptr; const char* val = argv[++i];
+            double w = std::strtod(val, &end);
+            if (end == val || *end != '\0' || w < 0.0 || !std::isfinite(w)) {
+                std::cerr << "ERROR: Invalid center bias weight '" << val << "'. Must be non-negative number.\n"; return 1;
+            }
+            config.schedulerCenterBiasWeight = static_cast<float>(w);
+        } else if (std::strcmp(argv[i], "--scheduler-distance-weight") == 0) {
+            if (i + 1 >= argc) { std::cerr << "ERROR: --scheduler-distance-weight requires a value\n"; return 1; }
+            char* end = nullptr; const char* val = argv[++i];
+            double w = std::strtod(val, &end);
+            if (end == val || *end != '\0' || w < 0.0 || !std::isfinite(w)) {
+                std::cerr << "ERROR: Invalid distance weight '" << val << "'. Must be non-negative number.\n"; return 1;
+            }
+            config.schedulerDistanceWeight = static_cast<float>(w);
+        } else if (std::strcmp(argv[i], "--scheduler-lod-weight") == 0) {
+            if (i + 1 >= argc) { std::cerr << "ERROR: --scheduler-lod-weight requires a value\n"; return 1; }
+            char* end = nullptr; const char* val = argv[++i];
+            double w = std::strtod(val, &end);
+            if (end == val || *end != '\0' || w < 0.0 || !std::isfinite(w)) {
+                std::cerr << "ERROR: Invalid LOD weight '" << val << "'. Must be non-negative number.\n"; return 1;
+            }
+            config.schedulerLodWeight = static_cast<float>(w);
+        } else if (std::strcmp(argv[i], "--scheduler-aging-weight") == 0) {
+            if (i + 1 >= argc) { std::cerr << "ERROR: --scheduler-aging-weight requires a value\n"; return 1; }
+            char* end = nullptr; const char* val = argv[++i];
+            double w = std::strtod(val, &end);
+            if (end == val || *end != '\0' || w < 0.0 || !std::isfinite(w)) {
+                std::cerr << "ERROR: Invalid aging weight '" << val << "'. Must be non-negative number.\n"; return 1;
+            }
+            config.schedulerAgingWeight = static_cast<float>(w);
+        } else if (std::strcmp(argv[i], "--scheduler-predictive-direction-weight") == 0) {
+            if (i + 1 >= argc) { std::cerr << "ERROR: --scheduler-predictive-direction-weight requires a value\n"; return 1; }
+            char* end = nullptr; const char* val = argv[++i];
+            double w = std::strtod(val, &end);
+            if (end == val || *end != '\0' || w < 0.0 || !std::isfinite(w)) {
+                std::cerr << "ERROR: Invalid predictive direction weight '" << val << "'. Must be non-negative number.\n"; return 1;
+            }
+            config.schedulerDirectionalPredictiveWeight = static_cast<float>(w);
         } else if (std::strcmp(argv[i], "--adaptive-lod") == 0) {
             config.useAdaptiveLod = true;  // P3: Enable adaptive LOD (default)
         } else if (std::strcmp(argv[i], "--no-adaptive-lod") == 0) {
@@ -549,6 +597,14 @@ int main(int argc, char** argv) {
                       << "  --adaptive-lod / --no-adaptive-lod  Enable/disable adaptive LOD based on terrain variance (default: enabled)\n"
                       << "  --lod-variance-threshold M2      Height variance threshold for LOD adjustment (default: 100)\n"
                       << "  --lod-hysteresis-frames N        Frames to wait before LOD change (default: 3)\n"
+                      << "\nScheduler Tuning (P4):\n"
+                      << "  --scheduler-sse-weight W         SSE term weight (default: 1.0)\n"
+                      << "  --scheduler-center-bias-weight W Center bias weight (default: 0.3)\n"
+                      << "  --scheduler-distance-weight W    Distance term weight (default: 0.0)\n"
+                      << "  --scheduler-lod-weight W         LOD level weight (default: 0.0)\n"
+                      << "  --scheduler-aging-weight W       Aging multiplier (default: 1.0)\n"
+                      << "  --scheduler-predictive-direction-weight W  Directional predictive weight (default: 0.5)\n"
+                      << "\nZoom Options:\n"
                       << "  --min-zoom N      Minimum zoom level\n"
                       << "  --max-zoom N      Maximum zoom level\n"
                       << "  --lod-refine-budget N  Max parent->child LOD refinements per frame (<=0 unlimited)\n"

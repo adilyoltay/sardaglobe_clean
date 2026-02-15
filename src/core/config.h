@@ -196,6 +196,14 @@ struct Config {
     float schedulerAgingHalfLifeMs = 5000.0f; // Aging half-life in milliseconds
     bool schedulerUseAging = true;           // Enable aging factor in priority
     
+    // P4: Weighted scheduler tuning parameters
+    float schedulerSseWeight = 1.0f;                    // SSE term weight (default: 1.0)
+    float schedulerCenterBiasWeight = 0.30f;            // Center bias weight (default: 0.3)
+    float schedulerDistanceWeight = 0.0f;               // Distance term weight (default: 0.0)
+    float schedulerLodWeight = 0.0f;                    // LOD level weight (default: 0.0)
+    float schedulerAgingWeight = 1.0f;                  // Aging multiplier (default: 1.0)
+    float schedulerDirectionalPredictiveWeight = 0.5f;  // Directional predictive weight (default: 0.5)
+    
     // Adaptive LOD
     bool useAdaptiveLod = true;              // Enable adaptive LOD based on terrain variance
     float lodVarianceThreshold = 100.0f;     // Height variance threshold for LOD adjustment

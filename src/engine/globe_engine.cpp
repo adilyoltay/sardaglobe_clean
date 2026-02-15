@@ -685,6 +685,14 @@ void GlobeEngine::Update(double dt, double currentTime) {
     lodSettings.schedulerUseAging = config_.schedulerUseAging;
     lodSettings.schedulerAgingHalfLifeMs = config_.schedulerAgingHalfLifeMs;
     
+    // P4: Weighted scheduler tuning parameters
+    lodSettings.schedulerSseWeight = config_.schedulerSseWeight;
+    lodSettings.schedulerCenterBiasWeight = config_.schedulerCenterBiasWeight;
+    lodSettings.schedulerDistanceWeight = config_.schedulerDistanceWeight;
+    lodSettings.schedulerLodWeight = config_.schedulerLodWeight;
+    lodSettings.schedulerAgingWeight = config_.schedulerAgingWeight;
+    lodSettings.schedulerDirectionalPredictiveWeight = config_.schedulerDirectionalPredictiveWeight;
+    
     // P3: Adaptive LOD settings
     lodSettings.useAdaptiveLod = config_.useAdaptiveLod;
     lodSettings.lodVarianceThreshold = config_.lodVarianceThreshold;

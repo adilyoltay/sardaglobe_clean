@@ -68,17 +68,31 @@ float TilePyramid::ComputeScore(const TileKey& key, const glm::vec3& cameraPos,
     float distanceKm = std::max(1.0f, glm::length(tileCenter - cameraPos) - tileRadius);
     float distanceMeters = distanceKm * 1000.0f;
     
-    // Compute SSE (Screen-Space Error) - uses tile level for geometric error
-    float sse = ComputeSSE(key, distanceMeters, viewportHeight, fovDegrees);
+    // P4: Weighted score computation
+    float score = 0.0f;
     
-    // Center bias: how much the tile is in the center of view
-    // dirToTile = normalize(tileCenter - cameraPos)
-    // centerBias = max(0, dot(viewDir, dirToTile))
-    glm::vec3 dirToTile = glm::normalize(tileCenter - cameraPos);
-    float centerBias = std::max(0.0f, glm::dot(viewDir, dirToTile));
+    // SSE term with center bias
+    if (settings_.schedulerSseWeight > 0.0f) {
+        float sse = ComputeSSE(key, distanceMeters, viewportHeight, fovDegrees);
+        glm::vec3 dirToTile = glm::normalize(tileCenter - cameraPos);
+        float centerBias = std::max(0.0f, glm::dot(viewDir, dirToTile));
+        // SSE * (1 + centerBiasWeight * centerBias)
+        float sseTerm = sse * (1.0f + settings_.schedulerCenterBiasWeight * centerBias);
+        score += settings_.schedulerSseWeight * sseTerm;
+    }
     
-    // Final score: SSE * (1 + w * centerBias)
-    float score = sse * (1.0f + centerBiasWeight_ * centerBias);
+    // Distance term
+    if (settings_.schedulerDistanceWeight > 0.0f) {
+        float distanceTerm = 1.0f / (distanceKm + 1.0f);
+        score += settings_.schedulerDistanceWeight * distanceTerm;
+    }
+    
+    // LOD level term
+    if (settings_.schedulerLodWeight > 0.0f) {
+        float lodTerm = static_cast<float>(key.level) / 
+                       std::max(1.0f, static_cast<float>(settings_.maxZoom + 1));
+        score += settings_.schedulerLodWeight * lodTerm;
+    }
     
     return score;
 }
@@ -126,16 +140,16 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
     for (const TileKey& key : selection_.required) {
         float score = ComputeScore(key, cameraPos, viewDir, fovDegrees, viewportHeight);
         
-        // P3: Apply aging boost if weighted scheduler is enabled
+        // P4: Apply aging boost if weighted scheduler is enabled
         if (settings_.useWeightedScheduler && settings_.schedulerUseAging) {
             auto it = requiredFirstSeenMs_.find(key);
             if (it != requiredFirstSeenMs_.end()) {
                 double ageMs = currentTimeMs_ - it->second;
-                // ageBoost = 1 + (1 - 2^(-age/halfLife))
-                // At age=0: boost=1, at age=halfLife: boost=1.5, as age→∞: boost→2
                 float halfLifeMs = settings_.schedulerAgingHalfLifeMs;
-                if (halfLifeMs > 0.0f) {
-                    float ageFactor = 1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs));
+                if (halfLifeMs > 0.0f && settings_.schedulerAgingWeight > 0.0f) {
+                    // ageFactor = schedulerAgingWeight * (1 - 2^(-age/halfLife))
+                    float ageFactor = settings_.schedulerAgingWeight * 
+                                     (1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs)));
                     float ageBoost = 1.0f + ageFactor;
                     score *= ageBoost;
                 }
@@ -170,23 +184,26 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
             predictedDistance = std::max(0.0f, predictedDistance - radius);
             float predictedScore = 1.0f / (predictedDistance + 1.0f);
 
-            // Directional bias so tiles along momentum vector are preferred.
+            // P4: Directional bias with configurable weight
+            // Tiles along momentum vector are preferred
             glm::vec3 velDir = glm::normalize(cameraVelocity);
             glm::vec3 dirToTile = glm::normalize(center - cameraPos);
             float directional = std::max(0.0f, glm::dot(velDir, dirToTile));
-            predictedScore *= (1.0f + 0.5f * directional);
+            predictedScore *= (1.0f + settings_.schedulerDirectionalPredictiveWeight * directional);
 
             score = predictedScore;
         }
         
-        // P3: Apply aging boost to prefetch tiles too (AFTER predictive, so it multiplies)
+        // P4: Apply aging boost to prefetch tiles too (AFTER predictive, so it multiplies)
         if (settings_.useWeightedScheduler && settings_.schedulerUseAging) {
             auto it = prefetchFirstSeenMs_.find(key);
             if (it != prefetchFirstSeenMs_.end()) {
                 double ageMs = currentTimeMs_ - it->second;
                 float halfLifeMs = settings_.schedulerAgingHalfLifeMs;
-                if (halfLifeMs > 0.0f) {
-                    float ageFactor = 1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs));
+                if (halfLifeMs > 0.0f && settings_.schedulerAgingWeight > 0.0f) {
+                    // ageFactor = schedulerAgingWeight * (1 - 2^(-age/halfLife))
+                    float ageFactor = settings_.schedulerAgingWeight * 
+                                     (1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs)));
                     float ageBoost = 1.0f + ageFactor;
                     score *= ageBoost;
                 }

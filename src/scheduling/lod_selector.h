@@ -78,6 +78,14 @@ public:
         bool schedulerUseAging = true;           // Enable aging factor in priority
         float schedulerAgingHalfLifeMs = 5000.0f; // Aging half-life in milliseconds
         
+        // P4: Weighted scheduler tuning parameters
+        float schedulerSseWeight = 1.0f;                    // SSE term weight
+        float schedulerCenterBiasWeight = 0.30f;            // Center bias weight
+        float schedulerDistanceWeight = 0.0f;               // Distance term weight
+        float schedulerLodWeight = 0.0f;                    // LOD level weight
+        float schedulerAgingWeight = 1.0f;                  // Aging multiplier
+        float schedulerDirectionalPredictiveWeight = 0.5f;  // Directional predictive weight
+        
         // P3: Adaptive LOD settings
         bool useAdaptiveLod = true;              // Enable adaptive LOD based on terrain variance
         float lodVarianceThreshold = 100.0f;     // Height variance threshold for LOD adjustment
