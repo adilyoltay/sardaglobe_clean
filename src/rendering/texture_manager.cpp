@@ -96,10 +96,27 @@ void TextureManager::InitializePboManager() {
     // P0: Set up token validator for stale callback prevention
     // This validates that upload callbacks are still valid (tile not evicted)
     auto validator = [this](const std::string& key, uint64_t token) -> bool {
-        // Convert string key back to TileKey
-        // For now, we use a simplified approach - the epoch is checked elsewhere
-        // In production, this would look up the tile's current epoch
-        return true;  // Simplified - actual validation happens in callback
+        // Parse resource key: "level/x/y"
+        // This is a backup validation - primary validation is in OnPboUploadComplete
+        // and ProcessUploads via IsUploadEpochCurrent
+        
+        // Format: "level/x/y"
+        size_t firstSlash = key.find('/');
+        size_t secondSlash = key.find('/', firstSlash + 1);
+        if (firstSlash == std::string::npos || secondSlash == std::string::npos) {
+            return false;  // Invalid key format
+        }
+        
+        try {
+            int level = std::stoi(key.substr(0, firstSlash));
+            int x = std::stoi(key.substr(firstSlash + 1, secondSlash - firstSlash - 1));
+            int y = std::stoi(key.substr(secondSlash + 1));
+            
+            TileKey tileKey(level, x, y);
+            return IsUploadEpochCurrent(tileKey, token);
+        } catch (...) {
+            return false;  // Parse error
+        }
     };
     pboManager_->SetTokenValidator(validator);
 }
@@ -214,8 +231,10 @@ void OnPboUploadComplete(GLuint textureId, bool success, void* userData) {
     // P0: Check for stale upload (tile evicted before callback)
     if (ctx->manager && ctx->epoch != 0) {
         if (!ctx->manager->IsUploadEpochCurrent(ctx->key, ctx->epoch)) {
-            // Stale upload - tile was evicted, clean up but don't touch GL
-            glDeleteTextures(1, &ctx->textureId);  // Delete the orphaned texture
+            // Stale upload - tile was evicted
+            // IMPORTANT: Don't delete texture here - it was already deleted by ReleaseTileResources
+            // when the tile was evicted. Deleting it again could delete a reused GL name.
+            // Just clean up the context.
             delete ctx;
             return;
         }
@@ -722,13 +741,17 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
                               std::to_string(tile.key.x) + "/" + 
                               std::to_string(tile.key.y);
     
+    // P0 FIX: Don't move pixels until submit is successful
+    // Create a copy for submission to avoid data loss on failure
+    std::vector<uint8_t> pixelsCopy = tile.pixels;
+    
     bool submitted = pboManager_->SubmitUploadOwnedWithToken(
         textureId,
         tile.pixelWidth,
         tile.pixelHeight,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
-        std::move(tile.pixels),  // Move pixels into request
+        std::move(pixelsCopy),   // Move copy into request
         resourceKey,             // P0: Resource key for validation
         epoch,                   // P0: Generation token
         OnPboUploadComplete,     // Callback for completion
@@ -737,8 +760,13 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
         false  // Don't generate mipmap immediately - callback will do it
     );
     
-    if (!submitted) {
+    if (submitted) {
+        // P0 FIX: Only clear original pixels after successful submit
+        tile.pixels.clear();
+        tile.pixels.shrink_to_fit();
+    } else {
         delete ctx;  // Clean up context if submission failed
+        // P0 FIX: Original pixels still intact for fallback path
     }
     
     if (submitted) {

@@ -451,10 +451,8 @@ bool PboUploadManager::SubmitUploadOwnedWithToken(GLuint texture, GLsizei width,
     req.internalFormat = GL_RGBA8;
     req.generateMipmap = generateMipmap;
     req.generationToken = generationToken;  // P0: Set token for stale detection
+    req.resourceKey = resourceKey;           // P0: Set resource key for validation
     
-    // Create in-flight request with resource key for validation
-    // This will be stored in the in-flight queue
-    // We'll set the resource key when creating the InFlightRequest in ProcessUploads
     return SubmitUpload(std::move(req));
 }
 
@@ -766,9 +764,8 @@ int PboUploadManager::ProcessUploads() {
             // P0: Check for stale upload before executing
             bool isStale = false;
             if (req.generationToken != 0 && tokenValidator_) {
-                // For immediate uploads, we need to validate synchronously
-                // Since we don't have resourceKey in request, we skip this check for now
-                // In production, resourceKey should be added to UploadRequest
+                // Validate synchronously using resourceKey
+                isStale = !tokenValidator_(req.resourceKey, req.generationToken);
             }
             
             if (isStale) {
