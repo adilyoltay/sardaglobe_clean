@@ -129,6 +129,12 @@ bool RockTreeNodeDataParser::ParseTopLevel(ParsedNodeData& out, const uint8_t* d
         }
     }
     
+    // B1: Parser hardening - require transform matrix
+    if (!out.hasTransform) {
+        out.error = "Missing required transform matrix";
+        return false;
+    }
+    
     return true;
 }
 
@@ -250,6 +256,28 @@ bool RockTreeNodeDataParser::ParsePayload(ParsedNodeData& out, const uint8_t* da
         out.error = "UV count (" + std::to_string(out.uv.size() / 2) + 
                    ") doesn't match vertex count (" + std::to_string(out.vertexCount) + ")";
         return false;
+    }
+    
+    // B1: Parser hardening - vertex count limits (prevent memory DoS)
+    const int MAX_VERTEX_COUNT = 10'000'000;  // 10M vertices ~ 60MB position data
+    if (out.vertexCount > MAX_VERTEX_COUNT) {
+        out.error = "Vertex count exceeds limit: " + std::to_string(out.vertexCount);
+        return false;
+    }
+    
+    // B1: Parser hardening - indices consistency check
+    if (!out.indices.empty()) {
+        uint32_t maxIndex = 0;
+        for (uint32_t idx : out.indices) {
+            if (idx != 0xFFFFFFFFU) {  // Skip strip restart markers
+                maxIndex = std::max(maxIndex, idx);
+            }
+        }
+        if (maxIndex >= static_cast<uint32_t>(out.vertexCount)) {
+            out.error = "Index value out of range: max=" + std::to_string(maxIndex) + 
+                       " vs vertices=" + std::to_string(out.vertexCount);
+            return false;
+        }
     }
     
     return true;
