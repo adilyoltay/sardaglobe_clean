@@ -1,9 +1,9 @@
 #include "tile_pyramid.h"
 #include "../math/tile_math.h"
 #include "../io/dem_manager.h"  // P1: For strict DEM+RGB quorum
-#include <GLFW/glfw3.h>         // P3: For time measurement
 #include <algorithm>
 #include <cmath>
+#include <chrono>  // P3: For time measurement (portable, no GLFW dependency)
 
 namespace globe {
 
@@ -50,7 +50,8 @@ const LodSelection& TilePyramid::Select(
     }
     
     // P3: Update current time for aging calculations (convert to ms)
-    currentTimeMs_ = glfwGetTime() * 1000.0;
+    auto now = std::chrono::steady_clock::now();
+    currentTimeMs_ = std::chrono::duration<double, std::milli>(now.time_since_epoch()).count();
     
     // Build ranked lists for fetch prioritization (GE-style scoring)
     BuildRankedLists(cameraPos, cameraVelocity, viewDir, fovDegrees, viewportHeight);

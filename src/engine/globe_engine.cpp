@@ -2885,6 +2885,11 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshDiskCacheHits = rockStats.diskCacheHits;
         debugStats_.rockMeshDiskCacheMisses = rockStats.diskCacheMisses;
         debugStats_.rockMeshStaleDrops = rockStats.staleDropCount;
+        // P0-P2: Vertex explosion mitigation counters
+        debugStats_.rockMeshDiscardInvalidTransform = rockStats.discardInvalidTransform;
+        debugStats_.rockMeshDiscardInvalidScale = rockStats.discardInvalidScale;
+        debugStats_.rockMeshDiscardInvalidBounds = rockStats.discardInvalidBounds;
+        debugStats_.rockMeshDiscardNonFiniteVertex = rockStats.discardNonFiniteVertex;
     } else {
         debugStats_.rockMeshUploaded = 0;
         debugStats_.rockMeshPending = 0;
@@ -2893,6 +2898,10 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshDiskCacheHits = 0;
         debugStats_.rockMeshDiskCacheMisses = 0;
         debugStats_.rockMeshStaleDrops = 0;
+        debugStats_.rockMeshDiscardInvalidTransform = 0;
+        debugStats_.rockMeshDiscardInvalidScale = 0;
+        debugStats_.rockMeshDiscardInvalidBounds = 0;
+        debugStats_.rockMeshDiscardNonFiniteVertex = 0;
     }
     
     // Render ImGui debug panel
@@ -3323,6 +3332,22 @@ void GlobeEngine::RenderDebugPanel() {
                 ImGui::Text("Failed: %d | Stale Drops: %d", debugStats_.rockMeshFailed, debugStats_.rockMeshStaleDrops);
                 ImGui::Text("Disk Cache Hit/Miss: %d / %d", 
                             debugStats_.rockMeshDiskCacheHits, debugStats_.rockMeshDiskCacheMisses);
+                // P0-P2: Vertex explosion mitigation telemetry
+                int totalDiscards = debugStats_.rockMeshDiscardInvalidTransform + 
+                                    debugStats_.rockMeshDiscardInvalidScale +
+                                    debugStats_.rockMeshDiscardInvalidBounds + 
+                                    debugStats_.rockMeshDiscardNonFiniteVertex;
+                if (totalDiscards > 0) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 
+                                       "Sanity Discards: %d (Tfm:%d Scl:%d Bnd:%d Vtx:%d)",
+                                       totalDiscards,
+                                       debugStats_.rockMeshDiscardInvalidTransform,
+                                       debugStats_.rockMeshDiscardInvalidScale,
+                                       debugStats_.rockMeshDiscardInvalidBounds,
+                                       debugStats_.rockMeshDiscardNonFiniteVertex);
+                } else {
+                    ImGui::TextDisabled("Sanity Discards: 0 (clean)");
+                }
             } else {
                 ImGui::TextDisabled("RockMesh disabled (no endpoint configured)");
             }

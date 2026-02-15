@@ -284,6 +284,11 @@ private:
         int rockMeshStaleDrops = 0;      // Dropped due to stale generation
         float rockMeshFade = 1.0f;       // Current fade value (0.0-1.0)
         bool rockMeshEnabled = false;    // Whether RockMesh system is active
+        // P0-P2: RockMesh vertex explosion mitigation counters
+        int rockMeshDiscardInvalidTransform = 0;    // Discarded: non-finite transform matrix
+        int rockMeshDiscardInvalidScale = 0;        // Discarded: invalid scale
+        int rockMeshDiscardInvalidBounds = 0;       // Discarded: AABB too large
+        int rockMeshDiscardNonFiniteVertex = 0;     // Discarded: non-finite vertex positions
     };
     DebugStats debugStats_;
     DisplacementMode lastTerrainMode_ = DisplacementMode::CPU_MESH_BAKE;
