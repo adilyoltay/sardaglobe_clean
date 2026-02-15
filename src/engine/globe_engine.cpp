@@ -3585,56 +3585,49 @@ void GlobeEngine::RenderPivot(const glm::mat4& viewProj) {
     
     if (pivotProgram_ && pivotVao_) {
         glUseProgram(pivotProgram_);
-        
-        // Calculate orientation to lie on the surface
-        glm::dvec3 up = glm::normalize(pivot);
-        glm::dvec3 camPos = camera_->GetPositionECEF();
-        glm::dvec3 toCam = glm::normalize(camPos - pivot);
-        
-        // Right vector
-        glm::dvec3 right = glm::cross(up, toCam);
-        if (glm::length(right) < 0.001) right = glm::dvec3(1, 0, 0);
-        right = glm::normalize(right);
-        
-        // Forward vector (surface tangent)
-        glm::dvec3 forward = glm::cross(right, up);
-        
-        // Scale based on distance and FOV to keep screen size constant (~40 pixels)
-        double dist = glm::length(camPos - pivot);
-        float fovRad = glm::radians(static_cast<float>(camera_->GetFov()));
-        float targetPixelSize = 40.0f;
-        float scale = static_cast<float>(targetPixelSize * (dist * std::tan(fovRad * 0.5f) / config_.windowHeight));
-        
-        // Construct Model Matrix
-        glm::mat4 model(1.0f);
-        model[0] = glm::vec4(glm::vec3(right), 0.0f);
-        model[1] = glm::vec4(glm::vec3(forward), 0.0f);
-        model[2] = glm::vec4(glm::vec3(up), 0.0f);
-        model[3] = glm::vec4(glm::vec3(pivot), 1.0f);
-        
-        // Scale
-        model = glm::scale(model, glm::vec3(scale));
-        
-        // Raise slightly to avoid Z-fighting
-        model = glm::translate(model, glm::vec3(0.0f, 0.0f, 0.1f));
-        
-        glm::mat4 mvp = viewProj * model;
+
+        // GE parity: pivot/target indicator is a screen-space overlay anchored to the
+        // pivot point, not a world-space circle. The previous world-space implementation
+        // (especially with depth test disabled) could paint huge arcs across the globe and
+        // appear to change "per LOD" as zoom/tilt changes.
+        glm::vec4 clipPos = viewProj * glm::vec4(glm::vec3(pivot), 1.0f);
+        if (clipPos.w <= 0.0f) {
+            return;  // Behind camera
+        }
+        glm::vec3 ndc = glm::vec3(clipPos) / clipPos.w;  // [-1, +1]
+
+        // Convert a pixel radius to NDC units.
+        const float pixelRadius = 18.0f;  // Visual radius (pixels)
+        const float sx = (config_.windowWidth > 0) ? (2.0f * pixelRadius / static_cast<float>(config_.windowWidth)) : 0.0f;
+        const float sy = (config_.windowHeight > 0) ? (2.0f * pixelRadius / static_cast<float>(config_.windowHeight)) : 0.0f;
+
+        glm::mat4 mvp(1.0f);
+        mvp = glm::translate(mvp, glm::vec3(ndc.x, ndc.y, 0.0f));
+        mvp = glm::scale(mvp, glm::vec3(sx, sy, 1.0f));
         
         glUniformMatrix4fv(pivotMvpLoc_, 1, GL_FALSE, glm::value_ptr(mvp));
         
         // Google Earth style color (Yellow/Orange)
         glUniform4f(pivotColorLoc_, 1.0f, 0.7f, 0.0f, 0.9f);
-        
-        // Disable depth test for always-visible gizmo
+
+        const bool depthWasEnabled = glIsEnabled(GL_DEPTH_TEST);
+        const bool blendWasEnabled = glIsEnabled(GL_BLEND);
         glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         
         glBindVertexArray(pivotVao_);
         glLineWidth(2.5f);
         glDrawArrays(GL_LINES, 0, pivotVertexCount_);
         glLineWidth(1.0f);
         glBindVertexArray(0);
-        
-        glEnable(GL_DEPTH_TEST);
+
+        if (!blendWasEnabled) {
+            glDisable(GL_BLEND);
+        }
+        if (depthWasEnabled) {
+            glEnable(GL_DEPTH_TEST);
+        }
     }
 }
 

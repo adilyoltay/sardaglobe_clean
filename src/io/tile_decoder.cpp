@@ -177,11 +177,21 @@ void TileDecoder::WorkerLoop() {
             }
         }
         
+        // P0: Early cancellation check before decode starts
+        if (request.cancelToken && request.cancelToken->IsCancelled()) {
+            continue;  // Skip cancelled request
+        }
+        
         auto start = std::chrono::high_resolution_clock::now();
 
         DecodeResult result;
         result.key = request.key;
         result.success = DoDecode(request, result);
+        
+        // P0: Don't publish cancelled results
+        if (request.cancelToken && request.cancelToken->IsCancelled()) {
+            continue;
+        }
 
         auto end = std::chrono::high_resolution_clock::now();
         uint64_t elapsedUs = static_cast<uint64_t>(
@@ -205,13 +215,27 @@ bool TileDecoder::DoDecode(const DecodeRequest& request, DecodeResult& result) {
     if (request.data.empty()) {
         return false;
     }
+    
+    // P0: Early cancellation check
+    if (request.cancelToken && request.cancelToken->IsCancelled()) {
+        return false;
+    }
 
     // Fast path: pre-decoded RGBA blob from memory cache (skip image codec cost).
     if (decoded_blob::Unpack(request.data, result.width, result.height, result.pixels)) {
+        // P0: Check cancellation after blob unpack
+        if (request.cancelToken && request.cancelToken->IsCancelled()) {
+            return false;
+        }
         result.hasTransparency = HasAnyTransparency(result.pixels);
         result.mostlyBlackOpaque = IsMostlyBlackOpaque(result.pixels);
         decodedBlobHits_.fetch_add(1);
         return true;
+    }
+    
+    // P0: Check cancellation before heavy JPEG/PNG decode
+    if (request.cancelToken && request.cancelToken->IsCancelled()) {
+        return false;
     }
     
     int channels = 0;
@@ -225,6 +249,12 @@ bool TileDecoder::DoDecode(const DecodeRequest& request, DecodeResult& result) {
         &channels,
         4  // Force RGBA
     );
+    
+    // P0: Check cancellation after decode
+    if (request.cancelToken && request.cancelToken->IsCancelled()) {
+        if (pixels) stbi_image_free(pixels);
+        return false;
+    }
     
     if (!pixels) {
         return false;

@@ -61,12 +61,22 @@ struct FetchResult {
     double score = 0.0;
 };
 
+// Cancel token for pre-emptible operations
+struct CancelToken {
+    std::atomic_bool cancelled{false};
+    uint64_t ticketId{0};
+    
+    void Cancel() { cancelled.store(true); }
+    bool IsCancelled() const { return cancelled.load(); }
+};
+
 // Decode request
 struct DecodeRequest {
     TileKey key;
     std::vector<uint8_t> data;
     Priority priority = Priority::Normal;
     double score = 0.0;
+    std::shared_ptr<CancelToken> cancelToken;  // P0: Pre-emptible cancellation support
 };
 
 // Decode result  

@@ -103,6 +103,11 @@ struct UploadStats {
     uint32_t pendingCount = 0;          // Currently pending uploads
     uint32_t activePbos = 0;            // Number of PBOs currently in flight
     uint32_t inFlightRequests = 0;      // Number of requests in flight
+    
+    // P0: Budget tracking
+    uint64_t skippedByBudget = 0;       // Uploads skipped due to budget limits
+    uint64_t deferredBytes = 0;         // Bytes deferred to next frames
+    uint64_t budgetHits = 0;            // Number of frames where budget was hit
 };
 
 // Forward declaration
@@ -136,6 +141,11 @@ public:
         uint32_t pboAgeThreshold;           // Frames before a PBO can be reused
         bool useFences;                     // Use GL sync fences for completion
         
+        // P0: Frame budget controls to prevent stutter
+        uint32_t maxUploadsPerFrame;        // Max uploads per frame
+        size_t maxBytesPerFrame;            // Max bytes uploaded per frame
+        double maxMsPerFrame;               // Max milliseconds spent on uploads per frame
+        
         Config()
             : maxPboCount(8)
             , defaultPboSize(4 * 1024 * 1024)
@@ -143,7 +153,11 @@ public:
             , usePbo(true)
             , orphanUnusedPbos(true)
             , pboAgeThreshold(3)
-            , useFences(true) {}
+            , useFences(true)
+            , maxUploadsPerFrame(8)
+            , maxBytesPerFrame(64 * 1024 * 1024)  // 64 MB default
+            , maxMsPerFrame(2.0)  // 2ms default budget
+        {}
     };
 
     explicit PboUploadManager(const Config& config = Config{});

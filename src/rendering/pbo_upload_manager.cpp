@@ -586,9 +586,13 @@ int PboUploadManager::ProcessUploads() {
     PollGpuCompletion();
     
     int processedCount = 0;
+    uint64_t bytesProcessed = 0;
+    auto frameStartTime = std::chrono::high_resolution_clock::now();
+    bool budgetHit = false;
     
-    // Process pending uploads
+    // Process pending uploads with budget controls
     std::vector<QueuedRequest> toProcess;
+    std::vector<QueuedRequest> deferred;  // P0: Budget aşımında ertelenenler
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         
@@ -602,16 +606,39 @@ int PboUploadManager::ProcessUploads() {
                       return a.request.priority < b.request.priority;
                   });
         
-        // Move to processing list (limited by available PBOs or batch size)
+        // P0: Budget-aware batch selection
         size_t maxBatch = config_.usePbo ? config_.maxPboCount : 8;
-        size_t count = std::min(maxBatch, pendingQueue_.size());
+        size_t maxByCount = std::min(static_cast<size_t>(config_.maxUploadsPerFrame), maxBatch);
+        
+        size_t selected = 0;
+        uint64_t selectedBytes = 0;
+        
+        for (auto& qr : pendingQueue_) {
+            if (selected >= maxByCount) break;
+            
+            size_t reqBytes = qr.request.GetDataSize();
+            
+            // Byte budget check
+            if (selectedBytes + reqBytes > config_.maxBytesPerFrame && selected > 0) {
+                // Budget hit - defer remaining
+                budgetHit = true;
+                break;
+            }
+            
+            selectedBytes += reqBytes;
+            selected++;
+        }
+        
+        // Move selected to processing list
         toProcess.insert(toProcess.end(), 
                         std::make_move_iterator(pendingQueue_.begin()),
-                        std::make_move_iterator(pendingQueue_.begin() + count));
-        pendingQueue_.erase(pendingQueue_.begin(), pendingQueue_.begin() + count);
+                        std::make_move_iterator(pendingQueue_.begin() + selected));
+        
+        // P0: Deferred requests stay in pending queue
+        pendingQueue_.erase(pendingQueue_.begin(), pendingQueue_.begin() + selected);
     }
     
-    // Execute uploads
+    // Execute uploads with time budget check
     for (auto& qr : toProcess) {
         auto& req = qr.request;
         
@@ -665,7 +692,34 @@ int PboUploadManager::ProcessUploads() {
         
         if (success) {
             ++processedCount;
+            bytesProcessed += req.GetDataSize();
         }
+        
+        // P0: Time budget check after each upload
+        auto now = std::chrono::high_resolution_clock::now();
+        double elapsedMs = std::chrono::duration<double, std::milli>(now - frameStartTime).count();
+        if (elapsedMs >= config_.maxMsPerFrame) {
+            // Time budget exhausted - defer remaining requests
+            budgetHit = true;
+            auto it = toProcess.begin() + (&qr - &toProcess[0]) + 1;
+            if (it != toProcess.end()) {
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                // Move deferred requests back to pending queue
+                for (auto& deferredReq : std::vector<QueuedRequest>(std::make_move_iterator(it), 
+                                                                    std::make_move_iterator(toProcess.end()))) {
+                    pendingQueue_.push_back(std::move(deferredReq));
+                }
+            }
+            break;
+        }
+    }
+    
+    // P0: Update budget stats
+    if (budgetHit) {
+        std::lock_guard<std::mutex> statsLock(statsMutex_);
+        stats_.skippedByBudget += static_cast<uint64_t>(toProcess.size() - processedCount);
+        stats_.deferredBytes += static_cast<uint64_t>(toProcess.size() - processedCount) * 1024 * 1024; // Estimate
+        stats_.budgetHits++;
     }
     
     // Update stats
