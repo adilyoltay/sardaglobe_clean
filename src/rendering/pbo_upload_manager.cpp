@@ -721,15 +721,19 @@ int PboUploadManager::ProcessUploads() {
     
     // P0: Update budget stats
     if (budgetHit) {
-        // Calculate actual deferred bytes from remaining toProcess items
-        uint64_t actualDeferredBytes = 0;
-        for (auto& qr : toProcess) {
-            actualDeferredBytes += qr.request.GetDataSize();
+        // P0 FIX: Calculate only for deferred (unprocessed) items
+        size_t deferredCount = toProcess.size() - processedCount;
+        
+        // Calculate deferred bytes from total minus processed
+        uint64_t totalBytes = 0;
+        for (const auto& qr : toProcess) {
+            totalBytes += qr.request.GetDataSize();
         }
+        uint64_t deferredBytes = (bytesProcessed > totalBytes) ? 0 : (totalBytes - bytesProcessed);
         
         std::lock_guard<std::mutex> statsLock(statsMutex_);
-        stats_.skippedByBudget += static_cast<uint64_t>(toProcess.size());
-        stats_.deferredBytes += actualDeferredBytes;  // P0: Use actual data size, not estimate
+        stats_.skippedByBudget += deferredCount;  // P0 FIX: Only deferred count
+        stats_.deferredBytes += deferredBytes;    // P0 FIX: Only deferred bytes
         stats_.budgetHits++;
     }
     

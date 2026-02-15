@@ -183,6 +183,7 @@ void TileScheduler::Update(TileMap& tiles, double currentTime) {
                 pendingFetches_.erase(key);
                 pendingFetchRanks_.erase(key);
                 pendingDecodes_.erase(key);
+                decodeCancelTokens_.erase(key);  // P0 FIX: Clean up cancel token on drop
                 canceled = (canceledKeys_.count(key) > 0);
             }
             
