@@ -404,7 +404,15 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--no-distance-morph") == 0) {
             config.useDistanceBasedTerrainMorph = false;  // P2: Disable distance-based morph
         } else if (std::strcmp(argv[i], "--morph-range") == 0 && i + 1 < argc) {
-            config.terrainMorphDistanceRangeKm = std::atof(argv[++i]);  // P2: Custom morph range (km)
+            // P2: Parse and validate morph range
+            char* end = nullptr;
+            const char* val = argv[++i];
+            double range = std::strtod(val, &end);
+            if (end == val || *end != '\0' || range <= 0.0 || !std::isfinite(range)) {
+                std::cerr << "ERROR: Invalid morph range '" << val << "'. Must be positive number (km).\n";
+                return 1;
+            }
+            config.terrainMorphDistanceRangeKm = static_cast<float>(range);
         } else if (std::strcmp(argv[i], "--no-morph-fallback") == 0) {
             config.enableTerrainMorphTimeFallback = false;  // P2: Disable time fallback
         } else if (std::strcmp(argv[i], "--min-zoom") == 0 && i + 1 < argc) {
