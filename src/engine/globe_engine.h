@@ -289,6 +289,9 @@ private:
         int rockMeshDiscardInvalidScale = 0;        // Discarded: invalid scale
         int rockMeshDiscardInvalidBounds = 0;       // Discarded: AABB too large
         int rockMeshDiscardNonFiniteVertex = 0;     // Discarded: non-finite vertex positions
+        int rockMeshDiscardAabbExceeded = 0;        // Discarded: AABB diagonal exceeds threshold
+        int rockMeshDiscardVertexDistanceExceeded = 0; // Discarded: vertex distance from origin exceeds threshold
+        int rockMeshFallbackTextureUsed = 0;        // Fallback texture used for textureless meshes
     };
     DebugStats debugStats_;
     DisplacementMode lastTerrainMode_ = DisplacementMode::CPU_MESH_BAKE;

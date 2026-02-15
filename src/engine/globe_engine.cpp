@@ -2891,6 +2891,9 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshDiscardInvalidScale = rockStats.discardInvalidScale;
         debugStats_.rockMeshDiscardInvalidBounds = rockStats.discardInvalidBounds;
         debugStats_.rockMeshDiscardNonFiniteVertex = rockStats.discardNonFiniteVertex;
+        debugStats_.rockMeshDiscardAabbExceeded = rockStats.discardAabbExceeded;
+        debugStats_.rockMeshDiscardVertexDistanceExceeded = rockStats.discardVertexDistanceExceeded;
+        debugStats_.rockMeshFallbackTextureUsed = rockStats.fallbackTextureUsed;
     } else {
         debugStats_.rockMeshUploaded = 0;
         debugStats_.rockMeshPending = 0;
@@ -2903,6 +2906,9 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshDiscardInvalidScale = 0;
         debugStats_.rockMeshDiscardInvalidBounds = 0;
         debugStats_.rockMeshDiscardNonFiniteVertex = 0;
+        debugStats_.rockMeshDiscardAabbExceeded = 0;
+        debugStats_.rockMeshDiscardVertexDistanceExceeded = 0;
+        debugStats_.rockMeshFallbackTextureUsed = 0;
     }
     
     // Render ImGui debug panel
@@ -3337,18 +3343,28 @@ void GlobeEngine::RenderDebugPanel() {
                 int totalDiscards = debugStats_.rockMeshDiscardInvalidTransform + 
                                     debugStats_.rockMeshDiscardInvalidScale +
                                     debugStats_.rockMeshDiscardInvalidBounds + 
-                                    debugStats_.rockMeshDiscardNonFiniteVertex;
+                                    debugStats_.rockMeshDiscardNonFiniteVertex +
+                                    debugStats_.rockMeshDiscardAabbExceeded +
+                                    debugStats_.rockMeshDiscardVertexDistanceExceeded;
                 if (totalDiscards > 0) {
                     ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 
-                                       "Sanity Discards: %d (Tfm:%d Scl:%d Bnd:%d Vtx:%d)",
+                                       "Sanity Discards: %d (Tfm:%d Scl:%d Bnd:%d Vtx:%d AABB:%d Dst:%d)",
                                        totalDiscards,
                                        debugStats_.rockMeshDiscardInvalidTransform,
                                        debugStats_.rockMeshDiscardInvalidScale,
                                        debugStats_.rockMeshDiscardInvalidBounds,
-                                       debugStats_.rockMeshDiscardNonFiniteVertex);
+                                       debugStats_.rockMeshDiscardNonFiniteVertex,
+                                       debugStats_.rockMeshDiscardAabbExceeded,
+                                       debugStats_.rockMeshDiscardVertexDistanceExceeded);
                 } else {
                     ImGui::TextDisabled("Sanity Discards: 0 (clean)");
                 }
+                // P2: Fallback texture usage
+                if (debugStats_.rockMeshFallbackTextureUsed > 0) {
+                    ImGui::Text("Fallback Textures: %d", debugStats_.rockMeshFallbackTextureUsed);
+                }
+            } else if (!config_.rockMeshRenderEnabled) {
+                ImGui::TextDisabled("RockMesh disabled by kill-switch (--no-rockmesh)");
             } else {
                 ImGui::TextDisabled("RockMesh disabled (no endpoint configured)");
             }

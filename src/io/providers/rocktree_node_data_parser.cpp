@@ -173,6 +173,12 @@ bool RockTreeNodeDataParser::ParsePayload(ParsedNodeData& out, const uint8_t* da
                     out.error = "Positions length not multiple of 6 (got " + std::to_string(length) + ")";
                     return false;
                 }
+                // P0: DoS fix - check limit BEFORE allocation
+                const size_t MAX_POSITION_BYTES = 60'000'000;  // 60MB (10M vertices * 6 bytes)
+                if (length > MAX_POSITION_BYTES) {
+                    out.error = "Positions data too large: " + std::to_string(length) + " bytes";
+                    return false;
+                }
                 out.positions.resize(length / 2);  // int16 count
                 memcpy(out.positions.data(), data + pos, length);
                 out.vertexCount = static_cast<int>(out.positions.size()) / 3;
@@ -185,16 +191,27 @@ bool RockTreeNodeDataParser::ParsePayload(ParsedNodeData& out, const uint8_t* da
                     out.error = "Failed to read index count";
                     return false;
                 }
+                // P1: Index count cap (DoS prevention)
+                const uint64_t MAX_INDEX_COUNT = 50'000'000;  // 50M indices ~ 200MB
+                if (indexCount > MAX_INDEX_COUNT) {
+                    out.error = "Index count exceeds limit: " + std::to_string(indexCount);
+                    return false;
+                }
                 idxPos += countBytes;
                 
                 std::vector<uint32_t> rawStrip;
-                rawStrip.reserve(indexCount);
+                rawStrip.reserve(static_cast<size_t>(indexCount));
                 
                 while (rawStrip.size() < indexCount && idxPos < length) {
                     uint64_t value;
                     size_t vb = ReadVarint(data + pos + idxPos, length - idxPos, value);
                     if (vb == 0) break;
                     idxPos += vb;
+                    // P1: Varint overflow check - reject values that don't fit in uint32_t
+                    if (value > 0xFFFFFFFFULL) {
+                        out.error = "Index value exceeds uint32_t range";
+                        return false;
+                    }
                     rawStrip.push_back(static_cast<uint32_t>(value));
                 }
                 
