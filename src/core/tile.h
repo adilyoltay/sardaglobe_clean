@@ -181,7 +181,8 @@ struct Tile {
                              float cameraDistanceKm = 0.0f,
                              bool useDistanceBased = false,
                              float distanceRangeKm = TERRAIN_MORPH_DISTANCE_RANGE_KM,
-                             float morphDuration = TERRAIN_MORPH_DURATION) {
+                             float morphDuration = TERRAIN_MORPH_DURATION,
+                             bool enableTimeFallback = true) {
         if (!hasTerrainData) {
             hadTerrainData = false;
             terrainMorphActive = false;
@@ -195,7 +196,12 @@ struct Tile {
         }
 
         // P2: Distance-based mode (with optional time-based fallback)
-        if (useDistanceBased && distanceRangeKm > 0.0f && cameraDistanceKm >= 0.0f) {
+        // If distance mode preconditions fail and enableTimeFallback is true,
+        // gracefully fall back to time-based morph.
+        bool distanceModeValid = useDistanceBased && 
+                                  distanceRangeKm > 0.0f && 
+                                  cameraDistanceKm >= 0.0f;
+        if (distanceModeValid) {
             // Initialize on first terrain data
             if (!hadTerrainData) {
                 hadTerrainData = true;
@@ -231,6 +237,17 @@ struct Tile {
             }
             return terrainMorph;
         }
+        
+        // P2: Distance mode preconditions failed - check if time fallback is allowed
+        if (!enableTimeFallback) {
+            // Hard disable: no morph progression (stay at current value or 0)
+            return terrainMorph;
+        }
+        
+        // P2: Reset distance state when falling back to time-based
+        terrainMorphSpawnDistanceKm = 0.0f;
+        terrainMorphNearDistanceKm = 0.0f;
+        terrainMorphFarDistanceKm = 0.0f;
         
         // Legacy: Time-based mode (original behavior preserved)
         if (!hadTerrainData) {

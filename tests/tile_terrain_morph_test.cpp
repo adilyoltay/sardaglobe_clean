@@ -68,31 +68,46 @@ int main() {
         // Test 1: Spawn at distance = morph 0
         float spawnDist = 1.0f;  // 1km away
         float rangeKm = 0.2f;    // 200m morph band
-        float mSpawn = tile2.UpdateTerrainMorph(0.0, true, spawnDist, true, rangeKm);
+        float mSpawn = tile2.UpdateTerrainMorph(0.0, true, spawnDist, true, rangeKm, 
+                                                 Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mSpawn, 0.0f), "P2: spawn at distance should yield morph 0");
         
         // Test 2: Approach by 100m = morph 0.5
-        float mHalf = tile2.UpdateTerrainMorph(0.0, true, 0.9f, true, rangeKm);
+        float mHalf = tile2.UpdateTerrainMorph(0.0, true, 0.9f, true, rangeKm,
+                                                 Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mHalf, 0.5f, 1e-3f), "P2: halfway approach should yield morph 0.5");
         
         // Test 3: Full approach = morph 1
-        float mFull = tile2.UpdateTerrainMorph(0.0, true, 0.8f, true, rangeKm);
+        float mFull = tile2.UpdateTerrainMorph(0.0, true, 0.8f, true, rangeKm,
+                                                 Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mFull, 1.0f, 1e-3f), "P2: full approach should yield morph 1");
         
         // Test 4: Monotonic - moving away shouldn't decrease morph
-        float mAway = tile2.UpdateTerrainMorph(0.0, true, 1.5f, true, rangeKm);
+        float mAway = tile2.UpdateTerrainMorph(0.0, true, 1.5f, true, rangeKm,
+                                                 Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mAway, 1.0f, 1e-3f), "P2: moving away should keep morph at 1 (monotonic)");
         
         // Test 5: Invalid distance falls back to time-based (when useDistanceBased=false)
         Tile tile3(key2);
-        float mTimeFallback = tile3.UpdateTerrainMorph(0.0, true, -1.0f, false, rangeKm);
+        float mTimeFallback = tile3.UpdateTerrainMorph(0.0, true, -1.0f, false, rangeKm,
+                                                        Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mTimeFallback, 0.0f), "P2: negative distance with useDistanceBased=false should use time-based (start at 0)");
         
         // Test 6: Zero rangeKm falls back (treated as invalid)
         Tile tile4(key2);
-        float mZeroRange = tile4.UpdateTerrainMorph(0.0, true, 1.0f, true, 0.0f);
+        float mZeroRange = tile4.UpdateTerrainMorph(0.0, true, 1.0f, true, 0.0f,
+                                                      Tile::TERRAIN_MORPH_DURATION, true);
         // With zero range, falls through to time-based path, starts at 0
         failed += !Expect(Near(mZeroRange, 0.0f), "P2: zero rangeKm should fallback to time-based");
+        
+        // Test 7: Invalid distance with NO fallback (enableTimeFallback=false)
+        // Note: First reset terrain data to set morph to 0, then call with invalid params
+        Tile tile5(key2);
+        tile5.UpdateTerrainMorph(0.0, false);  // Reset to get morph=0
+        float mNoFallback = tile5.UpdateTerrainMorph(0.0, true, -1.0f, true, rangeKm,
+                                                       Tile::TERRAIN_MORPH_DURATION, false);
+        // With invalid params and no fallback, morph stays at current value (0)
+        failed += !Expect(Near(mNoFallback, 0.0f), "P2: invalid distance with no fallback should stay at current value");
     }
 
     if (failed == 0) {

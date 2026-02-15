@@ -52,7 +52,8 @@ public:
         bool fallbackRequireParentUntilChildrenReady = true, // Parent fallback control
         bool useTextureArray = false,                  // Faz 2B: Use GL_TEXTURE_2D_ARRAY
         bool useDistanceBasedTerrainMorph = true,      // P2: Distance-based terrain morph
-        float terrainMorphDistanceRangeKm = 0.2f       // P2: Morph band width in km
+        float terrainMorphDistanceRangeKm = 0.2f,      // P2: Morph band width in km
+        bool enableTerrainMorphTimeFallback = true     // P2: Allow time fallback if distance invalid
     );
 
 private:

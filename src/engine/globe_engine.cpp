@@ -2362,7 +2362,8 @@ void GlobeEngine::Render() {
         config_.fallbackRequireParentUntilChildrenReady,
         config_.useTexture2DArray,  // Faz 2B: Texture array support
         config_.useDistanceBasedTerrainMorph,  // P2: Distance-based morph
-        config_.terrainMorphDistanceRangeKm     // P2: Morph band width
+        config_.terrainMorphDistanceRangeKm,   // P2: Morph band width
+        config_.enableTerrainMorphTimeFallback // P2: Time fallback on invalid distance
     );
     const auto& renderStats = tileRenderer_->GetStats();
 

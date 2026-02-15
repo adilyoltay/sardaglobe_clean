@@ -67,7 +67,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     bool fallbackRequireParentUntilChildrenReady,
     bool useTextureArray,
     bool useDistanceBasedTerrainMorph,
-    float terrainMorphDistanceRangeKm
+    float terrainMorphDistanceRangeKm,
+    bool enableTerrainMorphTimeFallback
 ) {
     TileDrawStats stats;
     const float fadeDurationSec = ComputeUnpopDurationSec(cameraSpeedKmPerSec);
@@ -427,7 +428,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         float distanceKm = glm::length(tile->center - cameraPos);
         float terrainMorph = tile->UpdateTerrainMorph(
             currentTime, hasTerrainData, distanceKm,
-            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm
+            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm,
+            Tile::TERRAIN_MORPH_DURATION, enableTerrainMorphTimeFallback
         );
         if (canBatchFlatTile(*tile, hasHeightmap, false)) {
             BatchKey key{tile->textureId, tile->builtSegments};
@@ -457,7 +459,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         float distanceKm = glm::length(leaf.tile->center - cameraPos);
         float terrainMorph = leaf.tile->UpdateTerrainMorph(
             currentTime, hasTerrainData, distanceKm,
-            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm
+            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm,
+            Tile::TERRAIN_MORPH_DURATION, enableTerrainMorphTimeFallback
         );
 
         if (leaf.useShaderCrossfade && leaf.unpopAncestor) {
