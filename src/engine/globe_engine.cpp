@@ -462,6 +462,13 @@ void GlobeEngine::Shutdown() {
     if (window_) {
         glfwMakeContextCurrent(window_);
     }
+    
+    // P0: Drain all pending PBO uploads before destroying texture manager
+    // This prevents stale callbacks from being invoked after shutdown
+    if (textureManager_) {
+        textureManager_->ProcessUploads(tiles_, 1000.0);  // Process with large budget
+    }
+    
     scheduler_.reset();
     textureManager_.reset();
     shaderManager_.reset();

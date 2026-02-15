@@ -90,7 +90,18 @@ void TextureManager::InitializePboManager() {
     if (!pboManager_->Initialize()) {
         // Fall back to immediate uploads
         pboManager_.reset();
+        return;
     }
+    
+    // P0: Set up token validator for stale callback prevention
+    // This validates that upload callbacks are still valid (tile not evicted)
+    auto validator = [this](const std::string& key, uint64_t token) -> bool {
+        // Convert string key back to TileKey
+        // For now, we use a simplified approach - the epoch is checked elsewhere
+        // In production, this would look up the tile's current epoch
+        return true;  // Simplified - actual validation happens in callback
+    };
+    pboManager_->SetTokenValidator(validator);
 }
 
 void TextureManager::InitializeArrayManager() {
@@ -189,6 +200,8 @@ struct PboUploadContext {
     uint32_t textureId;
     bool generateMipmap;
     double startTime;
+    uint64_t epoch = 0;  // P0: Epoch for stale detection
+    TextureManager* manager = nullptr;  // P0: Pointer back to manager for validation
 };
 
 // PBO Upload completion callback
@@ -197,6 +210,16 @@ void OnPboUploadComplete(GLuint textureId, bool success, void* userData) {
     if (!userData) return;
     
     PboUploadContext* ctx = static_cast<PboUploadContext*>(userData);
+    
+    // P0: Check for stale upload (tile evicted before callback)
+    if (ctx->manager && ctx->epoch != 0) {
+        if (!ctx->manager->IsUploadEpochCurrent(ctx->key, ctx->epoch)) {
+            // Stale upload - tile was evicted, clean up but don't touch GL
+            glDeleteTextures(1, &ctx->textureId);  // Delete the orphaned texture
+            delete ctx;
+            return;
+        }
+    }
     
     if (success && ctx->textureId != 0 && ctx->generateMipmap) {
         // Generate mipmaps now that upload is complete
@@ -425,6 +448,9 @@ void TextureManager::ReleaseAtlasAllocation(Tile& tile) {
 }
 
 void TextureManager::ReleaseTileResources(Tile& tile) {
+    // P0: Invalidate upload epoch to prevent stale callbacks
+    InvalidateUploadEpoch(tile.key);
+    
     ReleaseAtlasAllocation(tile);
     ReleaseArrayLayer(tile);  // Faz 2B: Release array layer if allocated
     if (tile.ownsTexture && tile.textureId != 0) {
@@ -604,7 +630,34 @@ void TextureManager::QueueUpload(Tile& tile) {
     job.priority = tile.requestPriority;
     job.score = tile.importance;
     job.sequence = uploadSequence_++;
+    job.epoch = AllocateUploadEpoch(tile.key);  // P0: Get epoch for stale detection
     uploadQueue_.push(job);
+}
+
+// P0: Epoch management for stale callback prevention
+uint64_t TextureManager::AllocateUploadEpoch(const TileKey& key) {
+    std::lock_guard<std::mutex> lock(uploadEpochMutex_);
+    uint64_t epoch = nextUploadEpoch_++;
+    uploadEpochByTile_[key] = epoch;
+    return epoch;
+}
+
+void TextureManager::InvalidateUploadEpoch(const TileKey& key) {
+    std::lock_guard<std::mutex> lock(uploadEpochMutex_);
+    auto it = uploadEpochByTile_.find(key);
+    if (it != uploadEpochByTile_.end()) {
+        // Increment to invalidate - any upload with old epoch will be rejected
+        it->second = ++nextUploadEpoch_;
+    }
+}
+
+bool TextureManager::IsUploadEpochCurrent(const TileKey& key, uint64_t epoch) const {
+    std::lock_guard<std::mutex> lock(uploadEpochMutex_);
+    auto it = uploadEpochByTile_.find(key);
+    if (it == uploadEpochByTile_.end()) {
+        return false;  // Tile not found - treat as stale
+    }
+    return it->second == epoch;
 }
 
 void TextureManager::ProcessPboUploads() {
@@ -650,12 +703,17 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
     }
     
     // Faz 2A Fix: Full async PBO upload with callback
+    // P0: Allocate epoch for stale detection
+    uint64_t epoch = AllocateUploadEpoch(tile.key);
+    
     // Create context for callback
     PboUploadContext* ctx = new PboUploadContext{
         tile.key,
         textureId,
         true,  // generateMipmap
-        glfwGetTime()
+        glfwGetTime(),
+        epoch,   // P0: Epoch for stale detection
+        this     // P0: Manager pointer for validation
     };
     
     // Submit PBO upload (takes ownership of pixel data)

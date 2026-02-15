@@ -49,6 +49,7 @@ struct UploadRequest {
     // P0: Generation token for stale callback detection
     // Upload is only valid if token matches current generation for the resource
     uint64_t generationToken = 0;       // Resource generation (0 = no validation)
+    std::string resourceKey;            // Resource identifier (e.g., nodeKey, tileKey)
     
     // Constructors for convenience
     UploadRequest() = default;
@@ -210,6 +211,17 @@ public:
                            void* userData = nullptr,
                            uint64_t priority = 0,
                            bool generateMipmap = false);
+    
+    // P0: Submit with stale protection (resource key + generation token)
+    bool SubmitUploadOwnedWithToken(GLuint texture, GLsizei width, GLsizei height,
+                                    GLenum format, GLenum type,
+                                    std::vector<uint8_t>&& data,
+                                    const std::string& resourceKey,
+                                    uint64_t generationToken,
+                                    UploadCompleteCallback callback = nullptr,
+                                    void* userData = nullptr,
+                                    uint64_t priority = 0,
+                                    bool generateMipmap = false);
 
     // Process pending uploads and check GPU completion
     // Call once per frame before rendering

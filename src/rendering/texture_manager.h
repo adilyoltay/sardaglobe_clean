@@ -62,6 +62,11 @@ public:
     int GetAtlasPageCount() const { return atlasAllocator_.GetPageCount(); }
     int GetAtlasUsedSlots() const { return atlasAllocator_.GetUsedSlots(); }
     int GetAtlasCapacitySlots() const { return atlasAllocator_.GetTotalCapacity(); }
+    
+    // P0: Epoch management for stale callback prevention (public for callback access)
+    uint64_t AllocateUploadEpoch(const TileKey& key);
+    void InvalidateUploadEpoch(const TileKey& key);
+    bool IsUploadEpochCurrent(const TileKey& key, uint64_t epoch) const;
 
 private:
     uint32_t CreateTexture(const uint8_t* pixels, int width, int height);
@@ -76,11 +81,20 @@ private:
     int CompactAtlas(std::unordered_map<TileKey, Tile>& tiles, int maxMoves, double budgetMs);
     
     const Config& config_;
+    
+    // P0: Upload epoch tracking for stale callback prevention
+    // Each tile has a monotonically increasing epoch
+    // Uploads with mismatched epochs are rejected as stale
+    mutable std::mutex uploadEpochMutex_;
+    std::unordered_map<TileKey, uint64_t> uploadEpochByTile_;
+    uint64_t nextUploadEpoch_ = 1;
+    
     struct UploadJob {
         TileKey key;
         uint8_t priority = 1;
         double score = 0.0;
         uint64_t sequence = 0;
+        uint64_t epoch = 0;  // P0: Epoch for this upload
     };
     struct UploadJobCompare {
         bool operator()(const UploadJob& a, const UploadJob& b) const {
