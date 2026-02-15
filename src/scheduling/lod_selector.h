@@ -30,6 +30,9 @@ public:
     // Bu sayede yüksek arazi (Himalayalar vb.) için doğru culling yapılabilir
     using GetTileMaxHeightFn = std::function<float(const TileKey&)>;
     
+    // P3: Terrain variance callback for adaptive LOD
+    using GetTileVarianceFn = std::function<float(const TileKey&)>;
+    
     struct Settings {
         int minZoom = 0;
         int maxZoom = 22;
@@ -69,12 +72,25 @@ public:
         
         // P1: Strict DEM+RGB quorum - require both texture AND DEM ready for promotion
         bool strictDemRgbQuorum = true;          // Enable strict DEM+RGB quorum (default: true)
+        
+        // P3: Weighted Scheduler settings
+        bool useWeightedScheduler = true;        // Enable weighted tile scheduling
+        bool schedulerUseAging = true;           // Enable aging factor in priority
+        float schedulerAgingHalfLifeMs = 5000.0f; // Aging half-life in milliseconds
+        
+        // P3: Adaptive LOD settings
+        bool useAdaptiveLod = true;              // Enable adaptive LOD based on terrain variance
+        float lodVarianceThreshold = 100.0f;     // Height variance threshold for LOD adjustment
+        int lodHysteresisFrames = 3;             // Frames to wait before LOD change
     };
     
     LodSelector() = default;
     
     // Set elevation callback for elevation-aware culling (optional)
     void SetMaxHeightCallback(GetTileMaxHeightFn callback) { getMaxHeight_ = callback; }
+    
+    // P3: Set terrain variance callback for adaptive LOD (optional)
+    void SetTileVarianceCallback(GetTileVarianceFn callback) { getTileVariance_ = callback; }
     
     // Perform LOD selection
     // fovDegrees should come directly from camera, NOT extracted from MVP
@@ -156,6 +172,9 @@ private:
     
     // Elevation-aware culling callback (optional)
     GetTileMaxHeightFn getMaxHeight_ = nullptr;
+    
+    // P3: Terrain variance callback for adaptive LOD (optional)
+    GetTileVarianceFn getTileVariance_ = nullptr;
 };
 
 } // namespace globe

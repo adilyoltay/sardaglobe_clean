@@ -37,6 +37,11 @@ public:
         selector_.SetMaxHeightCallback(callback);
     }
     
+    // P3: Terrain variance callback for adaptive LOD
+    void SetTileVarianceCallback(LodSelector::GetTileVarianceFn callback) {
+        selector_.SetTileVarianceCallback(callback);
+    }
+    
     // Center bias weight for scoring (GE-style)
     void SetCenterBiasWeight(float w) { centerBiasWeight_ = w; }
     float GetCenterBiasWeight() const { return centerBiasWeight_; }
@@ -116,6 +121,11 @@ private:
     
     // P1: DEM Manager for strict DEM+RGB quorum checks
     DemManager* demManager_ = nullptr;
+    
+    // P3: Weighted scheduler aging state (first seen timestamps in ms)
+    std::unordered_map<TileKey, double> requiredFirstSeenMs_;
+    std::unordered_map<TileKey, double> prefetchFirstSeenMs_;
+    double currentTimeMs_ = 0.0;
 };
 
 } // namespace globe

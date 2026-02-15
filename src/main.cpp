@@ -287,6 +287,24 @@ int main(int argc, char** argv) {
             config.demMaxZoom = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--dem-mesh-n") == 0 && i + 1 < argc) {
             config.demMeshN = std::max(2, std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--weighted-scheduler") == 0) {
+            config.useWeightedScheduler = true;  // P3: Enable weighted scheduler (default)
+        } else if (std::strcmp(argv[i], "--no-weighted-scheduler") == 0) {
+            config.useWeightedScheduler = false;  // P3: Disable weighted scheduler
+        } else if (std::strcmp(argv[i], "--scheduler-use-aging") == 0) {
+            config.schedulerUseAging = true;  // P3: Enable aging (default)
+        } else if (std::strcmp(argv[i], "--no-scheduler-aging") == 0) {
+            config.schedulerUseAging = false;  // P3: Disable aging
+        } else if (std::strcmp(argv[i], "--scheduler-aging-half-life") == 0 && i + 1 < argc) {
+            config.schedulerAgingHalfLifeMs = std::atof(argv[++i]);  // P3: Aging half-life (ms)
+        } else if (std::strcmp(argv[i], "--adaptive-lod") == 0) {
+            config.useAdaptiveLod = true;  // P3: Enable adaptive LOD (default)
+        } else if (std::strcmp(argv[i], "--no-adaptive-lod") == 0) {
+            config.useAdaptiveLod = false;  // P3: Disable adaptive LOD
+        } else if (std::strcmp(argv[i], "--lod-variance-threshold") == 0 && i + 1 < argc) {
+            config.lodVarianceThreshold = std::atof(argv[++i]);  // P3: Variance threshold
+        } else if (std::strcmp(argv[i], "--lod-hysteresis-frames") == 0 && i + 1 < argc) {
+            config.lodHysteresisFrames = std::atoi(argv[++i]);  // P3: Hysteresis frames
         } else if (std::strcmp(argv[i], "--ge-elevation-endpoint") == 0 && i + 1 < argc) {
             config.geElevationEndpoint = argv[++i];
         } else if (std::strcmp(argv[i], "--ge-elevation-path") == 0 && i + 1 < argc) {
@@ -492,6 +510,12 @@ int main(int argc, char** argv) {
                       << "  --no-distance-morph   Disable distance-based terrain morph (use time-based)\n"
                       << "  --morph-range KM      Terrain morph distance range in km (default: 0.2)\n"
                       << "  --no-morph-fallback   Disable time-based fallback for invalid distance\n"
+                      << "  --weighted-scheduler / --no-weighted-scheduler  Enable/disable weighted tile scheduling (default: enabled)\n"
+                      << "  --scheduler-use-aging / --no-scheduler-aging    Enable/disable scheduler aging (default: enabled)\n"
+                      << "  --scheduler-aging-half-life MS  Aging half-life in milliseconds (default: 5000)\n"
+                      << "  --adaptive-lod / --no-adaptive-lod  Enable/disable adaptive LOD based on terrain variance (default: enabled)\n"
+                      << "  --lod-variance-threshold M2      Height variance threshold for LOD adjustment (default: 100)\n"
+                      << "  --lod-hysteresis-frames N        Frames to wait before LOD change (default: 3)\n"
                       << "  --min-zoom N      Minimum zoom level\n"
                       << "  --max-zoom N      Maximum zoom level\n"
                       << "  --lod-refine-budget N  Max parent->child LOD refinements per frame (<=0 unlimited)\n"

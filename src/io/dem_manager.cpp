@@ -15,6 +15,26 @@ namespace globe {
 
 namespace {
 
+// P3: Compute terrain variance from DEM grid heights
+// Uses population variance (not sample) for consistent threshold behavior
+float ComputeTerrainVariance(const std::vector<double>& heights, int meshN) {
+    if (heights.empty() || meshN <= 1) return 0.0f;
+    
+    // Calculate mean
+    double sum = 0.0;
+    for (double h : heights) sum += h;
+    double mean = sum / heights.size();
+    
+    // Calculate variance
+    double varSum = 0.0;
+    for (double h : heights) {
+        double diff = h - mean;
+        varSum += diff * diff;
+    }
+    
+    return static_cast<float>(varSum / heights.size());
+}
+
 std::string ResolveGeElevationEndpoint(const std::string& endpointTemplate,
                                       const std::string& epoch,
                                       const std::string& path = "Elevation") {
@@ -399,6 +419,17 @@ void DemManager::PutGridData(const TileKey& key, const DemGridData& data) {
     lruIterMap_[key] = lruOrder_.begin();
 }
 
+bool DemManager::GetTerrainVariance(const TileKey& key, float& outVariance) const {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    auto it = cache_.find(key);
+    if (it == cache_.end() || !it->second.valid) {
+        return false;
+    }
+    TouchLru(key);
+    outVariance = it->second.terrainVariance;
+    return true;
+}
+
 void DemManager::SetPinnedTiles(const std::vector<TileKey>& keys) {
     std::lock_guard<std::mutex> lock(cacheMutex_);
     pinnedKeys_.clear();
@@ -552,6 +583,10 @@ bool DemManager::FetchTile(const TileKey& key, DemGridData& outData) {
     if (success) {
         stats_.fetchSuccess++;
         stats_.parseSuccess++;
+        // P3: Compute terrain variance for adaptive LOD
+        if (outData.valid && !outData.heights.empty()) {
+            outData.terrainVariance = ComputeTerrainVariance(outData.heights, outData.meshN);
+        }
         // Accumulate timing
         double prev = stats_.totalFetchMs.load(std::memory_order_relaxed);
         while (!stats_.totalFetchMs.compare_exchange_weak(

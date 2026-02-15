@@ -27,6 +27,7 @@ struct DemGridData {
     int meshN = 0;                // Grid resolution (e.g., 5 = 5x5 grid)
     double minHeight = 0.0;
     double maxHeight = 0.0;
+    float terrainVariance = 0.0f;  // P3: Pre-computed terrain variance for adaptive LOD
     bool valid = false;
     mutable double lastAccessTime = 0.0;  // LRU: updated on every access
 };
@@ -180,6 +181,9 @@ public:
 
     // Insert/replace DEM grid data in cache (used by tests and optional warm-start paths).
     void PutGridData(const TileKey& key, const DemGridData& data);
+    
+    // P3: Get terrain variance for adaptive LOD (returns false if not cached)
+    bool GetTerrainVariance(const TileKey& key, float& outVariance) const;
 
     // Pin visible DEM keys (and optional neighbors) against LRU eviction.
     // Existing pin set is fully replaced by the incoming list.

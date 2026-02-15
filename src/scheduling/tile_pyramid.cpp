@@ -1,6 +1,7 @@
 #include "tile_pyramid.h"
 #include "../math/tile_math.h"
 #include "../io/dem_manager.h"  // P1: For strict DEM+RGB quorum
+#include <GLFW/glfw3.h>         // P3: For time measurement
 #include <algorithm>
 #include <cmath>
 
@@ -48,6 +49,9 @@ const LodSelection& TilePyramid::Select(
         prefetchSet_.insert(key);
     }
     
+    // P3: Update current time for aging calculations (convert to ms)
+    currentTimeMs_ = glfwGetTime() * 1000.0;
+    
     // Build ranked lists for fetch prioritization (GE-style scoring)
     BuildRankedLists(cameraPos, cameraVelocity, viewDir, fovDegrees, viewportHeight);
     
@@ -85,10 +89,59 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
     rankedRequired_.clear();
     rankedPrefetch_.clear();
     
+    // P3: Update aging state - add new tiles, remove old ones
+    if (settings_.useWeightedScheduler) {
+        // Add new required tiles to aging map
+        for (const TileKey& key : selection_.required) {
+            if (requiredFirstSeenMs_.find(key) == requiredFirstSeenMs_.end()) {
+                requiredFirstSeenMs_[key] = currentTimeMs_;
+            }
+        }
+        // Remove tiles no longer required
+        for (auto it = requiredFirstSeenMs_.begin(); it != requiredFirstSeenMs_.end();) {
+            if (selection_.required.find(it->first) == selection_.required.end()) {
+                it = requiredFirstSeenMs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        // Same for prefetch
+        for (const TileKey& key : selection_.prefetch) {
+            if (prefetchFirstSeenMs_.find(key) == prefetchFirstSeenMs_.end()) {
+                prefetchFirstSeenMs_[key] = currentTimeMs_;
+            }
+        }
+        for (auto it = prefetchFirstSeenMs_.begin(); it != prefetchFirstSeenMs_.end();) {
+            if (prefetchSet_.find(it->first) == prefetchSet_.end()) {
+                it = prefetchFirstSeenMs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    
     // Rank required tiles
     rankedRequired_.reserve(selection_.required.size());
     for (const TileKey& key : selection_.required) {
         float score = ComputeScore(key, cameraPos, viewDir, fovDegrees, viewportHeight);
+        
+        // P3: Apply aging boost if weighted scheduler is enabled
+        if (settings_.useWeightedScheduler && settings_.schedulerUseAging) {
+            auto it = requiredFirstSeenMs_.find(key);
+            if (it != requiredFirstSeenMs_.end()) {
+                double ageMs = currentTimeMs_ - it->second;
+                // ageBoost = 1 + (1 - 2^(-age/halfLife))
+                // At age=0: boost=1, at age=halfLife: boost=1.5, as age→∞: boost→2
+                float halfLifeMs = settings_.schedulerAgingHalfLifeMs;
+                if (halfLifeMs > 0.0f) {
+                    float ageFactor = 1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs));
+                    float ageBoost = 1.0f + ageFactor;
+                    score *= ageBoost;
+                }
+            }
+        }
+        
         rankedRequired_.push_back({key, score});
     }
     
@@ -109,6 +162,21 @@ void TilePyramid::BuildRankedLists(const glm::vec3& cameraPos, const glm::vec3& 
     rankedPrefetch_.reserve(selection_.prefetch.size());
     for (const TileKey& key : selection_.prefetch) {
         float score = ComputeScore(key, cameraPos, viewDir, fovDegrees, viewportHeight);
+        
+        // P3: Apply aging boost to prefetch tiles too
+        if (settings_.useWeightedScheduler && settings_.schedulerUseAging) {
+            auto it = prefetchFirstSeenMs_.find(key);
+            if (it != prefetchFirstSeenMs_.end()) {
+                double ageMs = currentTimeMs_ - it->second;
+                float halfLifeMs = settings_.schedulerAgingHalfLifeMs;
+                if (halfLifeMs > 0.0f) {
+                    float ageFactor = 1.0f - std::pow(0.5f, static_cast<float>(ageMs / halfLifeMs));
+                    float ageBoost = 1.0f + ageFactor;
+                    score *= ageBoost;
+                }
+            }
+        }
+        
         if (predictiveActive) {
             glm::vec3 center = TileCenterWorld(key);
             float radius = TileBoundingRadius(key);

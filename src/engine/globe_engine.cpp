@@ -299,6 +299,15 @@ bool GlobeEngine::Init() {
         
         // P1: Connect DEM manager to tile pyramid for strict DEM+RGB quorum
         tilePyramid_.SetDemManager(demManager_.get());
+        
+        // P3: Connect terrain variance callback for adaptive LOD
+        if (demManager_) {
+            tilePyramid_.SetTileVarianceCallback([this](const TileKey& key) -> float {
+                float variance = 0.0f;
+                demManager_->GetTerrainVariance(key, variance);
+                return variance;
+            });
+        }
     }
 
     meshScheduler_ = std::make_unique<TileMeshScheduler>(config_, demManager_.get());
@@ -670,6 +679,16 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Faz 3A: Horizon Culling settings
     lodSettings.useHorizonCulling = config_.useHorizonCulling;
     lodSettings.horizonSafetyMarginRad = static_cast<float>(config_.horizonCullingSafetyMargin);
+    
+    // P3: Weighted Scheduler settings
+    lodSettings.useWeightedScheduler = config_.useWeightedScheduler;
+    lodSettings.schedulerUseAging = config_.schedulerUseAging;
+    lodSettings.schedulerAgingHalfLifeMs = config_.schedulerAgingHalfLifeMs;
+    
+    // P3: Adaptive LOD settings
+    lodSettings.useAdaptiveLod = config_.useAdaptiveLod;
+    lodSettings.lodVarianceThreshold = config_.lodVarianceThreshold;
+    lodSettings.lodHysteresisFrames = config_.lodHysteresisFrames;
     
     // GE parity: quality mode multiplier (1.0/2.0/4.0)
     lodSettings.qualityMultiplier = QualityModeToMultiplier(config_.qualityMode);

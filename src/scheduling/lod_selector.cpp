@@ -196,10 +196,23 @@ bool LodSelector::TraverseTile(
         }
     }
 
+    // P3: Compute adaptive SSE threshold based on terrain variance
+    float adaptiveSseThreshold = settings.sseThreshold;
+    if (settings.useAdaptiveLod && getTileVariance_) {
+        float variance = getTileVariance_(key);
+        if (variance > 0.0f) {
+            // norm = clamp(variance / threshold, 0..1)
+            // adaptiveFactor = 1 - 0.5 * norm (high variance → lower threshold → earlier split)
+            float norm = std::clamp(variance / settings.lodVarianceThreshold, 0.0f, 1.0f);
+            float adaptiveFactor = 1.0f - 0.5f * norm;
+            adaptiveSseThreshold *= adaptiveFactor;
+        }
+    }
+    
     // Check if should subdivide (SSE + hysteresis + quality + minLodPixels).
     bool subdivide = ShouldSubdivide(
         key, cameraPos, viewportHeight, fovDegrees_,
-        settings.sseThreshold, settings.tiltFactor,
+        adaptiveSseThreshold, settings.tiltFactor,
         wasRefinedLastFrame, settings.sseHysteresisRatio,
         settings.minLodPixels,      // GE parity: min visible tile size
         settings.qualityMultiplier  // GE parity: quality mode
