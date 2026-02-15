@@ -185,10 +185,11 @@ bool GlobeEngine::Init() {
         const bool wantGeEpochAutoDetect = (providerOpt.value() == DemProviderType::GoogleEarth) &&
                                           config_.geEpochAutoDetect &&
                                           config_.geMeshEnabled() &&
+                                          config_.rockMeshRenderEnabled &&  // P0: Kill-switch check
                                           resolvedGeEpoch.empty();
 
         if (wantGeEpochAutoDetect) {
-            if (!rockMeshManager_) {
+            if (!rockMeshManager_ && config_.rockMeshRenderEnabled) {  // P0: Kill-switch guard
                 rockMeshManager_ = std::make_unique<RockMeshManager>(config_);
                 if (!rockMeshManager_->Init()) {
                     std::cerr << "[DEM] Warning: RockMesh manager init failed while resolving GE epoch\n";
@@ -313,7 +314,7 @@ bool GlobeEngine::Init() {
     meshScheduler_ = std::make_unique<TileMeshScheduler>(config_, demManager_.get());
     
     // Init RockMesh manager for NodeData meshes (Phase 5 Sprint 1)
-    if (config_.geMeshEnabled() && !rockMeshManager_) {
+    if (config_.geMeshEnabled() && config_.rockMeshRenderEnabled && !rockMeshManager_) {
         rockMeshManager_ = std::make_unique<RockMeshManager>(config_);
         if (!rockMeshManager_->Init()) {
             std::cerr << "[RockMesh] Failed to initialize manager\n";
@@ -2082,7 +2083,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
     int meshUploadsThisFrame = ProcessMeshResults();
     
     // Sprint 2: Update RockMeshManager with visible quadkeys
-    if (rockMeshManager_) {
+    if (rockMeshManager_ && config_.rockMeshRenderEnabled) {
         // Update generation counter
         static uint64_t viewportVersion = 0;
         viewportVersion++;
@@ -2105,7 +2106,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
     }
     
     // Process RockMesh uploads (Phase 5)
-    if (rockMeshManager_) {
+    if (rockMeshManager_ && config_.rockMeshRenderEnabled) {
         bool rockUploaded = rockMeshManager_->ProcessUploads(config_.meshUploadBudgetMs);
         if (rockUploaded) {
             frameRequested_ = true;  // Request render frame for new mesh
@@ -2698,7 +2699,7 @@ void GlobeEngine::Render() {
     RenderPivot(mvp);
     
     // Render RockTree meshes (Phase 5 Sprint 1)
-    if (rockMeshManager_ && rockMeshManager_->GetUploadedCount() > 0) {
+    if (config_.rockMeshRenderEnabled && rockMeshManager_ && rockMeshManager_->GetUploadedCount() > 0) {
         // Enable polygon offset to prevent z-fighting with base terrain
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(-1.0f, -1.0f);
@@ -2875,7 +2876,7 @@ void GlobeEngine::Render() {
     debugStats_.tilt = camera_->GetTilt();
     
     // RockMesh (Google Earth 3D Buildings) telemetry
-    debugStats_.rockMeshEnabled = (rockMeshManager_ != nullptr);
+    debugStats_.rockMeshEnabled = config_.rockMeshRenderEnabled && (rockMeshManager_ != nullptr);
     if (rockMeshManager_) {
         auto rockStats = rockMeshManager_->GetStats();
         debugStats_.rockMeshUploaded = rockStats.uploadedCount;

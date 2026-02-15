@@ -528,6 +528,10 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
                 // Sprint 3: Start with fade=0 for seamless transition
                 it->second.fade = 0.0f;
                 uploaded++;
+                // P1: Track fallback texture usage
+                if (!cpu.hasTexture) {
+                    stats_.fallbackTextureUsed++;
+                }
             }
             guard.clear();  // Explicit clear for success path
         } else {
@@ -1304,9 +1308,14 @@ bool RockMeshManager::CreateFallbackTexture() {
     
     glBindTexture(GL_TEXTURE_2D, fallbackTexture_);
     
-    // 1x1 gray pixel
-    uint8_t gray[4] = {128, 128, 128, 255};
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, gray);
+    // P1: Use config fallback color
+    uint8_t pixel[4] = {
+        config_.rockMeshFallbackR,
+        config_.rockMeshFallbackG,
+        config_.rockMeshFallbackB,
+        255
+    };
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
