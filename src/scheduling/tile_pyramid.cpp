@@ -17,9 +17,13 @@ const LodSelection& TilePyramid::Select(
     int viewportHeight,
     const TileMap& tiles
 ) {
-    // P1: Use strict DEM+RGB quorum if DEM manager is configured
-    auto isReady = [this, &tiles](const TileKey& key) -> bool {
-        if (demManager_ && settings_.strictDemRgbQuorum) {
+    // P1: Use strict DEM+RGB quorum only if DEM manager is healthy
+    const bool useStrictQuorum = demManager_ && 
+                                  settings_.strictDemRgbQuorum &&
+                                  demManager_->GetHealthStatus() == DemHealthStatus::Healthy;
+    
+    auto isReady = [this, useStrictQuorum, &tiles](const TileKey& key) -> bool {
+        if (useStrictQuorum) {
             return IsTileReadyStrict(key, tiles);
         }
         return IsTileReady(key, tiles);
