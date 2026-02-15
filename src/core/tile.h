@@ -194,27 +194,29 @@ struct Tile {
             return terrainMorph;
         }
 
-        // P2: Distance-based mode
-        if (useDistanceBased) {
+        // P2: Distance-based mode (with optional time-based fallback)
+        if (useDistanceBased && distanceRangeKm > 0.0f && cameraDistanceKm >= 0.0f) {
             // Initialize on first terrain data
             if (!hadTerrainData) {
                 hadTerrainData = true;
                 terrainMorphActive = true;
-                // Capture spawn distance - morph band starts here and extends toward camera
+                // P2 FIX: near=spawn (morph 0), far=spawn-range (morph 1)
+                // As camera approaches, distance decreases, morph increases
                 terrainMorphSpawnDistanceKm = cameraDistanceKm;
-                terrainMorphFarDistanceKm = cameraDistanceKm;
-                terrainMorphNearDistanceKm = std::max(0.0f, cameraDistanceKm - distanceRangeKm);
+                terrainMorphNearDistanceKm = cameraDistanceKm;  // Start: morph = 0
+                terrainMorphFarDistanceKm = std::max(0.0f, cameraDistanceKm - distanceRangeKm);  // End: morph = 1
                 terrainMorph = 0.0f;
             }
             
             if (terrainMorphActive) {
-                // Calculate candidate morph based on current distance
-                // Formula: morph = (distance - near) / (far - near), clamped to [0, 1]
-                float denom = terrainMorphFarDistanceKm - terrainMorphNearDistanceKm;
-                float candidateMorph = 1.0f;
+                // P2 FIX: Corrected formula: morph = (near - distance) / (near - far)
+                // Spawn: distance=near → morph=0
+                // Approach: distance decreases toward far → morph increases to 1
+                float denom = terrainMorphNearDistanceKm - terrainMorphFarDistanceKm;
+                float candidateMorph = 0.0f;  // Default to 0 if denom invalid
                 if (denom > 0.0001f) {
                     candidateMorph = std::clamp(
-                        (cameraDistanceKm - terrainMorphNearDistanceKm) / denom,
+                        (terrainMorphNearDistanceKm - cameraDistanceKm) / denom,
                         0.0f, 1.0f
                     );
                 }

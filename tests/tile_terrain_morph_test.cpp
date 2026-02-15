@@ -60,6 +60,41 @@ int main() {
     float restart = tile.UpdateTerrainMorph(4.0, true);
     failed += !Expect(Near(restart, 0.0f), "heightmap re-appearance should restart morph from 0");
 
+    // P2: Distance-based morph tests
+    {
+        const TileKey key2(7, 14, 25);
+        Tile tile2(key2);
+        
+        // Test 1: Spawn at distance = morph 0
+        float spawnDist = 1.0f;  // 1km away
+        float rangeKm = 0.2f;    // 200m morph band
+        float mSpawn = tile2.UpdateTerrainMorph(0.0, true, spawnDist, true, rangeKm);
+        failed += !Expect(Near(mSpawn, 0.0f), "P2: spawn at distance should yield morph 0");
+        
+        // Test 2: Approach by 100m = morph 0.5
+        float mHalf = tile2.UpdateTerrainMorph(0.0, true, 0.9f, true, rangeKm);
+        failed += !Expect(Near(mHalf, 0.5f, 1e-3f), "P2: halfway approach should yield morph 0.5");
+        
+        // Test 3: Full approach = morph 1
+        float mFull = tile2.UpdateTerrainMorph(0.0, true, 0.8f, true, rangeKm);
+        failed += !Expect(Near(mFull, 1.0f, 1e-3f), "P2: full approach should yield morph 1");
+        
+        // Test 4: Monotonic - moving away shouldn't decrease morph
+        float mAway = tile2.UpdateTerrainMorph(0.0, true, 1.5f, true, rangeKm);
+        failed += !Expect(Near(mAway, 1.0f, 1e-3f), "P2: moving away should keep morph at 1 (monotonic)");
+        
+        // Test 5: Invalid distance falls back to time-based (when useDistanceBased=false)
+        Tile tile3(key2);
+        float mTimeFallback = tile3.UpdateTerrainMorph(0.0, true, -1.0f, false, rangeKm);
+        failed += !Expect(Near(mTimeFallback, 0.0f), "P2: negative distance with useDistanceBased=false should use time-based (start at 0)");
+        
+        // Test 6: Zero rangeKm falls back (treated as invalid)
+        Tile tile4(key2);
+        float mZeroRange = tile4.UpdateTerrainMorph(0.0, true, 1.0f, true, 0.0f);
+        // With zero range, falls through to time-based path, starts at 0
+        failed += !Expect(Near(mZeroRange, 0.0f), "P2: zero rangeKm should fallback to time-based");
+    }
+
     if (failed == 0) {
         std::cout << "TileTerrainMorphTest PASSED\n";
         return 0;
