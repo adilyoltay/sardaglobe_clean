@@ -1048,14 +1048,51 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         }
     }
     
+    // P0-P2: Sanity check - validate transform matrix for NaN/INF
+    if (!config_.rockMeshSanityEnabled) {
+        // Skip sanity checks if disabled
+    } else {
+        // Check transform matrix for non-finite values
+        for (int col = 0; col < 4; ++col) {
+            for (int row = 0; row < 4; ++row) {
+                if (!std::isfinite(M[col][row])) {
+                    cpu.error = "Invalid transform: non-finite matrix element";
+                    std::lock_guard<std::mutex> lock(statsMutex_);
+                    stats_.discardInvalidTransform++;
+                    return cpu;
+                }
+            }
+        }
+    }
+    
     // Extract translation and compute scale
     glm::dvec3 t(M[3][0], M[3][1], M[3][2]);
     double tLen = glm::length(t);
-    if (tLen < 1e-10) {
+    
+    // P0-P2: Sanity check - validate translation/scale
+    if (config_.rockMeshSanityEnabled) {
+        if (!std::isfinite(tLen) || tLen < 1e-10) {
+            cpu.error = "Invalid transform: non-finite or zero-length translation";
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.discardInvalidScale++;
+            return cpu;
+        }
+    } else if (tLen < 1e-10) {
         cpu.error = "Invalid transform: translation vector too small";
         return cpu;
     }
+    
     double kmPerRockUnit = Ellipsoid::WGS84_A_KM / tLen;
+    
+    // P0-P2: Sanity check - validate kmPerRockUnit is reasonable
+    if (config_.rockMeshSanityEnabled) {
+        if (!std::isfinite(kmPerRockUnit) || kmPerRockUnit <= 0.0) {
+            cpu.error = "Invalid scale: non-finite or negative km per rock unit";
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.discardInvalidScale++;
+            return cpu;
+        }
+    }
     
     // Resize output
     cpu.vertices.resize(V * 9);  // stride 9
@@ -1066,6 +1103,9 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
     std::vector<glm::dvec3> worldPositions(V);
     glm::dvec3 bboxMin(1e18), bboxMax(-1e18);
     
+    // P0-P2: Track if any vertex fails sanity check
+    bool hasInvalidVertex = false;
+    
     for (int i = 0; i < V; ++i) {
         // Local position (int16 / 32768)
         double lx = parsed.positions[i * 3 + 0] / 32768.0;
@@ -1075,11 +1115,65 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         // Transform to world (km)
         glm::dvec4 local(lx, ly, lz, 1.0);
         glm::dvec3 world = glm::dvec3(M * local) * kmPerRockUnit;
+        
+        // P0-P2: Sanity check - validate vertex position
+        if (config_.rockMeshSanityEnabled) {
+            if (!std::isfinite(world.x) || !std::isfinite(world.y) || !std::isfinite(world.z)) {
+                hasInvalidVertex = true;
+                // Continue processing other vertices for complete bbox
+            }
+        }
+        
         worldPositions[i] = world;
         
         // Track bounding box for origin selection
         bboxMin = glm::min(bboxMin, world);
         bboxMax = glm::max(bboxMax, world);
+    }
+    
+    // P0-P2: Check for invalid vertices
+    if (config_.rockMeshSanityEnabled && hasInvalidVertex) {
+        cpu.error = "Invalid mesh: non-finite vertex positions detected";
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.discardNonFiniteVertex++;
+        return cpu;
+    }
+    
+    // P0-P2: Sanity check - validate bounding box
+    if (config_.rockMeshSanityEnabled) {
+        // Check for non-finite bounds
+        if (!std::isfinite(bboxMin.x) || !std::isfinite(bboxMin.y) || !std::isfinite(bboxMin.z) ||
+            !std::isfinite(bboxMax.x) || !std::isfinite(bboxMax.y) || !std::isfinite(bboxMax.z)) {
+            cpu.error = "Invalid mesh: non-finite bounding box";
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.discardInvalidBounds++;
+            return cpu;
+        }
+        
+        // Check AABB diagonal against threshold
+        glm::dvec3 bboxDiagonal = bboxMax - bboxMin;
+        double bboxDiagonalKm = glm::length(bboxDiagonal);
+        if (bboxDiagonalKm > config_.rockMeshMaxBboxDiagonalKm) {
+            cpu.error = "Invalid mesh: AABB diagonal exceeds threshold (" + 
+                       std::to_string(static_cast<int>(bboxDiagonalKm)) + " km > " +
+                       std::to_string(static_cast<int>(config_.rockMeshMaxBboxDiagonalKm)) + " km)";
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.discardAabbExceeded++;
+            return cpu;
+        }
+        
+        // Check vertex distance from origin
+        for (int i = 0; i < V; ++i) {
+            double distFromOrigin = glm::length(worldPositions[i]);
+            if (distFromOrigin > config_.rockMeshMaxVertexDistanceFromOriginKm) {
+                cpu.error = "Invalid mesh: vertex distance from origin exceeds threshold (" +
+                           std::to_string(static_cast<int>(distFromOrigin)) + " km > " +
+                           std::to_string(static_cast<int>(config_.rockMeshMaxVertexDistanceFromOriginKm)) + " km)";
+                std::lock_guard<std::mutex> lock(statsMutex_);
+                stats_.discardVertexDistanceExceeded++;
+                return cpu;
+            }
+        }
     }
     
     // Compute RTE origin (center of bounding box)

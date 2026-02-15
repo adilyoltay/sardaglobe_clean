@@ -149,6 +149,15 @@ public:
         int diskCacheMisses = 0;          // Network fetch required
         int diskCacheWrites = 0;          // Written to disk cache
         int diskCacheErrors = 0;          // Disk cache read/write errors
+        
+        // P0-P2: Vertex explosion mitigation discard counters
+        int discardInvalidTransform = 0;      // Invalid transform matrix
+        int discardInvalidScale = 0;          // Invalid/non-finite scale
+        int discardInvalidBounds = 0;         // Invalid bounds
+        int discardNonFiniteVertex = 0;       // Non-finite vertex positions
+        int discardAabbExceeded = 0;          // AABB diagonal exceeds threshold
+        int discardVertexDistanceExceeded = 0; // Vertex distance from origin exceeds threshold
+        int fallbackTextureUsed = 0;          // Fallback texture used for invalid mesh
     };
     Stats GetStats() const;
     

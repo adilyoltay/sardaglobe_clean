@@ -119,6 +119,16 @@ struct Config {
                geMeshEndpoint.find("{quadkey}") != std::string::npos;
     }
     
+    // RockMesh (NodeData) vertex explosion mitigation (P0-P2)
+    bool rockMeshRenderEnabled = true;              // Master kill-switch for RockMesh
+    bool rockMeshSanityEnabled = true;              // Enable validation gates
+    float rockMeshMaxBboxDiagonalKm = 100.0f;       // AABB discard threshold (conservative start)
+    float rockMeshMaxVertexDistanceFromOriginKm = 300.0f;  // Vertex distance sanity check
+    bool rockMeshFallbackMagenta = false;           // Debug: magenta fallback for invalid meshes
+    uint8_t rockMeshFallbackR = 128;                // Fallback color R (default gray)
+    uint8_t rockMeshFallbackG = 128;                // Fallback color G
+    uint8_t rockMeshFallbackB = 128;                // Fallback color B
+    
     // Cache
     std::string cacheDir = "tile_cache";
     bool useDiskCache = true;
@@ -285,6 +295,14 @@ struct Config {
         // Aging half-life sınırları
         if (!std::isfinite(schedulerAgingHalfLifeMs) || schedulerAgingHalfLifeMs <= 0.0f) {
             schedulerAgingHalfLifeMs = 5000.0f;  // Default fallback
+        }
+        
+        // RockMesh sanity validasyonu
+        if (!std::isfinite(rockMeshMaxBboxDiagonalKm) || rockMeshMaxBboxDiagonalKm <= 0.0f) {
+            rockMeshMaxBboxDiagonalKm = 100.0f;  // Conservative default
+        }
+        if (!std::isfinite(rockMeshMaxVertexDistanceFromOriginKm) || rockMeshMaxVertexDistanceFromOriginKm <= 0.0f) {
+            rockMeshMaxVertexDistanceFromOriginKm = 300.0f;
         }
     }
 };

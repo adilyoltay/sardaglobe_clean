@@ -392,6 +392,57 @@ int main(int argc, char** argv) {
             config.geElevationPath = argv[++i];  // Override {path} placeholder in elevation URL
         } else if (std::strcmp(argv[i], "--ge-mesh-endpoint") == 0 && i + 1 < argc) {
             config.geMeshEndpoint = argv[++i];
+        } else if (std::strcmp(argv[i], "--no-rockmesh") == 0) {
+            config.rockMeshRenderEnabled = false;  // Kill-switch
+        } else if (std::strcmp(argv[i], "--rockmesh") == 0) {
+            config.rockMeshRenderEnabled = true;
+        } else if (std::strcmp(argv[i], "--no-rockmesh-sanity") == 0) {
+            config.rockMeshSanityEnabled = false;
+        } else if (std::strcmp(argv[i], "--rockmesh-sanity") == 0) {
+            config.rockMeshSanityEnabled = true;
+        } else if (std::strcmp(argv[i], "--rockmesh-max-bbox-km") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const char* val = argv[++i];
+            double km = std::strtod(val, &end);
+            if (end == val || *end != '\0' || km <= 0.0 || !std::isfinite(km)) {
+                std::cerr << "ERROR: Invalid bbox threshold '" << val << "'. Must be positive number (km).\n";
+                return 1;
+            }
+            config.rockMeshMaxBboxDiagonalKm = static_cast<float>(km);
+        } else if (std::strcmp(argv[i], "--rockmesh-max-vertex-dist-km") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const char* val = argv[++i];
+            double km = std::strtod(val, &end);
+            if (end == val || *end != '\0' || km <= 0.0 || !std::isfinite(km)) {
+                std::cerr << "ERROR: Invalid vertex distance '" << val << "'. Must be positive number (km).\n";
+                return 1;
+            }
+            config.rockMeshMaxVertexDistanceFromOriginKm = static_cast<float>(km);
+        } else if (std::strcmp(argv[i], "--rockmesh-fallback-color") == 0 && i + 1 < argc) {
+            // Parse R,G,B format
+            std::string color = argv[++i];
+            size_t comma1 = color.find(',');
+            size_t comma2 = color.find(',', comma1 + 1);
+            if (comma1 == std::string::npos || comma2 == std::string::npos) {
+                std::cerr << "ERROR: --rockmesh-fallback-color format must be 'R,G,B' (0-255)\n";
+                return 1;
+            }
+            try {
+                int r = std::stoi(color.substr(0, comma1));
+                int g = std::stoi(color.substr(comma1 + 1, comma2 - comma1 - 1));
+                int b = std::stoi(color.substr(comma2 + 1));
+                config.rockMeshFallbackR = static_cast<uint8_t>(std::clamp(r, 0, 255));
+                config.rockMeshFallbackG = static_cast<uint8_t>(std::clamp(g, 0, 255));
+                config.rockMeshFallbackB = static_cast<uint8_t>(std::clamp(b, 0, 255));
+            } catch (...) {
+                std::cerr << "ERROR: Invalid color format. Use 'R,G,B' (0-255)\n";
+                return 1;
+            }
+        } else if (std::strcmp(argv[i], "--rockmesh-fallback-magenta") == 0) {
+            config.rockMeshFallbackMagenta = true;
+            config.rockMeshFallbackR = 255;
+            config.rockMeshFallbackG = 0;
+            config.rockMeshFallbackB = 255;
         } else if (std::strcmp(argv[i], "--ge-header") == 0 && i + 1 < argc) {
             // Parse K:V format for GE headers
             std::string header = argv[++i];
@@ -573,6 +624,14 @@ int main(int argc, char** argv) {
                       << "  --no-ge-epoch-auto-detect    Disable GE epoch auto-detection\n"
                       << "  --ge-mesh-endpoint URL       Google Earth mesh endpoint (Phase 5)\n"
                       << "  --ge-header K:V              GE custom header (allowlist: Authorization, X-Custom-Auth, X-Client-Data)\n"
+                      << "\nRockMesh (NodeData) Options:\n"
+                      << "  --no-rockmesh                Disable RockMesh rendering (kill-switch)\n"
+                      << "  --rockmesh                   Enable RockMesh rendering (default)\n"
+                      << "  --no-rockmesh-sanity         Disable mesh sanity checks\n"
+                      << "  --rockmesh-max-bbox-km KM    Max bbox diagonal threshold (default: 100)\n"
+                      << "  --rockmesh-max-vertex-dist-km KM  Max vertex distance from origin (default: 300)\n"
+                      << "  --rockmesh-fallback-color R,G,B   Fallback color for invalid meshes (default: 128,128,128)\n"
+                      << "  --rockmesh-fallback-magenta  Use magenta for invalid meshes (debug mode)\n"
                       << "  --ge-elevation-type TYPE     Elevation type: ellipsoid | terrain | sea_level\n"
                       << "  --ge-mesh-quadkey QK         RockTree NodeData quadkey (Sprint 1, repeatable, digits 0-7)\n"
                       << "  --ge-mesh-no-flip-v          Disable V coordinate flip for texture (default: flip enabled)\n"
