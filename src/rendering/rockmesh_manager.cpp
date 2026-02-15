@@ -743,6 +743,13 @@ RockMeshManager::Stats RockMeshManager::GetStats() const {
     return s;
 }
 
+#ifdef NATIVE_GLOBE_TESTING
+// P0: Test-only API for direct BuildMesh testing (no GL/worker needed)
+RockMeshCpu RockMeshManager::BuildMeshForTest(const std::string& nodeKey, const ParsedNodeData& parsed) {
+    return BuildMesh(nodeKey, parsed);
+}
+#endif
+
 void RockMeshManager::OctreeWorkerLoop() {
     // Phase 1: Initialize octree with retry + exponential backoff
     // PlanetoidMetadata or BulkMetadata may fail due to CAPTCHA block (403)
@@ -1143,6 +1150,9 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         return cpu;
     }
     
+    // P0 Fix: Compute mesh origin (center of bounding box) - needed for both sanity check and RTE
+    glm::dvec3 originEcef = (bboxMin + bboxMax) * 0.5;
+    
     // P0-P2: Sanity check - validate bounding box
     if (config_.rockMeshSanityEnabled) {
         // Check for non-finite bounds
@@ -1166,12 +1176,12 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
             return cpu;
         }
         
-        // Check vertex distance from origin
+        // P0 Fix: Check vertex distance from mesh origin (not world origin)
         for (int i = 0; i < V; ++i) {
-            double distFromOrigin = glm::length(worldPositions[i]);
-            if (distFromOrigin > config_.rockMeshMaxVertexDistanceFromOriginKm) {
-                cpu.error = "Invalid mesh: vertex distance from origin exceeds threshold (" +
-                           std::to_string(static_cast<int>(distFromOrigin)) + " km > " +
+            double distFromMeshOrigin = glm::length(worldPositions[i] - originEcef);
+            if (distFromMeshOrigin > config_.rockMeshMaxVertexDistanceFromOriginKm) {
+                cpu.error = "Invalid mesh: vertex distance from mesh origin exceeds threshold (" +
+                           std::to_string(static_cast<int>(distFromMeshOrigin)) + " km > " +
                            std::to_string(static_cast<int>(config_.rockMeshMaxVertexDistanceFromOriginKm)) + " km)";
                 std::lock_guard<std::mutex> lock(statsMutex_);
                 stats_.discardVertexDistanceExceeded++;
@@ -1180,8 +1190,7 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         }
     }
     
-    // Compute RTE origin (center of bounding box)
-    glm::dvec3 originEcef = (bboxMin + bboxMax) * 0.5;
+    // P0 Fix: originEcef computed above for both distance check and RTE origin
     cpu.originEcefHi = glm::vec3(originEcef);
     cpu.originEcefLo = glm::vec3(originEcef - glm::dvec3(cpu.originEcefHi));
     

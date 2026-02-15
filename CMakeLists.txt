@@ -1091,3 +1091,16 @@ target_include_directories(pbo_callback_integration_test PRIVATE
 )
 target_link_libraries(pbo_callback_integration_test PRIVATE glm::glm)
 add_test(NAME PboCallbackIntegrationTest COMMAND pbo_callback_integration_test)
+
+# RockMesh Sanity Test - P0 Distance Check Regression Pack
+# Minimal test - directly tests distance check logic without full RockMeshManager
+add_executable(rockmesh_sanity_test
+  tests/rockmesh_sanity_test.cpp
+)
+target_include_directories(rockmesh_sanity_test PRIVATE
+  src
+  third_party/glad/include
+  third_party
+)
+target_link_libraries(rockmesh_sanity_test PRIVATE glm::glm)
+add_test(NAME RockMeshSanityTest COMMAND rockmesh_sanity_test)

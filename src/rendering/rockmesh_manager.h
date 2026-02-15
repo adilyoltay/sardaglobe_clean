@@ -161,6 +161,11 @@ public:
     };
     Stats GetStats() const;
     
+#ifdef NATIVE_GLOBE_TESTING
+    // P0: Test-only API for direct BuildMesh testing (no GL/worker needed)
+    RockMeshCpu BuildMeshForTest(const std::string& nodeKey, const ParsedNodeData& parsed);
+#endif
+    
 private:
     const Config& config_;
     
