@@ -158,6 +158,10 @@ public:
         int discardAabbExceeded = 0;          // AABB diagonal exceeds threshold
         int discardVertexDistanceExceeded = 0; // Vertex distance from origin exceeds threshold
         int fallbackTextureUsed = 0;          // Fallback texture used for invalid mesh
+        
+        // P0: Stale upload tracking
+        int staleUploadSkips = 0;             // Uploads skipped due to stale token
+        int staleUploadBytes = 0;             // Bytes of stale uploads skipped
     };
     Stats GetStats() const;
     
@@ -209,6 +213,13 @@ private:
     mutable std::mutex queuedMutex_;
     std::unordered_set<std::string> queuedOrPendingKeys_;
     
+    // P0: Upload epoch tracking for stale callback prevention
+    // Each node has a monotonically increasing epoch
+    // Uploads with mismatched epochs are rejected as stale
+    mutable std::mutex uploadEpochMutex_;
+    std::unordered_map<std::string, uint64_t> uploadEpochByNode_;
+    uint64_t nextUploadEpoch_ = 1;
+    
     // Sprint 2.3: Final visible mesh keys after hierarchy processing
     std::unordered_set<std::string> visibleMeshKeys_;
     
@@ -223,6 +234,12 @@ private:
 
     // Create fallback texture
     bool CreateFallbackTexture();
+    
+    // P0: Upload epoch management for stale callback prevention
+    uint64_t AllocateUploadEpoch(const std::string& nodeKey);
+    uint64_t InvalidateUploadEpoch(const std::string& nodeKey);
+    bool IsUploadEpochCurrent(const std::string& nodeKey, uint64_t epoch) const;
+    void RemoveUploadEpoch(const std::string& nodeKey);
 
     // Sprint 2: Helper methods
     std::string TileKeyToNodeKey(const TileKey& key) const;

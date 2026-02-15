@@ -442,11 +442,17 @@ void GlobeEngine::Shutdown() {
 
     ShutdownImGui();
     
+    // P0: Shutdown sequence - stop workers first, then drain uploads, then cleanup GL
+    // This prevents stale callbacks from touching GL after context is lost
+    
     if (demManager_) demManager_->Shutdown();
     if (meshScheduler_) meshScheduler_->Shutdown();
     if (heightmapManager_) heightmapManager_->Clear();
     
-    // Shutdown RockMeshManager before GL context teardown (Phase 5)
+    // P0: Shutdown RockMeshManager with proper cleanup sequence
+    // 1. Signal shutdown (stops new work)
+    // 2. Join worker threads
+    // 3. Cleanup GL resources
     if (rockMeshManager_) {
         rockMeshManager_->Shutdown();
         rockMeshManager_.reset();

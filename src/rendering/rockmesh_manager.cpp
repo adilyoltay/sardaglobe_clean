@@ -743,6 +743,40 @@ RockMeshManager::Stats RockMeshManager::GetStats() const {
     return s;
 }
 
+// P0: Upload epoch management for stale callback prevention
+uint64_t RockMeshManager::AllocateUploadEpoch(const std::string& nodeKey) {
+    std::lock_guard<std::mutex> lock(uploadEpochMutex_);
+    uint64_t epoch = nextUploadEpoch_++;
+    uploadEpochByNode_[nodeKey] = epoch;
+    return epoch;
+}
+
+uint64_t RockMeshManager::InvalidateUploadEpoch(const std::string& nodeKey) {
+    std::lock_guard<std::mutex> lock(uploadEpochMutex_);
+    auto it = uploadEpochByNode_.find(nodeKey);
+    if (it != uploadEpochByNode_.end()) {
+        // Increment to invalidate - any upload with old epoch will be rejected
+        it->second = ++nextUploadEpoch_;
+        return it->second;
+    }
+    return 0;
+}
+
+bool RockMeshManager::IsUploadEpochCurrent(const std::string& nodeKey, uint64_t epoch) const {
+    std::lock_guard<std::mutex> lock(uploadEpochMutex_);
+    auto it = uploadEpochByNode_.find(nodeKey);
+    if (it == uploadEpochByNode_.end()) {
+        // Node not found - treat as stale
+        return false;
+    }
+    return it->second == epoch;
+}
+
+void RockMeshManager::RemoveUploadEpoch(const std::string& nodeKey) {
+    std::lock_guard<std::mutex> lock(uploadEpochMutex_);
+    uploadEpochByNode_.erase(nodeKey);
+}
+
 #ifdef NATIVE_GLOBE_TESTING
 // P0: Test-only API for direct BuildMesh testing (no GL/worker needed)
 RockMeshCpu RockMeshManager::BuildMeshForTest(const std::string& nodeKey, const ParsedNodeData& parsed) {

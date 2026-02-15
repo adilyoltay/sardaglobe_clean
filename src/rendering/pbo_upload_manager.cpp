@@ -536,7 +536,33 @@ bool PboUploadManager::ExecuteUploadImmediate(const UploadRequest& req) {
 }
 
 void PboUploadManager::CompleteRequest(InFlightRequest& inflight, bool success) {
-    // Invoke callback
+    // P0: Stale callback detection - check if request is still valid
+    // If token validation fails, skip GL operations and count as stale
+    bool isStale = false;
+    if (inflight.generationToken != 0 && tokenValidator_) {
+        // Token is set and validator exists - check validity
+        if (!tokenValidator_(inflight.resourceKey, inflight.generationToken)) {
+            isStale = true;
+        }
+    }
+    
+    if (isStale) {
+        // P0: Stale upload - don't touch GL, just clean up and count
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.staleUploadSkips++;
+        stats_.staleUploadBytes += inflight.request.GetDataSize();
+        
+        // Release PBO if used (but don't invoke callback)
+        if (inflight.pboEntry) {
+            ReleasePbo(inflight.pboEntry);
+            inflight.pboEntry = nullptr;
+        }
+        
+        // Don't invoke callback - resource has been evicted/invalidated
+        return;
+    }
+    
+    // Normal path - invoke callback
     if (inflight.request.onComplete) {
         inflight.request.onComplete(inflight.request.targetTexture, success, inflight.request.userData);
     }
@@ -563,18 +589,40 @@ void PboUploadManager::PollGpuCompletion() {
     auto it = inFlightQueue_.begin();
     while (it != inFlightQueue_.end()) {
         if (it->IsReady()) {
-            // Request is complete - finalize it
-            CompleteRequest(*it, true);
-            
-            it = inFlightQueue_.erase(it);
-            
-            std::lock_guard<std::mutex> statsLock(statsMutex_);
-            stats_.fenceWaits++;
-            stats_.inFlightRequests = static_cast<uint32_t>(inFlightQueue_.size());
+            // P0: Check if request was invalidated before completion
+            if (!it->isValid) {
+                // Request was marked invalid - treat as stale
+                CompleteRequest(*it, false);
+                it = inFlightQueue_.erase(it);
+                
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.inFlightRequests = static_cast<uint32_t>(inFlightQueue_.size());
+            } else {
+                // Normal completion
+                CompleteRequest(*it, true);
+                it = inFlightQueue_.erase(it);
+                
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.fenceWaits++;
+                stats_.inFlightRequests = static_cast<uint32_t>(inFlightQueue_.size());
+            }
         } else {
             ++it;
         }
     }
+}
+
+// P0: Drain all pending uploads (for shutdown)
+void PboUploadManager::DrainAllPendingUploads() {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    
+    // Mark all in-flight as invalid (they'll be cleaned up as stale)
+    for (auto& inflight : inFlightQueue_) {
+        inflight.isValid = false;
+    }
+    
+    // Clear pending queue
+    pendingQueue_.clear();
 }
 
 int PboUploadManager::ProcessUploads() {

@@ -46,6 +46,10 @@ struct UploadRequest {
     bool compressed = false;            // Is compressed format (DXT, ETC, etc.)
     bool generateMipmap = false;        // Generate mipmaps after upload
     
+    // P0: Generation token for stale callback detection
+    // Upload is only valid if token matches current generation for the resource
+    uint64_t generationToken = 0;       // Resource generation (0 = no validation)
+    
     // Constructors for convenience
     UploadRequest() = default;
     
@@ -108,6 +112,10 @@ struct UploadStats {
     uint64_t skippedByBudget = 0;       // Uploads skipped due to budget limits
     uint64_t deferredBytes = 0;         // Bytes deferred to next frames
     uint64_t budgetHits = 0;            // Number of frames where budget was hit
+    
+    // P0: Stale upload tracking (stale callback prevention)
+    uint64_t staleUploadSkips = 0;      // Uploads skipped due to stale token
+    uint64_t staleUploadBytes = 0;      // Bytes of stale uploads skipped
 };
 
 // Forward declaration
@@ -120,6 +128,11 @@ struct InFlightRequest {
     uint64_t submitTimeUs = 0;          // Microseconds when submitted
     uint64_t submitFrame = 0;           // Frame when submitted
     bool completed = false;             // Set true when GPU signals completion
+    
+    // P0: Stale upload detection
+    std::string resourceKey;            // Resource identifier (e.g., nodeKey)
+    uint64_t generationToken = 0;       // Expected generation for validation
+    bool isValid = true;                // Set false if invalidated before completion
     
     bool IsReady() const {
         if (!pboEntry) return true;  // Immediate uploads are ready
@@ -233,6 +246,14 @@ public:
     // Get in-flight request for external tracking
     const InFlightRequest* GetInFlightRequest(size_t index) const;
     size_t GetInFlightCount() const;
+    
+    // P0: Stale upload prevention
+    // Check if request is still valid (token matches current generation)
+    using TokenValidator = std::function<bool(const std::string& key, uint64_t token)>;
+    void SetTokenValidator(TokenValidator validator) { tokenValidator_ = validator; }
+    
+    // P0: Drain all pending uploads (for shutdown)
+    void DrainAllPendingUploads();
 
 private:
     // Internal request queue entry
@@ -277,6 +298,9 @@ private:
     std::vector<QueuedRequest> pendingQueue_;
     std::vector<InFlightRequest> inFlightQueue_;
     mutable std::mutex queueMutex_;
+    
+    // P0: Token validation for stale callback prevention
+    TokenValidator tokenValidator_;
     
     // State
     uint64_t currentFrame_ = 0;
