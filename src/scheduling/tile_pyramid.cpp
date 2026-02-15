@@ -1,5 +1,6 @@
 #include "tile_pyramid.h"
 #include "../math/tile_math.h"
+#include "../io/dem_manager.h"  // P1: For strict DEM+RGB quorum
 #include <algorithm>
 #include <cmath>
 
@@ -135,6 +136,24 @@ bool TilePyramid::IsTileReady(const TileKey& key, const TileMap& tiles) {
     // Requiring mesh here deadlocks refinement because child meshes are built
     // after they become leaves.
     return it->second.IsReady();
+}
+
+// P1: Strict readiness check - BOTH texture AND DEM must be ready
+bool TilePyramid::IsTileReadyStrict(const TileKey& key, const TileMap& tiles) const {
+    auto it = tiles.find(key);
+    if (it == tiles.end()) return false;
+    
+    // Texture readiness (existing check)
+    bool textureReady = it->second.IsReady();
+    if (!textureReady) return false;
+    
+    // P1: DEM readiness check (strict quorum)
+    if (demManager_) {
+        return demManager_->HasData(key);
+    }
+    
+    // No DEM manager configured - fall back to texture-only check
+    return true;
 }
 
 } // namespace globe

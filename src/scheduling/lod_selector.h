@@ -121,6 +121,15 @@ private:
     
     bool AreChildrenReady(const TileKey& key, const TileReadyFunc& isReady, const Settings& settings);
     
+    // P1: Strict DEM+RGB Quorum - Child group promotion check
+    // Returns true only if all children have BOTH texture AND DEM data ready
+    bool IsChildGroupReadyForPromotion(
+        const TileKey& parentKey,
+        const TileReadyFunc& isTextureReady,
+        const TileReadyFunc& isDemReady,
+        int minReadyCount = 4  // All 4 children must be ready
+    );
+    
     // Neighbor LOD conformance (FAZ 1.2)
     void EnforceNeighborConformance(
         LodSelection& result,

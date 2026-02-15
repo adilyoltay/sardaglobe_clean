@@ -393,6 +393,30 @@ bool LodSelector::AreChildrenReady(const TileKey& key, const TileReadyFunc& isRe
     return readyCount > 0;
 }
 
+// P1: Strict DEM+RGB Quorum - Child group promotion check
+// Returns true only if all children have BOTH texture AND DEM data ready
+bool LodSelector::IsChildGroupReadyForPromotion(
+    const TileKey& parentKey,
+    const TileReadyFunc& isTextureReady,
+    const TileReadyFunc& isDemReady,
+    int minReadyCount
+) {
+    auto children = parentKey.Children();
+    int fullyReadyCount = 0;
+    
+    for (const auto& child : children) {
+        // P1: Strict quorum - BOTH texture AND DEM must be ready
+        bool textureReady = isTextureReady(child);
+        bool demReady = isDemReady(child);
+        
+        if (textureReady && demReady) {
+            ++fullyReadyCount;
+        }
+    }
+    
+    return fullyReadyCount >= minReadyCount;
+}
+
 void LodSelector::EnforceNeighborConformance(
     LodSelection& result,
     const TileReadyFunc& isReady,

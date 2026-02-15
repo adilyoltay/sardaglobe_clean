@@ -10,6 +10,9 @@
 
 namespace globe {
 
+// Forward declaration
+class DemManager;
+
 // Tile with computed priority score (GE-style SSE + center bias)
 struct RankedTile {
     TileKey key;
@@ -37,6 +40,10 @@ public:
     // Center bias weight for scoring (GE-style)
     void SetCenterBiasWeight(float w) { centerBiasWeight_ = w; }
     float GetCenterBiasWeight() const { return centerBiasWeight_; }
+    
+    // P1: DEM Manager for strict DEM+RGB quorum
+    void SetDemManager(DemManager* demManager) { demManager_ = demManager; }
+    DemManager* GetDemManager() const { return demManager_; }
     
     // Perform LOD selection and update internal state (with viewDir for scoring)
     // Returns the selection result for this frame
@@ -82,6 +89,9 @@ private:
     // Check if tile is ready (has texture and is in Ready state)
     static bool IsTileReady(const TileKey& key, const TileMap& tiles);
     
+    // P1: Strict readiness check - BOTH texture AND DEM must be ready
+    bool IsTileReadyStrict(const TileKey& key, const TileMap& tiles) const;
+    
     // Compute tile score: SSE * (1 + w * centerBias)
     float ComputeScore(const TileKey& key, const glm::vec3& cameraPos, 
                        const glm::vec3& viewDir, float fovDegrees, int viewportHeight);
@@ -103,6 +113,9 @@ private:
     
     // Scoring parameters
     float centerBiasWeight_ = 0.3f;
+    
+    // P1: DEM Manager for strict DEM+RGB quorum checks
+    DemManager* demManager_ = nullptr;
 };
 
 } // namespace globe
