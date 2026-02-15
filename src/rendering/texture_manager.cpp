@@ -716,15 +716,21 @@ bool TextureManager::UploadTileViaPbo(Tile& tile) {
         this     // P0: Manager pointer for validation
     };
     
-    // Submit PBO upload (takes ownership of pixel data)
-    // Callback will handle mipmap generation and cleanup
-    bool submitted = pboManager_->SubmitUploadOwned(
+    // P0: Submit PBO upload with token for stale detection
+    // Convert TileKey to string for resource key
+    std::string resourceKey = std::to_string(tile.key.level) + "/" + 
+                              std::to_string(tile.key.x) + "/" + 
+                              std::to_string(tile.key.y);
+    
+    bool submitted = pboManager_->SubmitUploadOwnedWithToken(
         textureId,
         tile.pixelWidth,
         tile.pixelHeight,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
         std::move(tile.pixels),  // Move pixels into request
+        resourceKey,             // P0: Resource key for validation
+        epoch,                   // P0: Generation token
         OnPboUploadComplete,     // Callback for completion
         ctx,                     // Context with tile key
         static_cast<uint64_t>(tile.requestPriority),
@@ -804,6 +810,13 @@ int TextureManager::ProcessUploads(std::unordered_map<TileKey, Tile>& tiles, dou
         UploadJob job = uploadQueue_.top();
         uploadQueue_.pop();
         TileKey key = job.key;
+        
+        // P0: Check if this upload is stale (tile was evicted and re-requested)
+        if (!IsUploadEpochCurrent(key, job.epoch)) {
+            // Stale upload - tile was evicted since this job was queued
+            // Skip processing, the tile will be re-queued with a new epoch if still needed
+            continue;
+        }
         
         auto it = tiles.find(key);
         if (it == tiles.end()) continue;

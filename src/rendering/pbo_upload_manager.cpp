@@ -743,8 +743,7 @@ int PboUploadManager::ProcessUploads() {
                 inflight.submitTimeUs = qr.queueTimeUs;
                 inflight.submitFrame = qr.submitFrame;
                 // P0: Set resource key and token for stale detection
-                // For now, use userData as resource key if available ( TextureManager pattern)
-                // This is a simplified approach - in production, userData would point to a struct with resource key
+                inflight.resourceKey = req.resourceKey;
                 inflight.generationToken = req.generationToken;
                 inflight.isValid = true;
                 
