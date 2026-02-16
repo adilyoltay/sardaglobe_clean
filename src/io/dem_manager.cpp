@@ -85,6 +85,7 @@ DemManager::DemManager(const Config& config) : config_(config) {
         case DemProviderType::TerrainRGB: {
             TerrainRGBConfig trConfig;
             trConfig.baseUrl = config_.baseUrl;
+            trConfig.encoding = config_.terrainRgbEncoding;
             trConfig.basicAuthUserPwd = config_.basicAuthUserPwd;
             trConfig.apiKey = config_.apiKey;
             if (trConfig.apiKey.empty() && !config_.apiKeyEnv.empty()) {

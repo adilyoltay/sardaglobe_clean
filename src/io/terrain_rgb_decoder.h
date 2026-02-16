@@ -9,15 +9,15 @@ namespace globe {
 
 struct Config;  // Forward declaration
 
-// Terrain-RGB tile encoding format (Mapbox standard only)
-// height = -10000 + (R*256*256 + G*256 + B) * 0.1
+// Terrain tile encoding formats.
 enum class TerrainRGBEncoding {
-    Mapbox     // Mapbox Terrain-RGB encoding (default)
+    Mapbox,    // height = -10000 + (R*256*256 + G*256 + B) * 0.1
+    Terrarium  // height = (R*256 + G + B/256) - 32768
 };
 
 // Decode a PNG/JPEG Terrain-RGB tile into a DemGridData grid.
 // The image is decoded, pixel RGB values are converted to meters using the
-// Mapbox encoding, and the result is bilinearly resampled to meshN×meshN.
+// selected encoding, and the result is bilinearly resampled to meshN×meshN.
 // When config is provided and forceClampTerrainNoData is true, heights below
 // demNoDataMinHeightM are replaced with demNoDataReplacementM.
 // Returns true on success.  On failure, *error (if non-null) receives a

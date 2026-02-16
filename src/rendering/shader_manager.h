@@ -191,8 +191,8 @@ void main() {
         float heightNorm = textureLod(uHeightmap, hmUv, lodInterp).r;
         float heightKm = mix(uHeightMin, uHeightMax, heightNorm);
         
-        // Displace vertex radially outward from Earth center
-        pos = aPos + radialDir * (heightKm * uTerrainMorph);
+        // Displace vertex radially outward from Earth center (world-space)
+        pos = worldPos + radialDir * (heightKm * uTerrainMorph);
         
         // Recalculate normal from heightmap gradient (finite difference)
         float lodScale = exp2(lodInterp);
@@ -223,7 +223,7 @@ void main() {
         // aHeightKm is vertex-local DEM height above/below the ellipsoid surface.
         float morph = clamp(uTerrainMorph, 0.0, 1.0);
         if (abs(aHeightKm) > 1e-6 && morph < 1.0) {
-            pos = aPos - radialDir * (aHeightKm * (1.0 - morph));
+            pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));
             normal = normalize(mix(radialDir, aNormal, morph));
         }
     }

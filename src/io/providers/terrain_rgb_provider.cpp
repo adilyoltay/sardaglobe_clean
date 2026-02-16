@@ -4,6 +4,7 @@
 #include "../../debug/network_panel.h"
 #include <curl/curl.h>
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -48,6 +49,31 @@ bool HasQueryParam(const std::string& url, const std::string& key) {
         return true;
     }
     return false;
+}
+
+std::string ToLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+TerrainRGBEncoding ResolveEncoding(const TerrainRGBConfig& config) {
+    const std::string mode = ToLowerCopy(config.encoding);
+    if (mode == "mapbox") {
+        return TerrainRGBEncoding::Mapbox;
+    }
+    if (mode == "terrarium") {
+        return TerrainRGBEncoding::Terrarium;
+    }
+
+    // auto/default mode: infer from URL template.
+    const std::string url = ToLowerCopy(config.baseUrl);
+    if (url.find("terrarium") != std::string::npos ||
+        url.find("elevation-tiles-prod") != std::string::npos) {
+        return TerrainRGBEncoding::Terrarium;
+    }
+    return TerrainRGBEncoding::Mapbox;
 }
 
 } // anonymous namespace
@@ -168,10 +194,11 @@ bool TerrainRGBProvider::DecodeTile(const std::vector<uint8_t>& pngData, DemGrid
     sanitizeConfig.demNoDataMinHeightM = config_.demNoDataMinHeightM;
     sanitizeConfig.demNoDataReplacementM = config_.demNoDataReplacementM;
     sanitizeConfig.forceClampTerrainNoData = config_.forceClampTerrainNoData;
+    const TerrainRGBEncoding encoding = ResolveEncoding(config_);
     return DecodeTerrainRGBFromImage(
         pngData,
         std::max(2, config_.meshN),
-        TerrainRGBEncoding::Mapbox,
+        encoding,
         outData,
         &decodeError,
         &sanitizeConfig);

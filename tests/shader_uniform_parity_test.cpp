@@ -136,7 +136,41 @@ int main() {
         }
     }
     
-    // Test 7: Fragment shader contains basic uniforms
+    // Test 7: RTE morph must use worldPos in heightmap displacement path
+    {
+        const char* vertexShader = shaders::TILE_VERTEX;
+
+        bool hasExpectedWorldPattern =
+            std::strstr(vertexShader, "pos = worldPos + radialDir * (heightKm * uTerrainMorph);") != nullptr;
+        bool hasForbiddenLocalPattern =
+            std::strstr(vertexShader, "pos = aPos + radialDir * (heightKm * uTerrainMorph);") != nullptr;
+
+        if (!Expect(hasExpectedWorldPattern, "Heightmap morph should displace from worldPos")) failures++;
+        if (!Expect(!hasForbiddenLocalPattern, "Heightmap morph must not displace from aPos")) failures++;
+
+        if (hasExpectedWorldPattern && !hasForbiddenLocalPattern) {
+            Report("RteMorphUsesWorldPosForHeightmap");
+        }
+    }
+
+    // Test 8: RTE morph must use worldPos in CPU bake morph path
+    {
+        const char* vertexShader = shaders::TILE_VERTEX;
+
+        bool hasExpectedWorldPattern =
+            std::strstr(vertexShader, "pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));") != nullptr;
+        bool hasForbiddenLocalPattern =
+            std::strstr(vertexShader, "pos = aPos - radialDir * (aHeightKm * (1.0 - morph));") != nullptr;
+
+        if (!Expect(hasExpectedWorldPattern, "CPU bake morph should adjust from worldPos")) failures++;
+        if (!Expect(!hasForbiddenLocalPattern, "CPU bake morph must not adjust from aPos")) failures++;
+
+        if (hasExpectedWorldPattern && !hasForbiddenLocalPattern) {
+            Report("RteMorphUsesWorldPosForCpuBake");
+        }
+    }
+
+    // Test 9: Fragment shader contains basic uniforms
     {
         const char* fragmentShader = shaders::TILE_FRAGMENT;
         
@@ -151,7 +185,7 @@ int main() {
         }
     }
     
-    // Test 8: RockMesh uses compatible uniforms
+    // Test 10: RockMesh uses compatible uniforms
     {
         const char* vertexShader = shaders::TILE_VERTEX;
         const char* fragmentShader = shaders::TILE_FRAGMENT;

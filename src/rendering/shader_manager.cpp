@@ -1,5 +1,6 @@
 #include "shader_manager.h"
 #include <glad/glad.h>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 
@@ -68,6 +69,19 @@ uint32_t ShaderManager::GetTileProgram(ShaderFlags flags) {
     auto it = programCache_.find(flagsKey);
     if (it != programCache_.end()) {
         return it->second;
+    }
+
+    // Fail-fast guard: RTE path must not morph from aPos (tile-local) directly.
+    // This catches regressions that reintroduce world/local space mixing artifacts.
+    if (std::strstr(shaders::TILE_VERTEX, "pos = aPos + radialDir") != nullptr ||
+        std::strstr(shaders::TILE_VERTEX, "pos = aPos - radialDir") != nullptr) {
+        std::cerr << "[ShaderManager] Unsafe TILE_VERTEX RTE morph pattern detected "
+                     "(aPos +/- radialDir). Aborting tile shader compilation.\n";
+        programCache_[flagsKey] = 0;
+        if (flags == ShaderFlags::None) {
+            tileProgram_ = 0;
+        }
+        return 0;
     }
     
     // Build and compile new variant

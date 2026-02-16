@@ -87,7 +87,8 @@ struct DemStats {
 
 // DEM Manager configuration
 struct DemManagerConfig {
-    std::string baseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
+    std::string baseUrl = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+    std::string terrainRgbEncoding = "auto";  // auto | mapbox | terrarium
     // Optional HTTP basic auth, format: "user:password"
     std::string basicAuthUserPwd;
     // Terrain-RGB API key (optional). If empty, read from demApiKeyEnv at runtime.

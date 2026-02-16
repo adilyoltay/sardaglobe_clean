@@ -12,7 +12,8 @@ namespace globe {
 
 // Configuration for TerrainRGBProvider
 struct TerrainRGBConfig {
-    std::string baseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
+    std::string baseUrl = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+    std::string encoding = "auto";          // auto | mapbox | terrarium
     std::string apiKey;                    // Optional API key appended to URL
     std::string basicAuthUserPwd;          // Optional HTTP basic auth
     long timeoutSec = 30;

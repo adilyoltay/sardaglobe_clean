@@ -157,6 +157,35 @@ int main() {
             "Extreme high value (>9000m) should be clamped to 0.0m");
     }
 
+    // Test 8: Terrarium decode formula + hard clamp
+    {
+        auto PixelToHeightTerrariumWithClamp = [](uint8_t r, uint8_t g, uint8_t b) -> double {
+            double height = (static_cast<double>(r) * 256.0 +
+                             static_cast<double>(g) +
+                             static_cast<double>(b) / 256.0) - 32768.0;
+            if (!std::isfinite(height) || height <= -32768.0 || height > 9000.0) {
+                return 0.0;
+            }
+            return height;
+        };
+
+        double t1 = PixelToHeightTerrariumWithClamp(0, 0, 0);  // -32768 sentinel
+        failed += !Expect(Near(t1, 0.0),
+            "Terrarium NoData sentinel (-32768m) should be clamped to 0.0m");
+
+        double t2 = PixelToHeightTerrariumWithClamp(128, 0, 0);  // 0m
+        failed += !Expect(Near(t2, 0.0),
+            "Terrarium sea level encoding should decode to ~0.0m");
+
+        double t3 = PixelToHeightTerrariumWithClamp(162, 144, 0);  // 8848m
+        failed += !Expect(t3 > 8800.0 && t3 < 8900.0,
+            "Terrarium Everest-scale value should be preserved");
+
+        double t4 = PixelToHeightTerrariumWithClamp(163, 72, 0);  // 9032m
+        failed += !Expect(Near(t4, 0.0),
+            "Terrarium extreme high value (>9000m) should be clamped to 0.0m");
+    }
+
     if (failed == 0) {
         std::cout << "terrain_rgb_decoder_nodata_test: ALL PASSED" << std::endl;
     } else {

@@ -54,7 +54,8 @@ std::optional<DemProviderType> ParseDemProvider(const std::string& provider) {
     if (lower == "google-earth") {
         return DemProviderType::GoogleEarth;
     }
-    if (lower == "terrain-rgb" || lower == "terrain_rgb" || lower == "mapbox") {
+    if (lower == "terrain-rgb" || lower == "terrain_rgb" ||
+        lower == "mapbox" || lower == "terrarium") {
         return DemProviderType::TerrainRGB;
     }
     // Strict: unknown values are an error
@@ -170,13 +171,14 @@ bool GlobeEngine::Init() {
     if (config_.demEnabled) {
         DemManager::Config demConfig;
         demConfig.baseUrl = config_.demUrl.empty() ? config_.demBaseUrl : config_.demUrl;
+        demConfig.terrainRgbEncoding = config_.demEncoding;
         demConfig.basicAuthUserPwd = config_.demAuth;
         demConfig.apiKey = config_.demApiKey;
         demConfig.apiKeyEnv = config_.demApiKeyEnv;
         auto providerOpt = ParseDemProvider(config_.demProvider);
         if (!providerOpt.has_value()) {
             std::cerr << "[DEM] ERROR: Unknown provider '" << config_.demProvider << "'. "
-                      << "Expected: terrain-rgb, google-earth" << std::endl;
+                      << "Expected: terrain-rgb, terrarium, google-earth" << std::endl;
             return false;
         }
 
@@ -265,10 +267,10 @@ bool GlobeEngine::Init() {
                 
                 DemManager::Config fallbackConfig = demConfig;
                 fallbackConfig.providerType = DemProviderType::TerrainRGB;
-                // Use default terrain-rgb URL if not provided
+                // Use keyless public Terrarium URL if not provided
                 if (fallbackConfig.baseUrl.empty() || 
                     fallbackConfig.baseUrl.find("earth-pa.clients6.google.com") != std::string::npos) {
-                    fallbackConfig.baseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
+                    fallbackConfig.baseUrl = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
                 }
                 
                 demManager_ = std::make_unique<DemManager>(fallbackConfig);
@@ -279,7 +281,8 @@ bool GlobeEngine::Init() {
                 } else {
                     std::cerr << "[DEM] Auto-fallback to terrain-rgb also failed (" 
                               << DemHealthStatusToString(health) 
-                              << "). Set NATIVE_GLOBE_DEM_TOKEN for terrain-rgb." << std::endl;
+                              << "). If using Mapbox tiles set NATIVE_GLOBE_DEM_TOKEN; "
+                              << "public Terrarium works without a key." << std::endl;
                 }
             } else if (demConfig.providerType == DemProviderType::GoogleEarth && !didAutoFallback) {
                 // Other GE failures (not auth) - hard fail

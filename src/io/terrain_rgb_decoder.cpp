@@ -6,16 +6,31 @@
 
 namespace globe {
 
-static double PixelToHeight(uint8_t r, uint8_t g, uint8_t b) {
-    // Mapbox Terrain-RGB: height = -10000 + (R*65536 + G*256 + B) * 0.1
-    double height = -10000.0 + (static_cast<double>(r) * 65536.0 +
+static double PixelToHeight(uint8_t r, uint8_t g, uint8_t b, TerrainRGBEncoding encoding) {
+    double height = 0.0;
+    double noDataFloor = -10000.0;
+
+    switch (encoding) {
+        case TerrainRGBEncoding::Mapbox:
+            // Mapbox Terrain-RGB: height = -10000 + (R*65536 + G*256 + B) * 0.1
+            height = -10000.0 + (static_cast<double>(r) * 65536.0 +
                                  static_cast<double>(g) * 256.0 +
                                  static_cast<double>(b)) * 0.1;
-    
+            noDataFloor = -10000.0;
+            break;
+        case TerrainRGBEncoding::Terrarium:
+            // Terrarium: height = (R*256 + G + B/256) - 32768
+            height = (static_cast<double>(r) * 256.0 +
+                      static_cast<double>(g) +
+                      static_cast<double>(b) / 256.0) - 32768.0;
+            noDataFloor = -32768.0;
+            break;
+    }
+
     // SERT BARİYER: Config'ten bağımsız olarak NoData/NaN/Inf değerlerini filtrele
-    // NoData sentinel: (0,0,0) => -10000.0 ve daha düşük değerler -> 0.0
+    // NoData sentinel ve daha düşük değerler -> 0.0
     // Yüksek uç: > 9000.0 -> 0.0 (Everest ~8848m güvenli)
-    if (!std::isfinite(height) || height <= -10000.0 || height > 9000.0) {
+    if (!std::isfinite(height) || height <= noDataFloor || height > 9000.0) {
         return 0.0;  // Deniz seviyesine çek
     }
     return height;
@@ -78,7 +93,7 @@ bool DecodeTerrainRGBFromImage(
         for (int col = 0; col < w; ++col) {
             const int idx = (row * w + col) * 3;
             fullGrid[static_cast<size_t>(row) * w + col] =
-                PixelToHeight(pixels[idx], pixels[idx + 1], pixels[idx + 2]);
+                PixelToHeight(pixels[idx], pixels[idx + 1], pixels[idx + 2], encoding);
         }
     }
     stbi_image_free(pixels);

@@ -226,8 +226,10 @@ struct Config {
     bool enableTerrainMorphTimeFallback = true;      // Allow time-based fallback if distance invalid
     
     // DEM/Terrain settings
-    // Default: Mapbox Terrain-RGB tile template (token provided via env/CLI)
-    std::string demBaseUrl = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw";
+    // Default: Public AWS Terrarium tile template (no API key required)
+    std::string demBaseUrl = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+    // DEM encoding for terrain-rgb provider: auto | mapbox | terrarium
+    std::string demEncoding = "auto";
     std::string demApiKey;                                    // Added via --dem-api-key / env var
     std::string demApiKeyEnv = "NATIVE_GLOBE_DEM_TOKEN";      // Env var for DEM API key
     // DEM Provider: terrain-rgb (default, public) | google-earth (internal, requires auth)

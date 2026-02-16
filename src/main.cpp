@@ -267,15 +267,26 @@ int main(int argc, char** argv) {
             const char* provider = argv[++i];
             // Strict validation for provider values
             if (std::strcmp(provider, "terrain-rgb") != 0 && 
-                std::strcmp(provider, "google-earth") != 0) {
+                std::strcmp(provider, "google-earth") != 0 &&
+                std::strcmp(provider, "terrarium") != 0) {
                 std::cerr << "Error: Invalid DEM provider '" << provider << "'\n"
-                          << "Valid providers: terrain-rgb, google-earth\n";
+                          << "Valid providers: terrain-rgb, terrarium, google-earth\n";
                 return 1;
             }
             config.demProvider = provider;
             config.demEnabled = true;
+        } else if (std::strcmp(argv[i], "--dem-encoding") == 0 && i + 1 < argc) {
+            const char* encoding = argv[++i];
+            if (std::strcmp(encoding, "auto") != 0 &&
+                std::strcmp(encoding, "mapbox") != 0 &&
+                std::strcmp(encoding, "terrarium") != 0) {
+                std::cerr << "Error: Invalid DEM encoding '" << encoding << "'\n"
+                          << "Valid encodings: auto, mapbox, terrarium\n";
+                return 1;
+            }
+            config.demEncoding = encoding;
         } else if (std::strcmp(argv[i], "--dem-format") == 0 && i + 1 < argc) {
-            std::cerr << "ERROR: --dem-format is deprecated. Use --dem-provider terrain-rgb|google-earth\n";
+            std::cerr << "ERROR: --dem-format is deprecated. Use --dem-provider terrain-rgb|terrarium|google-earth\n";
             return 1;
         } else if (std::strcmp(argv[i], "--dem-auth") == 0 && i + 1 < argc) {
             config.demAuth = argv[++i];
@@ -611,7 +622,8 @@ int main(int argc, char** argv) {
                       << "  --tile-url URL    Tile server URL template\n"
                       << "  --tile-auth U:P   Tile HTTP basic auth (user:password)\n"
                       << "  --dem-url URL     DEM server URL (elevation)\n"
-                      << "  --dem-provider P  DEM provider: google-earth | terrain-rgb (default: google-earth)\n"
+                      << "  --dem-provider P  DEM provider: google-earth | terrain-rgb | terrarium (default: google-earth)\n"
+                      << "  --dem-encoding E  DEM encoding: auto | mapbox | terrarium (default: auto)\n"
                       << "  --dem-auth U:P    DEM HTTP basic auth (user:password)\n"
                       << "  --dem-api-key KEY DEM Terrain-RGB API key (optional)\n"
                       << "  --dem-api-key-env ENV DEM API key env var (default: NATIVE_GLOBE_DEM_TOKEN)\n"
@@ -718,6 +730,7 @@ int main(int argc, char** argv) {
         std::cout << "DEM URL: " << demDisplayUrl << "\n";
     }
     std::cout << "DEM Provider: " << config.demProvider << "\n";
+    std::cout << "DEM Encoding: " << config.demEncoding << "\n";
     std::cout << "DEM API Key: " << (config.demApiKey.empty() ? "env/none" : "configured") << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";
     std::cout << "DEM Auth: " << (config.demAuth.empty() ? "none" : "basic") << "\n";
