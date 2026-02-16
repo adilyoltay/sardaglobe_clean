@@ -738,15 +738,19 @@ int PboUploadManager::ProcessUploads() {
         if (pbo) {
             success = ExecuteUploadPbo(req, pbo);
             if (success) {
+                // P0 FIX: Copy resource key BEFORE move to avoid use-after-move
+                std::string resKey = req.resourceKey;
+                uint64_t genToken = req.generationToken;
+                
                 // Move to in-flight with PBO reference
                 InFlightRequest inflight;
                 inflight.request = std::move(req);
                 inflight.pboEntry = pbo;
                 inflight.submitTimeUs = qr.queueTimeUs;
                 inflight.submitFrame = qr.submitFrame;
-                // P0: Set resource key and token for stale detection
-                inflight.resourceKey = req.resourceKey;
-                inflight.generationToken = req.generationToken;
+                // P0: Set resource key and token for stale detection (from copies)
+                inflight.resourceKey = std::move(resKey);
+                inflight.generationToken = genToken;
                 inflight.isValid = true;
                 
                 std::lock_guard<std::mutex> lock(queueMutex_);
