@@ -71,12 +71,49 @@ uint32_t ShaderManager::GetTileProgram(ShaderFlags flags) {
         return it->second;
     }
 
-    // Fail-fast guard: RTE path must not morph from aPos (tile-local) directly.
-    // This catches regressions that reintroduce world/local space mixing artifacts.
-    if (std::strstr(shaders::TILE_VERTEX, "pos = aPos + radialDir") != nullptr ||
-        std::strstr(shaders::TILE_VERTEX, "pos = aPos - radialDir") != nullptr) {
-        std::cerr << "[ShaderManager] Unsafe TILE_VERTEX RTE morph pattern detected "
-                     "(aPos +/- radialDir). Aborting tile shader compilation.\n";
+    // P0 CRITICAL: Fail-fast guard for TILE_VERTEX morph patterns.
+    // RTE path must use worldPos (world-space) for morph, NOT aPos (tile-local).
+    // Using aPos directly causes km-level artifacts (spikes/walls) at tile boundaries.
+    // 
+    // Required patterns (safe):
+    //   - Heightmap: pos = worldPos + radialDir * (heightKm * uTerrainMorph);
+    //   - CPU bake:  pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));
+    //
+    // Forbidden patterns (unsafe):
+    //   - pos = aPos + radialDir * ...
+    //   - pos = aPos - radialDir * ...
+    //   - Any direct aPos-based radial displacement
+    
+    // Normalize shader source: remove all whitespace for reliable pattern matching
+    std::string normalizedVert(shaders::TILE_VERTEX);
+    normalizedVert.erase(
+        std::remove_if(normalizedVert.begin(), normalizedVert.end(), 
+            [](unsigned char c) { return std::isspace(c); }),
+        normalizedVert.end());
+    
+    // Check for forbidden patterns (case-insensitive by converting to lower)
+    std::string lowerVert = normalizedVert;
+    std::transform(lowerVert.begin(), lowerVert.end(), lowerVert.begin(), ::tolower);
+    
+    // Forbidden: pos=apos+radialdir or pos=apos-radialdir (any spacing variant)
+    if (lowerVert.find("pos=apos+radialdir") != std::string::npos ||
+        lowerVert.find("pos=apos-radialdir") != std::string::npos) {
+        std::cerr << "[ShaderManager] P0 SAFETY VIOLATION: TILE_VERTEX contains forbidden "
+                     "aPos-based morph pattern (pos = aPos +/- radialDir).\n"
+                     "This causes km-level terrain artifacts. Aborting compilation.\n";
+        programCache_[flagsKey] = 0;
+        if (flags == ShaderFlags::None) {
+            tileProgram_ = 0;
+        }
+        return 0;
+    }
+    
+    // Verify required patterns exist (worldPos-based morph)
+    if (lowerVert.find("pos=worldpos+radialdir") == std::string::npos &&
+        lowerVert.find("pos=worldpos-radialdir") == std::string::npos) {
+        std::cerr << "[ShaderManager] P0 SAFETY VIOLATION: TILE_VERTEX missing required "
+                     "worldPos-based morph pattern.\n"
+                     "Expected: pos = worldPos +/- radialDir * ...\n";
         programCache_[flagsKey] = 0;
         if (flags == ShaderFlags::None) {
             tileProgram_ = 0;

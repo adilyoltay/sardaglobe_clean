@@ -137,16 +137,28 @@ int main() {
     }
     
     // Test 7: RTE morph must use worldPos in heightmap displacement path
+    // P0 CRITICAL: Prevents km-level terrain artifacts from world/local space mixing
     {
         const char* vertexShader = shaders::TILE_VERTEX;
+        
+        // Normalize: remove whitespace for reliable pattern matching
+        std::string normalizedVert(vertexShader);
+        normalizedVert.erase(
+            std::remove_if(normalizedVert.begin(), normalizedVert.end(),
+                [](unsigned char c) { return std::isspace(c); }),
+            normalizedVert.end());
+        std::transform(normalizedVert.begin(), normalizedVert.end(), normalizedVert.begin(), ::tolower);
 
-        bool hasExpectedWorldPattern =
-            std::strstr(vertexShader, "pos = worldPos + radialDir * (heightKm * uTerrainMorph);") != nullptr;
-        bool hasForbiddenLocalPattern =
-            std::strstr(vertexShader, "pos = aPos + radialDir * (heightKm * uTerrainMorph);") != nullptr;
+        // Check for required worldPos-based pattern (safe)
+        bool hasExpectedWorldPattern = 
+            normalizedVert.find("pos=worldpos+radialdir*(heightkm*uterrainmorph)") != std::string::npos;
+        
+        // Check for forbidden aPos-based pattern (causes artifacts)
+        bool hasForbiddenLocalPattern = 
+            normalizedVert.find("pos=apos+radialdir") != std::string::npos;
 
-        if (!Expect(hasExpectedWorldPattern, "Heightmap morph should displace from worldPos")) failures++;
-        if (!Expect(!hasForbiddenLocalPattern, "Heightmap morph must not displace from aPos")) failures++;
+        if (!Expect(hasExpectedWorldPattern, "Heightmap morph must displace from worldPos")) failures++;
+        if (!Expect(!hasForbiddenLocalPattern, "Heightmap morph must NOT displace from aPos (P0 safety)")) failures++;
 
         if (hasExpectedWorldPattern && !hasForbiddenLocalPattern) {
             Report("RteMorphUsesWorldPosForHeightmap");
@@ -154,19 +166,61 @@ int main() {
     }
 
     // Test 8: RTE morph must use worldPos in CPU bake morph path
+    // P0 CRITICAL: Prevents km-level terrain artifacts from world/local space mixing
     {
         const char* vertexShader = shaders::TILE_VERTEX;
+        
+        // Normalize: remove whitespace for reliable pattern matching
+        std::string normalizedVert(vertexShader);
+        normalizedVert.erase(
+            std::remove_if(normalizedVert.begin(), normalizedVert.end(),
+                [](unsigned char c) { return std::isspace(c); }),
+            normalizedVert.end());
+        std::transform(normalizedVert.begin(), normalizedVert.end(), normalizedVert.begin(), ::tolower);
 
-        bool hasExpectedWorldPattern =
-            std::strstr(vertexShader, "pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));") != nullptr;
-        bool hasForbiddenLocalPattern =
-            std::strstr(vertexShader, "pos = aPos - radialDir * (aHeightKm * (1.0 - morph));") != nullptr;
+        // Check for required worldPos-based pattern (safe)
+        bool hasExpectedWorldPattern = 
+            normalizedVert.find("pos=worldpos-radialdir*(aheightkm*(1.0-morph))") != std::string::npos;
+        
+        // Check for forbidden aPos-based pattern (causes artifacts)
+        bool hasForbiddenLocalPattern = 
+            normalizedVert.find("pos=apos-radialdir") != std::string::npos;
 
-        if (!Expect(hasExpectedWorldPattern, "CPU bake morph should adjust from worldPos")) failures++;
-        if (!Expect(!hasForbiddenLocalPattern, "CPU bake morph must not adjust from aPos")) failures++;
+        if (!Expect(hasExpectedWorldPattern, "CPU bake morph must adjust from worldPos")) failures++;
+        if (!Expect(!hasForbiddenLocalPattern, "CPU bake morph must NOT adjust from aPos (P0 safety)")) failures++;
 
         if (hasExpectedWorldPattern && !hasForbiddenLocalPattern) {
             Report("RteMorphUsesWorldPosForCpuBake");
+        }
+    }
+    
+    // Test 8b: P0 SAFETY - No forbidden aPos-based radial morph patterns anywhere
+    {
+        const char* vertexShader = shaders::TILE_VERTEX;
+        
+        // Normalize shader source
+        std::string normalizedVert(vertexShader);
+        normalizedVert.erase(
+            std::remove_if(normalizedVert.begin(), normalizedVert.end(),
+                [](unsigned char c) { return std::isspace(c); }),
+            normalizedVert.end());
+        std::transform(normalizedVert.begin(), normalizedVert.end(), normalizedVert.begin(), ::tolower);
+        
+        // Any direct aPos-based radial displacement is forbidden
+        bool hasForbiddenAposRadial = 
+            normalizedVert.find("pos=apos+radialdir") != std::string::npos ||
+            normalizedVert.find("pos=apos-radialdir") != std::string::npos;
+        
+        // Must have at least one worldPos-based displacement
+        bool hasWorldPosDisplacement =
+            normalizedVert.find("pos=worldpos+radialdir") != std::string::npos ||
+            normalizedVert.find("pos=worldpos-radialdir") != std::string::npos;
+        
+        if (!Expect(!hasForbiddenAposRadial, "TILE_VERTEX must not contain aPos-based radial displacement (P0)")) failures++;
+        if (!Expect(hasWorldPosDisplacement, "TILE_VERTEX must contain worldPos-based displacement (P0)")) failures++;
+        
+        if (!hasForbiddenAposRadial && hasWorldPosDisplacement) {
+            Report("NoForbiddenRteAposMorphPattern");
         }
     }
 
