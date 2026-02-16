@@ -2,6 +2,8 @@
 // Validates that Tile and RockMesh render paths use consistent shader uniforms
 
 #include "../src/rendering/shader_manager.h"
+#include <algorithm>  // P1: std::remove_if, std::transform
+#include <cctype>     // P1: std::tolower, std::isspace
 #include <iostream>
 #include <cstring>
 

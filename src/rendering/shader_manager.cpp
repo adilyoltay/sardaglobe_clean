@@ -1,5 +1,7 @@
 #include "shader_manager.h"
 #include <glad/glad.h>
+#include <algorithm>  // P1: std::remove_if, std::transform
+#include <cctype>     // P1: std::tolower, std::isspace
 #include <cstring>
 #include <iostream>
 #include <sstream>
