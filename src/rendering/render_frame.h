@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/tile.h"
+#include "../core/config.h"  // P0: For DisplacementMode
 #include "../io/dem_manager.h"
 #include "tile_renderer.h"
 #include "shader_manager.h"
@@ -53,7 +54,8 @@ public:
         bool useTextureArray = false,                  // Faz 2B: Use GL_TEXTURE_2D_ARRAY
         bool useDistanceBasedTerrainMorph = true,      // P2: Distance-based terrain morph
         float terrainMorphDistanceRangeKm = 0.2f,      // P2: Morph band width in km
-        bool enableTerrainMorphTimeFallback = true     // P2: Allow time fallback if distance invalid
+        bool enableTerrainMorphTimeFallback = true,    // P2: Allow time fallback if distance invalid
+        DisplacementMode displacementMode = DisplacementMode::CPU_MESH_BAKE  // P0: Displacement mode for morph compatibility
     );
 
 private:

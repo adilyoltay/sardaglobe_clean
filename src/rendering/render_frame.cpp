@@ -68,9 +68,19 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     bool useTextureArray,
     bool useDistanceBasedTerrainMorph,
     float terrainMorphDistanceRangeKm,
-    bool enableTerrainMorphTimeFallback
+    bool enableTerrainMorphTimeFallback,
+    DisplacementMode displacementMode
 ) {
     TileDrawStats stats;
+    
+    // P0 CRITICAL: Distance-based morph is ONLY compatible with GPU_HEIGHTMAP_DISPLACE mode
+    // CPU_MESH_BAKE mode uses per-tile mesh baked with specific DEM, so distance morph
+    // creates phase mismatches between adjacent tiles (different spawn distances = different morph phases)
+    // This causes visible seams/walls at tile boundaries (km-level height differences)
+    const bool effectiveUseDistanceBasedMorph = 
+        useDistanceBasedTerrainMorph && 
+        (displacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE);
+    
     const float fadeDurationSec = ComputeUnpopDurationSec(cameraSpeedKmPerSec);
     const bool bypassUnpop = ShouldBypassUnpop(cameraSpeedKmPerSec);
     const bool useInstancedFlatPath = tileRenderer_.SupportsInstancedFlatPath() && !wireframe;
@@ -426,9 +436,10 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         bool hasTerrainData = hasHeightmap || tile->demUsed;
         // P2: Calculate camera distance for distance-based morph
         float distanceKm = glm::length(tile->center - cameraPos);
+        // P0: Use effective distance-based morph (disabled for CPU_MESH_BAKE mode)
         float terrainMorph = tile->UpdateTerrainMorph(
             currentTime, hasTerrainData, distanceKm,
-            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm,
+            effectiveUseDistanceBasedMorph, terrainMorphDistanceRangeKm,
             Tile::TERRAIN_MORPH_DURATION, enableTerrainMorphTimeFallback
         );
         if (canBatchFlatTile(*tile, hasHeightmap, false)) {
@@ -457,9 +468,10 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         bool hasTerrainData = hasHeightmap || leaf.tile->demUsed;
         // P2: Calculate camera distance for distance-based morph
         float distanceKm = glm::length(leaf.tile->center - cameraPos);
+        // P0: Use effective distance-based morph (disabled for CPU_MESH_BAKE mode)
         float terrainMorph = leaf.tile->UpdateTerrainMorph(
             currentTime, hasTerrainData, distanceKm,
-            useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm,
+            effectiveUseDistanceBasedMorph, terrainMorphDistanceRangeKm,
             Tile::TERRAIN_MORPH_DURATION, enableTerrainMorphTimeFallback
         );
 

@@ -2394,6 +2394,9 @@ void GlobeEngine::Render() {
         demManager_ &&
         (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
     const bool requireTerrainForDraw = requireTerrainForSeamStats;
+    // P0 CRITICAL: Pass displacement mode to ensure distance-based morph is only used
+    // with GPU_HEIGHTMAP_DISPLACE mode. CPU_MESH_BAKE mode requires time-based morph
+    // to avoid phase mismatches between adjacent tiles (different spawn distances).
     auto drawStats = renderFrame_->DrawTiles(
         sceneSnapshot_.leafSet, tiles_, mvp, sceneSnapshot_.cameraPos,
         sceneSnapshot_.currentTime, cameraSpeedKmPerSec_,
@@ -2407,7 +2410,8 @@ void GlobeEngine::Render() {
         config_.useTexture2DArray,  // Faz 2B: Texture array support
         config_.useDistanceBasedTerrainMorph,  // P2: Distance-based morph
         config_.terrainMorphDistanceRangeKm,   // P2: Morph band width
-        config_.enableTerrainMorphTimeFallback // P2: Time fallback on invalid distance
+        config_.enableTerrainMorphTimeFallback, // P2: Time fallback on invalid distance
+        config_.terrainDisplacementMode        // P0: Displacement mode for morph compatibility
     );
     const auto& renderStats = tileRenderer_->GetStats();
 
