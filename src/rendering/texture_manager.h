@@ -12,7 +12,7 @@
 
 namespace globe {
 
-// Callback for tile eviction notification (used by HeightmapManager)
+// Callback for tile eviction notification (used by cache/resource observers)
 using TileEvictionCallback = std::function<void(const TileKey&)>;
 
 // Manages GPU textures with LRU eviction and pin/unpin support (GE-style)
@@ -45,7 +45,7 @@ public:
     // Respects pinned tiles - they won't be evicted
     void EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int maxTiles);
     
-    // Set callback for tile eviction notification (e.g., to release heightmap textures)
+    // Set callback for tile eviction notification.
     void SetEvictionCallback(TileEvictionCallback callback) { evictionCallback_ = std::move(callback); }
     
     // Create loading placeholder texture
@@ -123,7 +123,7 @@ private:
     int pinnedCount_ = 0;
     int lastEvictedCount_ = 0;
     
-    // Eviction callback (for heightmap cleanup)
+    // Eviction callback for external resource cleanup hooks.
     TileEvictionCallback evictionCallback_;
     
     // Faz 2A: PBO async upload

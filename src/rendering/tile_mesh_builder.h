@@ -31,6 +31,10 @@ public:
         uint8_t stitchMask = 0;
         uint8_t skirtMask = 0;
         uint8_t demEffectiveLevel = 0;
+        uint8_t requestedDemTargetLevel = 0;
+        uint32_t requestedDemEdgeLevelPack = 0;
+        uint8_t requestedStitchMask = 0;
+        uint8_t requestedSkirtMask = 0;
         uint32_t surfaceVertexCount = 0;   // Surface vertices only (skirt excluded), metadata for renderability checks
         // RTE/RTC origin for jitter-free rendering
         glm::vec3 originEcefHi{0.0f};     // High 16 bits of tile origin
@@ -42,7 +46,6 @@ public:
     static BuildResult Build(
         const TileKey& key,
         const Extent& extent,
-        uint8_t edgeMask,
         uint8_t stitchMask,
         uint8_t skirtMask,
         int demTargetLevel,

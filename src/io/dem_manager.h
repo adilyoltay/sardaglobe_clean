@@ -178,7 +178,7 @@ public:
     // outLevel is set to the resolved level on success.
     bool GetBestAvailableLevel(const TileKey& key, int& outLevel) const;
     
-    // Get raw DEM grid data for heightmap upload (returns false if not cached)
+    // Get raw DEM grid data for mesh sampling (returns false if not cached)
     bool GetGridData(const TileKey& key, DemGridData& outData) const;
 
     // Insert/replace DEM grid data in cache (used by tests and optional warm-start paths).

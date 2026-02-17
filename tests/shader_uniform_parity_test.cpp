@@ -1,11 +1,10 @@
-// Shader Uniform Parity Test
-// Validates that Tile and RockMesh render paths use consistent shader uniforms
+// Shader uniform parity test (CPU terrain authority).
 
 #include "../src/rendering/shader_manager.h"
-#include <algorithm>  // P1: std::remove_if, std::transform
-#include <cctype>     // P1: std::tolower, std::isspace
-#include <iostream>
+#include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <iostream>
 
 using namespace globe;
 
@@ -23,253 +22,101 @@ void Report(const char* test) {
     std::cerr << "PASSED: " << test << '\n';
 }
 
+std::string NormalizeLowerNoSpace(const char* src) {
+    std::string out(src ? src : "");
+    out.erase(std::remove_if(out.begin(), out.end(),
+                             [](unsigned char c) { return std::isspace(c); }),
+              out.end());
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
-    
-    // Test 1: Vertex shader contains RTE uniforms
+
     {
         const char* vertexShader = shaders::TILE_VERTEX;
-        
         bool hasOriginHi = std::strstr(vertexShader, "uTileOriginECEFHi") != nullptr;
         bool hasOriginLo = std::strstr(vertexShader, "uTileOriginECEFLo") != nullptr;
         bool hasUseRte = std::strstr(vertexShader, "uUseRTE") != nullptr;
-        bool hasRelativePos = std::strstr(vertexShader, "relative") != nullptr ||
-                              std::strstr(vertexShader, "worldPos") != nullptr;
-        
+        bool hasWorldPos = std::strstr(vertexShader, "worldPos") != nullptr;
         if (!Expect(hasOriginHi, "Vertex shader should contain uTileOriginECEFHi")) failures++;
         if (!Expect(hasOriginLo, "Vertex shader should contain uTileOriginECEFLo")) failures++;
         if (!Expect(hasUseRte, "Vertex shader should contain uUseRTE")) failures++;
-        if (!Expect(hasRelativePos, "Vertex shader should handle relative positions")) failures++;
-        
-        if (hasOriginHi && hasOriginLo && hasUseRte && hasRelativePos) {
-            Report("TileShaderHasRTEUniforms");
+        if (!Expect(hasWorldPos, "Vertex shader should compute worldPos")) failures++;
+        if (hasOriginHi && hasOriginLo && hasUseRte && hasWorldPos) {
+            Report("TileShaderHasRteUniforms");
         }
     }
-    
-    // Test 2: Vertex shader contains required core uniforms
+
     {
         const char* vertexShader = shaders::TILE_VERTEX;
-        
         bool hasMvp = std::strstr(vertexShader, "uMVP") != nullptr;
-        bool hasHasHeightmap = std::strstr(vertexShader, "uHasHeightmap") != nullptr;
         bool hasTerrainMorph = std::strstr(vertexShader, "uTerrainMorph") != nullptr;
         bool hasHeightmap = std::strstr(vertexShader, "uHeightmap") != nullptr;
+        bool hasHasHeightmap = std::strstr(vertexShader, "uHasHeightmap") != nullptr;
+        bool hasHeightMin = std::strstr(vertexShader, "uHeightMin") != nullptr;
+        bool hasHeightMax = std::strstr(vertexShader, "uHeightMax") != nullptr;
         bool hasHeightScale = std::strstr(vertexShader, "uHeightScale") != nullptr;
-        
-        if (!Expect(hasMvp, "Shader should contain uMVP")) failures++;
-        if (!Expect(hasHasHeightmap, "Shader should contain uHasHeightmap")) failures++;
-        if (!Expect(hasTerrainMorph, "Shader should contain uTerrainMorph")) failures++;
-        if (!Expect(hasHeightmap, "Shader should contain uHeightmap")) failures++;
-        if (!Expect(hasHeightScale, "Shader should contain uHeightScale")) failures++;
-        
-        if (hasMvp && hasHasHeightmap && hasTerrainMorph && hasHeightmap && hasHeightScale) {
-            Report("TileShaderHasCoreUniforms");
+        bool hasHeightUv = std::strstr(vertexShader, "uHeightmapUvTransform") != nullptr;
+        if (!Expect(hasMvp, "Vertex shader should contain uMVP")) failures++;
+        if (!Expect(hasTerrainMorph, "Vertex shader should contain uTerrainMorph")) failures++;
+        if (!Expect(!hasHeightmap, "Vertex shader must not contain uHeightmap")) failures++;
+        if (!Expect(!hasHasHeightmap, "Vertex shader must not contain uHasHeightmap")) failures++;
+        if (!Expect(!hasHeightMin, "Vertex shader must not contain uHeightMin")) failures++;
+        if (!Expect(!hasHeightMax, "Vertex shader must not contain uHeightMax")) failures++;
+        if (!Expect(!hasHeightScale, "Vertex shader must not contain uHeightScale")) failures++;
+        if (!Expect(!hasHeightUv, "Vertex shader must not contain uHeightmapUvTransform")) failures++;
+        if (hasMvp && hasTerrainMorph && !hasHeightmap && !hasHasHeightmap &&
+            !hasHeightMin && !hasHeightMax && !hasHeightScale && !hasHeightUv) {
+            Report("CpuTerrainUniformContract");
         }
     }
-    
-    // Test 3: Heightmap UV transform uniform
+
     {
         const char* vertexShader = shaders::TILE_VERTEX;
-        
-        bool hasHeightmapUvTransform = std::strstr(vertexShader, "uHeightmapUvTransform") != nullptr;
-        bool hasCornerLods = std::strstr(vertexShader, "uCornerLods") != nullptr;
-        
-        if (!Expect(hasHeightmapUvTransform, "Vertex shader should contain uHeightmapUvTransform")) failures++;
-        if (!Expect(hasCornerLods, "Vertex shader should contain uCornerLods")) failures++;
-        
-        if (hasHeightmapUvTransform && hasCornerLods) {
-            Report("HeightmapUniformsPresent");
-        }
-    }
-    
-    // Test 4: Log depth uniforms
-    {
-        const char* vertexShader = shaders::TILE_VERTEX;
-        
         bool hasUseLogDepth = std::strstr(vertexShader, "uUseLogDepth") != nullptr;
         bool hasLogDepthFar = std::strstr(vertexShader, "uLogDepthFar") != nullptr;
-        
         if (!Expect(hasUseLogDepth, "Vertex shader should contain uUseLogDepth")) failures++;
         if (!Expect(hasLogDepthFar, "Vertex shader should contain uLogDepthFar")) failures++;
-        
         if (hasUseLogDepth && hasLogDepthFar) {
             Report("LogDepthUniformsPresent");
         }
     }
-    
-    // Test 5: RTE uniform naming consistency
+
     {
-        const char* vertexShader = shaders::TILE_VERTEX;
-        
-        bool hiConsistent = std::strstr(vertexShader, "uTileOriginECEFHi") != nullptr;
-        bool loConsistent = std::strstr(vertexShader, "uTileOriginECEFLo") != nullptr;
-        bool useRteConsistent = std::strstr(vertexShader, "uUseRTE") != nullptr;
-        
-        // These should match the names used in:
-        // - ShaderManager::CacheUniformLocations
-        // - TileRenderer::ApplyPerTileUniforms  
-        // - RockMeshManager::Render
-        
-        if (!Expect(hiConsistent, "uTileOriginECEFHi naming should be consistent")) failures++;
-        if (!Expect(loConsistent, "uTileOriginECEFLo naming should be consistent")) failures++;
-        if (!Expect(useRteConsistent, "uUseRTE naming should be consistent")) failures++;
-        
-        if (hiConsistent && loConsistent && useRteConsistent) {
-            Report("RTEUniformNamingConsistency");
-        }
-    }
-    
-    // Test 6: Vertex shader accepts relative position
-    {
-        const char* vertexShader = shaders::TILE_VERTEX;
-        
-        bool hasAPos = std::strstr(vertexShader, "aPos") != nullptr;
-        bool hasWorldPos = std::strstr(vertexShader, "worldPos") != nullptr;
-        bool hasRteCheck = std::strstr(vertexShader, "uUseRTE") != nullptr;
-        
-        if (!Expect(hasAPos, "Vertex shader should use aPos")) failures++;
-        if (!Expect(hasWorldPos, "Vertex shader should compute worldPos")) failures++;
-        if (!Expect(hasRteCheck, "Vertex shader should check uUseRTE")) failures++;
-        
-        if (hasAPos && hasWorldPos && hasRteCheck) {
-            Report("VertexShaderAcceptsRelativePosition");
-        }
-    }
-    
-    // Test 7: RTE morph must use worldPos in heightmap displacement path
-    // P0 CRITICAL: Prevents km-level terrain artifacts from world/local space mixing
-    {
-        const char* vertexShader = shaders::TILE_VERTEX;
-        
-        // Normalize: remove whitespace for reliable pattern matching
-        std::string normalizedVert(vertexShader);
-        normalizedVert.erase(
-            std::remove_if(normalizedVert.begin(), normalizedVert.end(),
-                [](unsigned char c) { return std::isspace(c); }),
-            normalizedVert.end());
-        std::transform(normalizedVert.begin(), normalizedVert.end(), normalizedVert.begin(), ::tolower);
-
-        // Check for required worldPos-based pattern (safe)
-        bool hasExpectedWorldPattern = 
-            normalizedVert.find("pos=worldpos+radialdir*(heightkm*uterrainmorph)") != std::string::npos;
-        
-        // Check for forbidden aPos-based pattern (causes artifacts)
-        bool hasForbiddenLocalPattern = 
-            normalizedVert.find("pos=apos+radialdir") != std::string::npos;
-
-        if (!Expect(hasExpectedWorldPattern, "Heightmap morph must displace from worldPos")) failures++;
-        if (!Expect(!hasForbiddenLocalPattern, "Heightmap morph must NOT displace from aPos (P0 safety)")) failures++;
-
-        if (hasExpectedWorldPattern && !hasForbiddenLocalPattern) {
-            Report("RteMorphUsesWorldPosForHeightmap");
-        }
-    }
-
-    // Test 8: RTE morph must use worldPos in CPU bake morph path
-    // P0 CRITICAL: Prevents km-level terrain artifacts from world/local space mixing
-    {
-        const char* vertexShader = shaders::TILE_VERTEX;
-        
-        // Normalize: remove whitespace for reliable pattern matching
-        std::string normalizedVert(vertexShader);
-        normalizedVert.erase(
-            std::remove_if(normalizedVert.begin(), normalizedVert.end(),
-                [](unsigned char c) { return std::isspace(c); }),
-            normalizedVert.end());
-        std::transform(normalizedVert.begin(), normalizedVert.end(), normalizedVert.begin(), ::tolower);
-
-        // Check for required worldPos-based pattern (safe)
-        bool hasExpectedWorldPattern = 
-            normalizedVert.find("pos=worldpos-radialdir*(aheightkm*(1.0-morph))") != std::string::npos;
-        
-        // Check for forbidden aPos-based pattern (causes artifacts)
-        bool hasForbiddenLocalPattern = 
-            normalizedVert.find("pos=apos-radialdir") != std::string::npos;
-
-        if (!Expect(hasExpectedWorldPattern, "CPU bake morph must adjust from worldPos")) failures++;
-        if (!Expect(!hasForbiddenLocalPattern, "CPU bake morph must NOT adjust from aPos (P0 safety)")) failures++;
-
-        if (hasExpectedWorldPattern && !hasForbiddenLocalPattern) {
+        std::string shader = NormalizeLowerNoSpace(shaders::TILE_VERTEX);
+        bool hasCpuWorldPattern =
+            shader.find("pos=worldpos-radialdir*(aheightkm*(1.0-morph))") != std::string::npos;
+        bool hasForbiddenApos =
+            shader.find("pos=apos+radialdir") != std::string::npos ||
+            shader.find("pos=apos-radialdir") != std::string::npos;
+        if (!Expect(hasCpuWorldPattern, "CPU morph must adjust from worldPos")) failures++;
+        if (!Expect(!hasForbiddenApos, "Shader must not contain aPos-based radial displacement")) failures++;
+        if (hasCpuWorldPattern && !hasForbiddenApos) {
             Report("RteMorphUsesWorldPosForCpuBake");
         }
     }
-    
-    // Test 8b: P0 SAFETY - No forbidden aPos-based radial morph patterns anywhere
-    {
-        const char* vertexShader = shaders::TILE_VERTEX;
-        
-        // Normalize shader source
-        std::string normalizedVert(vertexShader);
-        normalizedVert.erase(
-            std::remove_if(normalizedVert.begin(), normalizedVert.end(),
-                [](unsigned char c) { return std::isspace(c); }),
-            normalizedVert.end());
-        std::transform(normalizedVert.begin(), normalizedVert.end(), normalizedVert.begin(), ::tolower);
-        
-        // Any direct aPos-based radial displacement is forbidden
-        bool hasForbiddenAposRadial = 
-            normalizedVert.find("pos=apos+radialdir") != std::string::npos ||
-            normalizedVert.find("pos=apos-radialdir") != std::string::npos;
-        
-        // Must have at least one worldPos-based displacement
-        bool hasWorldPosDisplacement =
-            normalizedVert.find("pos=worldpos+radialdir") != std::string::npos ||
-            normalizedVert.find("pos=worldpos-radialdir") != std::string::npos;
-        
-        if (!Expect(!hasForbiddenAposRadial, "TILE_VERTEX must not contain aPos-based radial displacement (P0)")) failures++;
-        if (!Expect(hasWorldPosDisplacement, "TILE_VERTEX must contain worldPos-based displacement (P0)")) failures++;
-        
-        if (!hasForbiddenAposRadial && hasWorldPosDisplacement) {
-            Report("NoForbiddenRteAposMorphPattern");
-        }
-    }
 
-    // Test 9: Fragment shader contains basic uniforms
     {
         const char* fragmentShader = shaders::TILE_FRAGMENT;
-        
         bool hasTexture = std::strstr(fragmentShader, "uTexture") != nullptr;
         bool hasFade = std::strstr(fragmentShader, "uFade") != nullptr;
-        
         if (!Expect(hasTexture, "Fragment shader should contain uTexture")) failures++;
         if (!Expect(hasFade, "Fragment shader should contain uFade")) failures++;
-        
         if (hasTexture && hasFade) {
             Report("FragmentShaderHasBasicUniforms");
         }
     }
-    
-    // Test 10: RockMesh uses compatible uniforms
-    {
-        const char* vertexShader = shaders::TILE_VERTEX;
-        const char* fragmentShader = shaders::TILE_FRAGMENT;
-        
-        // RockMeshManager queries these RTE uniforms (must match shader):
-        bool hasOriginHi = std::strstr(vertexShader, "uTileOriginECEFHi") != nullptr;
-        bool hasOriginLo = std::strstr(vertexShader, "uTileOriginECEFLo") != nullptr;
-        bool hasUseRte = std::strstr(vertexShader, "uUseRTE") != nullptr;
-        
-        // uFade is defined in fragment shader for LOD blending
-        bool hasFade = std::strstr(fragmentShader, "uFade") != nullptr;
-        
-        // RTE uniforms are shared between Tile and RockMesh
-        bool sharedRTE = hasOriginHi && hasOriginLo && hasUseRte;
-        
-        if (!Expect(sharedRTE, "RockMesh should share RTE uniforms with Tile")) failures++;
-        if (!Expect(hasFade, "Fragment shader should contain uFade for alpha blending")) failures++;
-        
-        if (sharedRTE && hasFade) {
-            Report("RockMeshShaderUniformCompatibility");
-        }
-    }
-    
+
     if (failures > 0) {
         std::cerr << "\n" << failures << " test(s) FAILED\n";
         return 1;
     }
-    
-    std::cerr << "\nAll Shader Uniform Parity tests PASSED\n";
+
+    std::cerr << "\nAll shader uniform parity tests PASSED\n";
     return 0;
 }

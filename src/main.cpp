@@ -655,6 +655,15 @@ int main(int argc, char** argv) {
             runVisualTest = true;
         } else if (std::strcmp(argv[i], "--smoke") == 0) {
             runSmokeTest = true;
+        } else if (std::strcmp(argv[i], "--smoke-scene") == 0 && i + 1 < argc) {
+            const char* scene = argv[++i];
+            if (std::strcmp(scene, "default") != 0 &&
+                std::strcmp(scene, "aegean") != 0) {
+                std::cerr << "Error: Invalid smoke scene '" << scene << "'\n"
+                          << "Valid scenes: default, aegean\n";
+                return 1;
+            }
+            config.smokeScene = scene;
         } else if (std::strcmp(argv[i], "--demDebug") == 0) {
             config.demDebug = true;
         } else if (std::strcmp(argv[i], "--profile-pan") == 0) {
@@ -742,6 +751,7 @@ int main(int argc, char** argv) {
                       << "  --headless        Create hidden window (useful for automated tests)\n"
                       << "  --test            Run visual LOD test and exit\n"
                       << "  --smoke           Run smoke test (zoom in/out + terrain) and exit\n"
+                      << "  --smoke-scene S   Smoke scene preset: default | aegean (default: default)\n"
                       << "  --profile-pan     Run zoom/pan profiler and print per-frame CSV\n"
                       << "  --precision-report  CPU-only precision baseline (Track A: #8)\n"
                       << "  --quality MODE    Render quality: low | medium | high | ultra (default: medium)\n"

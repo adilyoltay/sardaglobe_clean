@@ -26,6 +26,7 @@ public:
         int leafNoMesh = 0;         // Leaves without mesh
         int leafNoTexture = 0;      // Leaves with mesh but no texture
         int leafNoTerrain = 0;      // Leaves with mesh+texture but missing required terrain data
+        int renderFallbackDivergenceLeaves = 0;  // Render leaf set still needed fallback due missing terrain
         int missing = 0;            // True gaps (no ancestor, no mesh)
     };
     

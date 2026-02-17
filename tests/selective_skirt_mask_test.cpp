@@ -53,7 +53,6 @@ int main() {
     const uint8_t eastOnly = Tile::EDGE_EAST;
     auto eastResult = TileMeshBuilder::Build(
         key, extent,
-        0,                 // edgeMask
         0,                 // stitchMask
         eastOnly,          // skirtMask
         key.level,         // dem target
@@ -75,7 +74,6 @@ int main() {
                                                   Tile::EDGE_SOUTH | Tile::EDGE_WEST);
     auto fullResult = TileMeshBuilder::Build(
         key, extent,
-        0,
         0,
         fullMask,
         key.level,

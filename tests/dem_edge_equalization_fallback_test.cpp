@@ -103,7 +103,6 @@ int main() {
         child,
         extent,
         0,
-        0,
         Tile::EDGE_EAST,
         child.level,
         demEdgeLevelPack,

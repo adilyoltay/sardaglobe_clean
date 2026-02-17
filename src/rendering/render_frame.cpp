@@ -265,12 +265,21 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             ++stats.renderableLeaves;
         } else {
             // Leaf not renderable - categorize and find fallback
+            if (requireTerrainForLeaves && !hasRequiredTerrain) {
+                ++stats.leafNoTerrain;
+                ++stats.renderFallbackDivergenceLeaves;
+                // Terrain-missing leaves must attempt ancestor fallback before being
+                // counted as true gaps. Missing should only track no-fallback cases.
+                if (!addFallbackAncestor(key)) {
+                    ++stats.missing;
+                }
+                continue;
+            }
+
             if (!HasRenderableSurface(tile)) {
                 ++stats.leafNoMesh;
             } else if (!hasRealTexture) {
                 ++stats.leafNoTexture;  // Has mesh but no real texture (or loading placeholder only)
-            } else if (requireTerrainForLeaves && !hasRequiredTerrain) {
-                ++stats.leafNoTerrain;
             }
             
             // GE-Style: Use parent tile until child is ready
@@ -426,10 +435,6 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 leaf.unpopTarget,
                 leaf.unpopUvTransform,
                 leaf.alpha,
-                0,
-                0.0f,
-                0.0f,
-                glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
                 terrainMorph
             );
         } else {

@@ -1055,7 +1055,7 @@ void TextureManager::EvictIfNeeded(std::unordered_map<TileKey, Tile>& tiles, int
                         Tile& tile = it->second;
                         TileStateMachine::Advance(tile, TileStateMachine::Event::Evict, glfwGetTime());
 
-                        // Notify eviction callback (e.g., for heightmap cleanup)
+                        // Notify eviction callback for external resource cleanup hooks.
                         if (evictionCallback_) {
                             evictionCallback_(key);
                         }

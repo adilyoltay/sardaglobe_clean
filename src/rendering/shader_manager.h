@@ -13,8 +13,7 @@ enum class ShaderFlags : uint32_t {
     DebugSeams      = 1 << 1,  // Highlight tile seams
     NoLighting      = 1 << 2,  // Disable lighting (flat shading)
     DebugLOD        = 1 << 3,  // Color-code by LOD level
-    Terrain         = 1 << 4,  // GPU terrain displacement
-    UseTextureArray = 1 << 5,  // Faz 2B: Use GL_TEXTURE_2D_ARRAY instead of atlas/individual textures
+    UseTextureArray = 1 << 4,  // Faz 2B: Use GL_TEXTURE_2D_ARRAY instead of atlas/individual textures
 };
 
 inline ShaderFlags operator|(ShaderFlags a, ShaderFlags b) {
@@ -62,13 +61,6 @@ public:
     
     int GetUseTexture2DLocation() const { return useTexture2DLoc_; }
     
-    // Terrain uniforms
-    int GetHeightmapLocation() const { return heightmapLoc_; }
-    int GetHeightScaleLocation() const { return heightScaleLoc_; }
-    int GetHeightMinLocation() const { return heightMinLoc_; }
-    int GetHeightMaxLocation() const { return heightMaxLoc_; }
-    int GetHasHeightmapLocation() const { return hasHeightmapLoc_; }
-    int GetHeightmapUvTransformLocation() const { return heightmapUvTransformLoc_; }
     int GetTerrainMorphLocation() const { return terrainMorphLoc_; }
     
     // RTE uniforms
@@ -109,13 +101,6 @@ private:
     int useLogDepthLoc_ = -1;
     int logDepthFarLoc_ = -1;
     
-    // Terrain uniforms
-    int heightmapLoc_ = -1;
-    int heightScaleLoc_ = -1;
-    int heightMinLoc_ = -1;
-    int heightMaxLoc_ = -1;
-    int hasHeightmapLoc_ = -1;
-    int heightmapUvTransformLoc_ = -1;
     int terrainMorphLoc_ = -1;
     
     // RTE uniforms
@@ -145,12 +130,6 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in float aHeightKm;
 
 uniform mat4 uMVP;
-uniform sampler2D uHeightmap;
-uniform float uHeightScale;
-uniform float uHeightMin;
-uniform float uHeightMax;
-uniform int uHasHeightmap;
-uniform vec4 uHeightmapUvTransform;  // Heightmap UV: uv * scale.xy + offset.zw
 uniform vec4 uCornerLods;  // NW, NE, SE, SW corner LODs for bilinear interpolation
 uniform float uTerrainMorph;  // 0=flat, 1=full displacement
 uniform int uUseLogDepth;
@@ -176,56 +155,17 @@ void main() {
     }
     
     vec3 pos = worldPos;
-    vec3 normal = aNormal;
+    vec3 normal = normalize(aNormal);
     vec3 radialDir = normalize(worldPos);
-    
-    if (uHasHeightmap == 1) {
-        // Bilinear LOD interpolation from tile corners.
-        // Top row: NW->NE, bottom row: SW->SE (UV has V-up after mesh V flip).
-        float lodTop = mix(uCornerLods.x, uCornerLods.y, aTexCoord.x);
-        float lodBottom = mix(uCornerLods.w, uCornerLods.z, aTexCoord.x);
-        float lodInterp = clamp(mix(lodBottom, lodTop, aTexCoord.y), 0.0, 6.0);
 
-        vec2 hmUv = aTexCoord * uHeightmapUvTransform.xy + uHeightmapUvTransform.zw;
-        // Sample heightmap (normalized [0,1])
-        float heightNorm = textureLod(uHeightmap, hmUv, lodInterp).r;
-        float heightKm = mix(uHeightMin, uHeightMax, heightNorm);
-        
-        // Displace vertex radially outward from Earth center (world-space)
-        pos = worldPos + radialDir * (heightKm * uTerrainMorph);
-        
-        // Recalculate normal from heightmap gradient (finite difference)
-        float lodScale = exp2(lodInterp);
-        vec2 texelSize = lodScale / vec2(textureSize(uHeightmap, 0));
-        float hL = textureLod(uHeightmap, hmUv - vec2(texelSize.x, 0), lodInterp).r;
-        float hR = textureLod(uHeightmap, hmUv + vec2(texelSize.x, 0), lodInterp).r;
-        float hD = textureLod(uHeightmap, hmUv - vec2(0, texelSize.y), lodInterp).r;
-        float hU = textureLod(uHeightmap, hmUv + vec2(0, texelSize.y), lodInterp).r;
-        
-        // Gradient in tangent space
-        float dHdx = (hR - hL) * (uHeightMax - uHeightMin) * 0.5;
-        float dHdy = (hU - hD) * (uHeightMax - uHeightMin) * 0.5;
-        
-        // Perturb normal based on gradient
-        // Scale factor for normal perturbation (larger = more visible slopes)
-        float normalScale = 50.0;
-        vec3 perturbation = vec3(-dHdx * normalScale * uTerrainMorph, -dHdy * normalScale * uTerrainMorph, 1.0);
-        
-        // Transform perturbation to world space (approximate - assumes radial up)
-        vec3 tangentU = normalize(cross(vec3(0, 0, 1), radialDir));
-        if (length(tangentU) < 0.1) tangentU = normalize(cross(vec3(1, 0, 0), radialDir));
-        vec3 tangentV = cross(radialDir, tangentU);
-        
-        vec3 displacedNormal = normalize(tangentU * perturbation.x + tangentV * perturbation.y + radialDir * perturbation.z);
-        normal = normalize(mix(radialDir, displacedNormal, uTerrainMorph));
-    } else {
-        // CPU mesh bake path: smoothly remove baked elevation during morph start.
-        // aHeightKm is vertex-local DEM height above/below the ellipsoid surface.
-        float morph = clamp(uTerrainMorph, 0.0, 1.0);
-        if (abs(aHeightKm) > 1e-6 && morph < 1.0) {
-            pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));
-            normal = normalize(mix(radialDir, aNormal, morph));
-        }
+    // CPU mesh bake path: smoothly remove baked elevation during morph start.
+    // aHeightKm is vertex-local DEM height above/below the ellipsoid surface.
+    float morph = clamp(uTerrainMorph, 0.0, 1.0);
+    if (abs(aHeightKm) > 1e-6 && morph < 1.0) {
+        pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));
+        normal = normalize(mix(radialDir, aNormal, morph));
+    } else if (morph < 1.0) {
+        normal = normalize(mix(radialDir, aNormal, morph));
     }
     
     gl_Position = uMVP * vec4(pos, 1.0);
@@ -298,11 +238,6 @@ uniform sampler2D uTexture;
 uniform int uUseTexture2D;           // 0=array mode, 1=2D fallback
 uniform float uFade;
 uniform vec4 uCornerLods;
-uniform int uHasHeightmap;
-uniform sampler2D uHeightmap;
-uniform float uHeightScale;
-uniform float uHeightMin;
-uniform float uHeightMax;
 uniform float uTerrainMorph;
 uniform int uUseLogDepth;
 uniform float uLogDepthFar;

@@ -134,7 +134,6 @@ float SanitizeHeightKm(float heightKm, const Config& config) {
 TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     const TileKey& key,
     const Extent& inputExtent,
-    uint8_t edgeMask,
     uint8_t stitchMask,
     uint8_t skirtMask,
     int demTargetLevel,
@@ -148,8 +147,11 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     result.useSharedEBO = useSharedEBO;
     result.stitchMask = stitchMask;
     result.skirtMask = skirtMask;
+    result.requestedDemTargetLevel = static_cast<uint8_t>(std::clamp(demTargetLevel, 0, 255));
+    result.requestedDemEdgeLevelPack = demEdgeLevelPack;
+    result.requestedStitchMask = stitchMask;
+    result.requestedSkirtMask = skirtMask;
     result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(demTargetLevel, 0, 255));
-    (void)edgeMask;  // Edge equalization is now driven by demEdgeLevelPack + blend band.
     
     // Adaptive mesh segments: scale tessellation with tile LOD level.
     // Higher zoom tiles cover less area (less curvature) and DEM grid is small (e.g. 5×5),

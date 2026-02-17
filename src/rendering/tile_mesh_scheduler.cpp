@@ -83,7 +83,6 @@ void TileMeshScheduler::WorkerLoop() {
         TileMeshBuilder::BuildResult result = TileMeshBuilder::Build(
             request.key,
             request.extent,
-            request.edgeMask,
             request.stitchMask,
             request.skirtMask,
             request.demTargetLevel,
@@ -93,6 +92,10 @@ void TileMeshScheduler::WorkerLoop() {
             true
         );
         result.meshRevision = request.meshRevision;
+        result.requestedDemTargetLevel = request.requestedDemTargetLevel;
+        result.requestedDemEdgeLevelPack = request.requestedDemEdgeLevelPack;
+        result.requestedStitchMask = request.requestedStitchMask;
+        result.requestedSkirtMask = request.requestedSkirtMask;
         if (!results_.Push(std::move(result))) {
             return;
         }

@@ -21,11 +21,14 @@ public:
     struct MeshRequest {
         TileKey key;
         Extent extent;
-        uint8_t edgeMask = 0;
         uint8_t stitchMask = 0;
         uint8_t skirtMask = 0;
         int demTargetLevel = -1;
         uint32_t demEdgeLevelPack = 0;
+        uint8_t requestedDemTargetLevel = 0;
+        uint32_t requestedDemEdgeLevelPack = 0;
+        uint8_t requestedStitchMask = 0;
+        uint8_t requestedSkirtMask = 0;
         Priority priority = Priority::Normal;
         double score = 0.0;
         uint32_t meshRevision = 0;

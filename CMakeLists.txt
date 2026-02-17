@@ -1178,3 +1178,58 @@ target_include_directories(render_desired_context_consistency_test PRIVATE
 )
 target_link_libraries(render_desired_context_consistency_test PRIVATE glm::glm)
 add_test(NAME RenderDesiredContextConsistencyTest COMMAND render_desired_context_consistency_test)
+
+# GE Parity stitch/skirt/seam stabilization tests
+add_executable(render_quorum_terrain_consistency_test
+  tests/render_quorum_terrain_consistency_test.cpp
+)
+target_include_directories(render_quorum_terrain_consistency_test PRIVATE
+  src
+)
+target_link_libraries(render_quorum_terrain_consistency_test PRIVATE glm::glm)
+add_test(NAME RenderQuorumTerrainConsistencyTest COMMAND render_quorum_terrain_consistency_test)
+
+add_executable(dem_pending_neighbor_parent_scope_test
+  tests/dem_pending_neighbor_parent_scope_test.cpp
+)
+target_include_directories(dem_pending_neighbor_parent_scope_test PRIVATE
+  src
+)
+target_link_libraries(dem_pending_neighbor_parent_scope_test PRIVATE glm::glm)
+add_test(NAME DemPendingNeighborParentScopeTest COMMAND dem_pending_neighbor_parent_scope_test)
+
+add_executable(seam_feedback_telemetry_only_test
+  tests/seam_feedback_telemetry_only_test.cpp
+)
+target_include_directories(seam_feedback_telemetry_only_test PRIVATE
+  src
+)
+target_link_libraries(seam_feedback_telemetry_only_test PRIVATE glm::glm)
+add_test(NAME SeamFeedbackTelemetryOnlyTest COMMAND seam_feedback_telemetry_only_test)
+
+add_executable(mesh_revision_single_commit_test
+  tests/mesh_revision_single_commit_test.cpp
+)
+target_include_directories(mesh_revision_single_commit_test PRIVATE
+  src
+)
+target_link_libraries(mesh_revision_single_commit_test PRIVATE glm::glm)
+add_test(NAME MeshRevisionSingleCommitTest COMMAND mesh_revision_single_commit_test)
+
+add_executable(cpu_terrain_shader_contract_test
+  tests/cpu_terrain_shader_contract_test.cpp
+)
+target_include_directories(cpu_terrain_shader_contract_test PRIVATE
+  src
+)
+target_link_libraries(cpu_terrain_shader_contract_test PRIVATE glm::glm)
+add_test(NAME CpuTerrainShaderContractTest COMMAND cpu_terrain_shader_contract_test)
+
+add_executable(smoke_report_parser_test
+  tests/smoke_report_parser_test.cpp
+)
+target_include_directories(smoke_report_parser_test PRIVATE
+  src
+)
+target_link_libraries(smoke_report_parser_test PRIVATE glm::glm)
+add_test(NAME SmokeReportParserTest COMMAND smoke_report_parser_test)

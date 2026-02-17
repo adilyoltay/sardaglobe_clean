@@ -44,12 +44,6 @@ public:
     
     // Render a tile with a specific texture (for placeholder)
     void RenderTileWithTexture(const Tile& tile, uint32_t textureId, float terrainMorph = 1.0f);
-    
-    // Render a tile with heightmap for terrain displacement
-    void RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapId, 
-                                  float heightMin, float heightMax,
-                                  const glm::vec4& heightmapUvTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
-                                  float terrainMorph = 1.0f);
 
     // Render child tile with shader-level parent/child crossfade (unpop)
     void RenderTileWithCrossfade(const Tile& tile,
@@ -58,13 +52,9 @@ public:
                                  TextureTarget unpopTarget,
                                  const glm::vec4& texScaleOffsetUnpop,
                                  float unpopBlend,
-                                 uint32_t heightmapId = 0,
-                                 float heightMin = 0.0f,
-                                 float heightMax = 0.0f,
-                                 const glm::vec4& heightmapUvTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
                                  float terrainMorph = 1.0f);
 
-    // Render flat (no-heightmap/no-crossfade) tiles as a single instanced draw.
+    // Render flat (no-crossfade) tiles as a single instanced draw.
     // All instances must share the same textureId and mesh segment count.
     // Faz 2B: Texture array support - if textureArrayId is provided, uses sampler2DArray
     void RenderFlatTilesInstanced(uint32_t textureId,

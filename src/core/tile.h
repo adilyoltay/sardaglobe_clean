@@ -114,7 +114,7 @@ struct Tile {
     // Per-edge seam gap (meters), populated by engine seam scan.
     // Order: North, East, South, West.
     glm::vec4 edgeGapM{0.0f};
-    uint8_t seamGapMask = 0;  // Bits for edges whose seam gap exceeds warning threshold (telemetry -> skirt feedback).
+    uint8_t seamGapMask = 0;  // Bits for edges whose seam gap exceeds warning threshold (telemetry only).
 
     // Mesh-edge height samples (km, already heightScale-adjusted) for seam/cliff measurement.
     // Layout: [North (W->E), East (N->S), South (W->E), West (N->S)], each of length (borderSegments+1).

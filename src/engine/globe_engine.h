@@ -236,6 +236,7 @@ private:
         int leafNoMesh = 0;         // Leaves without mesh
         int leafNoTexture = 0;      // Leaves with mesh but no texture
         int leafNoTerrain = 0;      // Leaves with mesh+texture but missing terrain data (DEM)
+        int renderFallbackDivergenceLeaves = 0;  // Render leaf set still needed fallback (should converge to 0)
         // Render-time child quorum (post-selection): how often we had to collapse children to an ancestor
         // due to missing render prerequisites (prevents mixed-LOD tearing/cliff walls at joins).
         int renderQuorumDowngrades = 0;
@@ -263,8 +264,11 @@ private:
         int demPendingMissingOwnTarget = 0;        // demPending reason: missing target key
         int demPendingMissingEdgeCoherent = 0;     // demPending reason: missing coherent edge key
         int demPendingMissingNeighborParent = 0;   // demPending reason: missing coarser-neighbor parent
+        int demPendingParentOnlyBlocks = 0;        // edgeCoarserMask==0 but neighbor-parent bit set
         int edgePackAtomicRebuilds = 0;            // Atomic edge-pack + availability rebuilds
         int seamLatchResetCount = 0;               // Latch resets after stable structural change
+        int meshRevisionBumpsFrame = 0;            // Tiles bumped once in single-commit stage
+        int meshRevisionDoubleBumpTiles = 0;       // Tiles with >1 revision reason bit in a frame
         int tilesUsingAncestorDem = 0;
         size_t demCoEvictions = 0;
         double seamGapP95M = 0.0;
@@ -320,8 +324,12 @@ private:
     int demPendingMissingOwnTargetFrame_ = 0;
     int demPendingMissingEdgeCoherentFrame_ = 0;
     int demPendingMissingNeighborParentFrame_ = 0;
+    int demPendingParentOnlyBlocksFrame_ = 0;
     int edgePackAtomicRebuildsFrame_ = 0;
     int seamLatchResetCountFrame_ = 0;
+    int renderFallbackDivergenceLeavesFrame_ = 0;
+    int meshRevisionBumpsFrame_ = 0;
+    int meshRevisionDoubleBumpTilesFrame_ = 0;
 
     FrameTimings frameTimings_;
     FrameTimeTracker frameTimeTracker_;

@@ -77,9 +77,8 @@ uint32_t ShaderManager::GetTileProgram(ShaderFlags flags) {
     // RTE path must use worldPos (world-space) for morph, NOT aPos (tile-local).
     // Using aPos directly causes km-level artifacts (spikes/walls) at tile boundaries.
     // 
-    // Required patterns (safe):
-    //   - Heightmap: pos = worldPos + radialDir * (heightKm * uTerrainMorph);
-    //   - CPU bake:  pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));
+    // Required pattern (safe):
+    //   - CPU bake: pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));
     //
     // Forbidden patterns (unsafe):
     //   - pos = aPos + radialDir * ...
@@ -294,13 +293,6 @@ void ShaderManager::CacheUniformLocations(uint32_t program) {
     useLogDepthLoc_ = glGetUniformLocation(program, "uUseLogDepth");
     logDepthFarLoc_ = glGetUniformLocation(program, "uLogDepthFar");
     
-    // Terrain uniforms
-    heightmapLoc_ = glGetUniformLocation(program, "uHeightmap");
-    heightScaleLoc_ = glGetUniformLocation(program, "uHeightScale");
-    heightMinLoc_ = glGetUniformLocation(program, "uHeightMin");
-    heightMaxLoc_ = glGetUniformLocation(program, "uHeightMax");
-    hasHeightmapLoc_ = glGetUniformLocation(program, "uHasHeightmap");
-    heightmapUvTransformLoc_ = glGetUniformLocation(program, "uHeightmapUvTransform");
     terrainMorphLoc_ = glGetUniformLocation(program, "uTerrainMorph");
     
     // RTE uniforms

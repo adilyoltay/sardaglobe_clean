@@ -72,7 +72,6 @@ int main() {
         extent,
         0,
         0,
-        0,
         key.level,
         0,
         &demManager,

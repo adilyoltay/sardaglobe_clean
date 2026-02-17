@@ -566,8 +566,12 @@ void GlobeEngine::Update(double dt, double currentTime) {
     demPendingMissingOwnTargetFrame_ = 0;
     demPendingMissingEdgeCoherentFrame_ = 0;
     demPendingMissingNeighborParentFrame_ = 0;
+    demPendingParentOnlyBlocksFrame_ = 0;
     edgePackAtomicRebuildsFrame_ = 0;
     seamLatchResetCountFrame_ = 0;
+    renderFallbackDivergenceLeavesFrame_ = 0;
+    meshRevisionBumpsFrame_ = 0;
+    meshRevisionDoubleBumpTilesFrame_ = 0;
 
     // Update flight controller (handles momentum, animations)
     flightController_->Update(dt, currentTime);
@@ -909,10 +913,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
     if (anyBlocked) {
         for (int pass = 0; pass < kMaxQuorumPasses; ++pass) {
             // Parents to collapse this pass (standard quadtree quorum).
-            // Collapse only when a sibling quad has multiple blocked children;
-            // single-child misses are handled by DrawTiles via per-tile fallback.
-            // The terrainExpected guard in classifyRenderBlockReason prevents
-            // over-collapse for regions with no DEM coverage.
+            // Reason-aware policy:
+            // - Hard blocks (NoTile/NoMesh/NoTerrain): collapse even on partial sibling presence.
+            // - Texture-only blocks: require full sibling set and >=2 blocked textures.
             std::unordered_set<TileKey> candidateParents;
             candidateParents.reserve(effectiveLeafSet.size());
             for (const TileKey& leaf : effectiveLeafSet) {
@@ -928,23 +931,43 @@ void GlobeEngine::Update(double dt, double currentTime) {
             collapseList.reserve(candidateParents.size());
             for (const TileKey& parent : candidateParents) {
                 auto children = parent.Children();
-                bool fullSiblingSet = true;
-                bool anyBlocked = false;
+                int presentCount = 0;
                 int blockedCount = 0;
+                int blockedTerrainCount = 0;
+                int blockedNonTerrainHardCount = 0;
+                int blockedTextureCount = 0;
+                bool hasHardBlock = false;
                 for (const TileKey& child : children) {
                     if (effectiveLeafSet.count(child) == 0) {
-                        fullSiblingSet = false;
-                        break;
+                        continue;
                     }
-                    if (classifyRenderBlockReason(child) != RenderBlockReason::None) {
-                        anyBlocked = true;
+                    ++presentCount;
+                    RenderBlockReason reason = classifyRenderBlockReason(child);
+                    if (reason != RenderBlockReason::None) {
                         ++blockedCount;
+                        if (reason == RenderBlockReason::NoTexture) {
+                            ++blockedTextureCount;
+                        } else if (reason == RenderBlockReason::NoTerrain) {
+                            ++blockedTerrainCount;
+                            hasHardBlock = true;
+                        } else {
+                            ++blockedNonTerrainHardCount;
+                            hasHardBlock = true;
+                        }
                     }
                 }
-                // Avoid over-collapse when only one child is temporarily blocked.
-                // In that case, keep other crisp children visible and let
-                // DrawTiles fill only the missing child via ancestor fallback.
-                if (fullSiblingSet && anyBlocked && blockedCount >= 2) {
+                const bool fullSiblingSet = (presentCount == 4);
+                // Hard-block policy (stability guard):
+                // - NoTile/NoMesh: collapse on first hard block.
+                // - NoTerrain: require full sibling set to avoid global coarse collapse
+                //   while DEM is still converging.
+                const bool shouldCollapseNonTerrainHard = blockedNonTerrainHardCount >= 1;
+                const bool shouldCollapseTerrainHard = fullSiblingSet && blockedTerrainCount >= 1;
+                const bool shouldCollapseHard = hasHardBlock &&
+                    (shouldCollapseNonTerrainHard || shouldCollapseTerrainHard);
+                const bool shouldCollapseTexture = !hasHardBlock && fullSiblingSet && blockedTextureCount >= 2;
+                const bool shouldCollapse = shouldCollapseHard || shouldCollapseTexture;
+                if (shouldCollapse) {
                     collapseList.push_back(parent);
                 }
             }
@@ -956,6 +979,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 auto children = parent.Children();
                 int removed = 0;
                 for (const TileKey& child : children) {
+                    auto leafIt = effectiveLeafSet.find(child);
+                    if (leafIt == effectiveLeafSet.end()) {
+                        continue;
+                    }
                     RenderBlockReason reason = classifyRenderBlockReason(child);
                     if (reason == RenderBlockReason::NoTerrain) {
                         ++renderQuorumNoTerrain_;
@@ -964,7 +991,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     } else if (reason == RenderBlockReason::NoMesh || reason == RenderBlockReason::NoTile) {
                         ++renderQuorumNoMesh_;
                     }
-                    removed += (effectiveLeafSet.erase(child) > 0) ? 1 : 0;
+                    effectiveLeafSet.erase(leafIt);
+                    ++removed;
                 }
                 effectiveLeafSet.insert(parent);
                 if (removed > 0) {
@@ -1341,6 +1369,26 @@ void GlobeEngine::Update(double dt, double currentTime) {
     const std::unordered_set<TileKey>& renderLeafSetForMasks = renderLeafSet_;
     const std::unordered_set<TileKey>& desiredLeafSetForMasks = desiredLeafSet;
 
+    enum RevisionReason : uint8_t {
+        REV_TOPOLOGY = 1 << 0,
+        REV_DEM_PENDING_CONVERGENCE = 1 << 1,
+        REV_DEM_TARGET_CONVERGENCE = 1 << 2,
+        REV_SEGMENT_MISMATCH = 1 << 3,
+        REV_EDGE_PACK_CHANGED = 1 << 4,
+        REV_EDGE_AVAILABILITY = 1 << 5,
+    };
+    std::unordered_map<TileKey, uint8_t> revisionReasons;
+    revisionReasons.reserve(renderLeafSetForMasks.size() * 2);
+    auto markRevisionReason = [&](const TileKey& key, uint8_t reasonMask) {
+        if (reasonMask == 0) {
+            return;
+        }
+        auto [it, inserted] = revisionReasons.emplace(key, reasonMask);
+        if (!inserted) {
+            it->second = static_cast<uint8_t>(it->second | reasonMask);
+        }
+    };
+
     // Reset corner LOD uniforms only for tiles in the active leaf sets (not all tiles).
     // Previous approach iterated all tiles_ which is O(1400+) at zoom 8; this is O(leaves).
     auto resetCornerLods = [&](const TileKey& key) {
@@ -1408,7 +1456,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         uint8_t newSkirtMask = 0;
         // Per-edge relative LOD delta (tile level - neighbor cover level) used for uCornerLods.
         // Unlike binary edge masks, this preserves >1 level differences during aggressive
-        // render-time fallback, enabling smoother heightmap textureLod interpolation.
+        // render-time fallback, enabling smoother mesh/refinement transitions.
         float edgeCoarserDelta[4] = {0.0f, 0.0f, 0.0f, 0.0f};  // N,E,S,W
         if (key.level > 0) {  // Level 0 has no coarser neighbors
             // Check 4 cardinal directions: N(0,-1), E(1,0), S(0,1), W(-1,0)
@@ -1607,47 +1655,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             }
         }
 
-        // FIX A: Seam→skirt feedback with hysteresis (latch).
-        //
-        // Problem: without latch, seam feedback oscillates every frame:
-        //   Frame N: gap detected → skirt added → mesh rebuild
-        //   Frame N+1: skirt hides gap → seamGapMask=0 → skirt removed → mesh rebuild
-        //   Frame N+2: gap reappears → ... (visible as tile "vibration")
-        //
-        // Solution: once seamGapMask triggers a skirt on an edge, latch it ON.
-        // The latch only resets when a *structural* change occurs (DEM level change,
-        // edge coarser mask change), not when the seam measurement itself clears.
-        if (config_.selectiveSkirts) {
-            // Accumulate new seam gaps into the latch (never shrink from seam feedback alone).
-            if (tile.seamGapMask != 0) {
-                // For delta-LOD stitched edges, only latch if gap is significant (>= 12m).
-                uint8_t seamForceMask = tile.seamGapMask;
-                if (config_.edgeStitching) {
-                    constexpr float kStitchedEdgeForceSkirtGapM = 12.0f;
-                    const uint8_t deltaLodMask = static_cast<uint8_t>(newEdgeCoarserMask | newEdgeFinerMask);
-
-                    auto edgeGapForBit = [&](uint8_t edgeBit) -> float {
-                        if (edgeBit == Tile::EDGE_NORTH) return tile.edgeGapM.x;
-                        if (edgeBit == Tile::EDGE_EAST) return tile.edgeGapM.y;
-                        if (edgeBit == Tile::EDGE_SOUTH) return tile.edgeGapM.z;
-                        return tile.edgeGapM.w;
-                    };
-
-                    const uint8_t edgeBits[4] = {
-                        Tile::EDGE_NORTH, Tile::EDGE_EAST, Tile::EDGE_SOUTH, Tile::EDGE_WEST
-                    };
-                    for (uint8_t edgeBit : edgeBits) {
-                        if ((seamForceMask & edgeBit) == 0) continue;
-                        if ((deltaLodMask & edgeBit) == 0) continue;
-                        if (edgeGapForBit(edgeBit) < kStitchedEdgeForceSkirtGapM) {
-                            seamForceMask = static_cast<uint8_t>(seamForceMask & ~edgeBit);
-                        }
-                    }
-                }
-                tile.latchedSeamSkirtMask |= seamForceMask;
-            }
-            newSkirtMask |= tile.latchedSeamSkirtMask;
-        }
+        // seamGapMask is telemetry-only. Skirt decisions are topology/DEM-state driven.
 
         // Stitch only for delta=1; delta>1 uses skirt (safety fallback)
         static const uint8_t kEdgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
@@ -1666,29 +1674,29 @@ void GlobeEngine::Update(double dt, double currentTime) {
 
         tile.cornerLods = CornerLodsFromEdgeDeltas(edgeCoarserDelta[0], edgeCoarserDelta[1],
                                                    edgeCoarserDelta[2], edgeCoarserDelta[3]);
-        bool revisionChanged = false;
+        uint8_t localRevisionReasons = 0;
         // FIX A: Track structural changes that should reset the seam-skirt latch.
         bool structuralChange = false;
         if (newEdgeCoarserMask != tile.edgeCoarserMask) {
             tile.edgeCoarserMask = newEdgeCoarserMask;
             if (tile.edgeCoarserMask != tile.prevEdgeCoarserMask) {
-                revisionChanged = true;
+                localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_TOPOLOGY);
                 structuralChange = true;
             }
         }
         if (tile.stitchMask != stitchedMask) {
             tile.stitchMask = stitchedMask;
-            revisionChanged = true;
+            localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_TOPOLOGY);
             structuralChange = true;
         }
         if (tile.skirtMask != resolvedSkirtMask) {
             tile.skirtMask = resolvedSkirtMask;
-            revisionChanged = true;
+            localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_TOPOLOGY);
         }
         uint8_t newEffectiveLevel = static_cast<uint8_t>(std::clamp(effectiveDemLevel, 0, 255));
         if (tile.demTargetLevel != newEffectiveLevel) {
             tile.demTargetLevel = newEffectiveLevel;
-            revisionChanged = true;
+            localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_DEM_TARGET_CONVERGENCE);
             // NOTE: DEM level changes rebuild the mesh but must NOT reset the
             // seam-skirt latch.  When neighbor DEM instability causes the level
             // to flip-flop between frames, resetting the latch each time
@@ -1722,13 +1730,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 }
             }
             
-            // For each flagged edge, check if the neighbor's parent DEM is available
-            // The neighbor's parent is the tile that provides coarser elevation data
-            if (key.level > 0) {
-                if (!demManager_->HasDataOrAncestor(key.Parent())) {
-                    hasAllCoarserDem = false;
-                }
-            }
+            // Check only edge-scoped coarser-neighbor parent requirements.
+            // Do not require the tile's own parent when no coarser-edge exists.
             if (hasAllCoarserDem && key.level > 0 && tile.edgeCoarserMask != 0) {
                 static const int edgeDx[] = {0, 1, 0, -1};  // N, E, S, W
                 static const int edgeDy[] = {-1, 0, 1, 0};
@@ -1742,6 +1745,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                             TileKey neighborParent = neighbor.Parent();
                             if (!demManager_->HasDataOrAncestor(neighborParent)) {
                                 hasAllCoarserDem = false;
+                                demManager_->Request(neighborParent, /*priority=*/2, /*score=*/tile.importance);
                                 break;
                             }
                         }
@@ -1755,7 +1759,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             if (!tile.demUsed) {
                 if (hasAnyDem && !tile.meshPending &&
                     tile.meshBuiltRevision == tile.meshRevision) {
-                    revisionChanged = true;
+                    localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_DEM_PENDING_CONVERGENCE);
                     ++demTriggeredMeshRebuilds_;
                 }
             } else {
@@ -1778,10 +1782,13 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 }
                 if ((pendingReasons & Tile::DEM_PENDING_MISSING_NEIGHBOR_PARENT) != 0) {
                     ++demPendingMissingNeighborParentFrame_;
+                    if (tile.edgeCoarserMask == 0) {
+                        ++demPendingParentOnlyBlocksFrame_;
+                    }
                 }
 
                 if (pendingReasons == 0 && hasAnyDem) {
-                    revisionChanged = true;
+                    localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_DEM_PENDING_CONVERGENCE);
                     tile.demPending = false;
                     ++demTriggeredMeshRebuilds_;
                 }
@@ -1810,7 +1817,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             tile.demPendingReasonMask == 0 &&
             tile.demUsed &&
             demManager_->HasDataOrAncestor(keyAtLevel(key, static_cast<int>(tile.demTargetLevel)))) {
-            revisionChanged = true;
+            localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_DEM_PENDING_CONVERGENCE);
             tile.demPending = false;
             ++demTriggeredMeshRebuilds_;
         }
@@ -1827,7 +1834,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 demManager_->HasDataOrAncestor(key) &&
                 !tile.meshPending &&
                 tile.meshBuiltRevision == tile.meshRevision) {
-                revisionChanged = true;
+                localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_DEM_PENDING_CONVERGENCE);
                 ++demTriggeredMeshRebuilds_;
             }
         }
@@ -1849,7 +1856,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     tile.demEffectiveLevel != tile.demTargetLevel &&
                     demManager_->HasData(targetDemKey) &&
                     !tile.meshPending) {
-                    revisionChanged = true;
+                    localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_DEM_TARGET_CONVERGENCE);
                     ++demTriggeredMeshRebuilds_;
                 }
             }
@@ -1858,13 +1865,11 @@ void GlobeEngine::Update(double dt, double currentTime) {
         {
             const int tileExpectedSegs = AdaptiveMeshSegments(key.level, config_.meshSegments, config_.demMeshN, hasDem);
             if (tile.builtSegments != 0 && tile.builtSegments != tileExpectedSegs) {
-                revisionChanged = true;
+                localRevisionReasons = static_cast<uint8_t>(localRevisionReasons | REV_SEGMENT_MISMATCH);
             }
         }
-        
-        if (revisionChanged) {
-            ++tile.meshRevision;
-        }
+
+        markRevisionReason(key, localRevisionReasons);
     };
 
     // Desired-only keys are tracked for prefetch/request progress only.
@@ -2037,16 +2042,34 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     }
                 }
             }
-            if (packChanged || edgeAvailabilityRebuild) {
-                ++tile.meshRevision;
-                if (packChanged && edgeAvailabilityRebuild) {
-                    ++edgePackAtomicRebuildsFrame_;
-                }
+            uint8_t edgeRevisionReasons = 0;
+            if (packChanged) {
+                edgeRevisionReasons = static_cast<uint8_t>(edgeRevisionReasons | REV_EDGE_PACK_CHANGED);
             }
+            if (edgeAvailabilityRebuild) {
+                edgeRevisionReasons = static_cast<uint8_t>(edgeRevisionReasons | REV_EDGE_AVAILABILITY);
+            }
+            if (packChanged && edgeAvailabilityRebuild) {
+                ++edgePackAtomicRebuildsFrame_;
+            }
+            markRevisionReason(key, edgeRevisionReasons);
         };
 
         for (const TileKey& key : renderLeafSetForMasks) {
             updateDemEdgePackForTile(key, renderLeafSetForMasks);
+        }
+    }
+
+    for (const auto& [revKey, reasonMask] : revisionReasons) {
+        auto it = tiles_.find(revKey);
+        if (it == tiles_.end() || reasonMask == 0) {
+            continue;
+        }
+        ++it->second.meshRevision;
+        ++meshRevisionBumpsFrame_;
+        const uint32_t bits = static_cast<uint32_t>(reasonMask);
+        if ((bits & (bits - 1u)) != 0u) {
+            ++meshRevisionDoubleBumpTilesFrame_;
         }
     }
     
@@ -2703,10 +2726,6 @@ void GlobeEngine::Render() {
             glUseProgram(tileProgram);
             
             // Set global uniforms for rockmesh rendering
-            // uHasHeightmap = 0 (no heightmap displacement)
-            GLint hasHeightmapLoc = glGetUniformLocation(tileProgram, "uHasHeightmap");
-            if (hasHeightmapLoc >= 0) glUniform1i(hasHeightmapLoc, 0);
-            
             // uTerrainMorph = 1.0 (fully morphed)
             GLint morphLoc = glGetUniformLocation(tileProgram, "uTerrainMorph");
             if (morphLoc >= 0) glUniform1f(morphLoc, 1.0f);
@@ -2782,6 +2801,8 @@ void GlobeEngine::Render() {
     debugStats_.leafNoMesh = drawStats.leafNoMesh;
     debugStats_.leafNoTexture = drawStats.leafNoTexture;
     debugStats_.leafNoTerrain = drawStats.leafNoTerrain;
+    renderFallbackDivergenceLeavesFrame_ = drawStats.renderFallbackDivergenceLeaves;
+    debugStats_.renderFallbackDivergenceLeaves = drawStats.renderFallbackDivergenceLeaves;
     debugStats_.renderQuorumDowngrades = renderQuorumDowngrades_;
     debugStats_.renderQuorumNoMesh = renderQuorumNoMesh_;
     debugStats_.renderQuorumNoTexture = renderQuorumNoTexture_;
@@ -2812,8 +2833,11 @@ void GlobeEngine::Render() {
     debugStats_.demPendingMissingOwnTarget = demPendingMissingOwnTargetFrame_;
     debugStats_.demPendingMissingEdgeCoherent = demPendingMissingEdgeCoherentFrame_;
     debugStats_.demPendingMissingNeighborParent = demPendingMissingNeighborParentFrame_;
+    debugStats_.demPendingParentOnlyBlocks = demPendingParentOnlyBlocksFrame_;
     debugStats_.edgePackAtomicRebuilds = edgePackAtomicRebuildsFrame_;
     debugStats_.seamLatchResetCount = seamLatchResetCountFrame_;
+    debugStats_.meshRevisionBumpsFrame = meshRevisionBumpsFrame_;
+    debugStats_.meshRevisionDoubleBumpTiles = meshRevisionDoubleBumpTilesFrame_;
     debugStats_.demCoEvictions = demCoEvictions_;
     debugStats_.tilesUsingAncestorDem = tilesUsingAncestorDem;
     debugStats_.seamGapP95M = seamGapP95M;
@@ -2886,17 +2910,17 @@ void GlobeEngine::Render() {
 
 void GlobeEngine::BuildTileMesh(Tile& tile) {
     // Delegate to TileMeshBuilder (GE-style separation)
-    // Feed measured seam gap edges back into the DEM edge-equalization mask.
-    // This reduces residual "tile grid" cracks by sampling one level coarser on
-    // problematic borders (GE-style edge continuity).
     auto result = TileMeshBuilder::Build(tile.key, tile.extent,
-                                         static_cast<uint8_t>(tile.edgeCoarserMask | tile.seamGapMask),
                                          tile.stitchMask,
                                          tile.skirtMask,
                                          static_cast<int>(tile.demTargetLevel),
                                          tile.demEdgeLevelPack,
                                          demManager_.get(), config_, true);
     result.meshRevision = tile.meshRevision;
+    result.requestedDemTargetLevel = tile.demTargetLevel;
+    result.requestedDemEdgeLevelPack = tile.demEdgeLevelPack;
+    result.requestedStitchMask = tile.stitchMask;
+    result.requestedSkirtMask = tile.skirtMask;
     TileMeshBuilder::UploadToGPU(tile, result);
     tile.meshBuiltRevision = tile.meshRevision;
     tile.prevEdgeCoarserMask = tile.edgeCoarserMask;
@@ -3361,9 +3385,16 @@ void GlobeEngine::RenderDebugPanel() {
                         debugStats_.demPendingMissingOwnTarget,
                         debugStats_.demPendingMissingEdgeCoherent,
                         debugStats_.demPendingMissingNeighborParent);
+            ImGui::Text("DEM Pending Parent-Only Blocks: %d",
+                        debugStats_.demPendingParentOnlyBlocks);
             ImGui::Text("DEM Cascade Guard Hits: %d", debugStats_.demCoarseningCascadeTiles);
             ImGui::Text("EdgePack Atomic Rebuilds: %d", debugStats_.edgePackAtomicRebuilds);
             ImGui::Text("Seam Latch Resets: %d", debugStats_.seamLatchResetCount);
+            ImGui::Text("Render Fallback Divergence Leaves: %d",
+                        debugStats_.renderFallbackDivergenceLeaves);
+            ImGui::Text("Mesh Revision Bumps/Double: %d / %d",
+                        debugStats_.meshRevisionBumpsFrame,
+                        debugStats_.meshRevisionDoubleBumpTiles);
             ImGui::Text("Ancestor DEM Ratio: %.1f%%",
                         debugStats_.ancestorDemRatio * 100.0);
             ImGui::Text("Legacy Seam Edges: %d", debugStats_.seamEdgeCount);
@@ -3714,12 +3745,14 @@ bool GlobeEngine::QueueMeshBuild(const TileKey& key, bool isVisible) {
     TileMeshScheduler::MeshRequest request;
     request.key = key;
     request.extent = tile.extent;
-    // Feed measured seam gap edges back into the DEM edge-equalization mask.
-    request.edgeMask = static_cast<uint8_t>(tile.edgeCoarserMask | tile.seamGapMask);
     request.stitchMask = tile.stitchMask;
     request.skirtMask = tile.skirtMask;
     request.demTargetLevel = static_cast<int>(tile.demTargetLevel);
     request.demEdgeLevelPack = tile.demEdgeLevelPack;
+    request.requestedDemTargetLevel = tile.demTargetLevel;
+    request.requestedDemEdgeLevelPack = tile.demEdgeLevelPack;
+    request.requestedStitchMask = tile.stitchMask;
+    request.requestedSkirtMask = tile.skirtMask;
     request.meshRevision = tile.meshRevision;
     request.priority = isVisible ? Priority::Urgent : Priority::Normal;
     request.score = tile.importance;
@@ -3755,6 +3788,15 @@ int GlobeEngine::ProcessMeshResults() {
         Tile& tile = it->second;
         tile.meshPending = false;
         rebuildPending_.erase(result.key);
+
+        const bool fingerprintMatch =
+            result.requestedDemTargetLevel == tile.demTargetLevel &&
+            result.requestedDemEdgeLevelPack == tile.demEdgeLevelPack &&
+            result.requestedStitchMask == tile.stitchMask &&
+            result.requestedSkirtMask == tile.skirtMask;
+        if (!fingerprintMatch) {
+            continue;
+        }
         
         if (result.meshRevision != tile.meshRevision) {
             // Accept DEM upgrades even if revision is stale: a mesh with terrain
@@ -4028,11 +4070,33 @@ bool GlobeEngine::RunSmokeTest() {
         SaveScreenshot("smoke/" + stem + ".ppm");
     };
 
+    std::string smokeScene = config_.smokeScene;
+    std::transform(smokeScene.begin(), smokeScene.end(), smokeScene.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    double sceneStartLat = 41.015;
+    double sceneStartLon = 28.98;
+    double sceneStartAlt = 4000000.0;
+    double scenePanLat = 39.93;
+    double scenePanLon = 32.86;
+    double scenePanAlt = 1600000.0;
+    if (smokeScene == "aegean") {
+        sceneStartLat = 39.0;
+        sceneStartLon = 27.0;
+        sceneStartAlt = 1800000.0;
+        scenePanLat = 38.45;
+        scenePanLon = 26.35;
+        scenePanAlt = 900000.0;
+    } else {
+        smokeScene = "default";
+    }
+    logLine("Smoke scene preset: " + smokeScene);
+
     auto runScenario = [&](const char* scenarioName) -> bool {
         logLine(std::string("\n== Scenario: ") + scenarioName + " ==");
 
         // Start from a known location.
-        LookAt(41.015, 28.98, 4000000.0);
+        LookAt(sceneStartLat, sceneStartLon, sceneStartAlt);
         uint64_t leafUnderflowStart = leafUnderflowFrames_;
 
         StepMetrics metrics;
@@ -4045,7 +4109,7 @@ bool GlobeEngine::RunSmokeTest() {
         saveStepScreenshot(std::string(scenarioName) + "_zoom_in_1");
 
         // Pan to a nearby location to force new tile requests.
-        FlyTo(39.93, 32.86, 1600000.0, 0.0, 0.0, 0.6);
+        FlyTo(scenePanLat, scenePanLon, scenePanAlt, 0.0, 0.0, 0.6);
         if (!settleFrames(240, metrics, leafUnderflowStart)) return false;
         saveStepScreenshot(std::string(scenarioName) + "_pan");
 
@@ -4263,7 +4327,8 @@ void GlobeEngine::RunPanProfile() {
               << "triangles,maxLeafLevel,avgLeafSeg,minLeafSeg,maxLeafSeg,"
               << "demPendingLeaves,seamGapMaxM,demCascadeGuard,"
               << "demPendingOwn,demPendingEdge,demPendingNeighbor,"
-              << "edgePackAtomic,seamLatchReset\n";
+              << "demPendingParentOnly,renderFallbackDiv,"
+              << "edgePackAtomic,seamLatchReset,meshRevBumps,meshRevDouble\n";
 
     auto logFrame = [&](int frame) {
         int minSeg = std::numeric_limits<int>::max();
@@ -4313,8 +4378,12 @@ void GlobeEngine::RunPanProfile() {
             << "," << debugStats_.demPendingMissingOwnTarget
             << "," << debugStats_.demPendingMissingEdgeCoherent
             << "," << debugStats_.demPendingMissingNeighborParent
+            << "," << debugStats_.demPendingParentOnlyBlocks
+            << "," << debugStats_.renderFallbackDivergenceLeaves
             << "," << debugStats_.edgePackAtomicRebuilds
             << "," << debugStats_.seamLatchResetCount
+            << "," << debugStats_.meshRevisionBumpsFrame
+            << "," << debugStats_.meshRevisionDoubleBumpTiles
             << "\n";
     };
 
