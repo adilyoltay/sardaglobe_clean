@@ -252,8 +252,9 @@ struct Config {
     int demEdgeBlendSegments = 2;     // Edge coherence blend band (in vertex rings). 0 disables blending.
     bool demDebug = false;            // Enable DEM debug logging
     // DEM mesh safety clamp (km). Prevents NaN/extreme input from collapsing vertices.
-    float demHeightMinKm = -0.012f;
-    float demHeightMaxKm = 0.012f;
+    // 12 km bounds are Earth-elevation-safe for terrain-rgb and GE sources.
+    float demHeightMinKm = -12.0f;
+    float demHeightMaxKm = 12.0f;
     // Evidence-trap mode: abort on invalid vertex in demDebug, or auto-recover when false.
     bool demDebugAbortOnInvalidVertex = false;
     DisplacementMode terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;  // Single authority
@@ -318,8 +319,8 @@ struct Config {
         demMaxZoom = std::clamp(demMaxZoom, 0, 22);
         demProviderEffectiveMaxZoom = std::clamp(demProviderEffectiveMaxZoom, 0, 22);
         demMaxCoarseningDeltaLod = std::clamp(demMaxCoarseningDeltaLod, 0, 22);
-        if (!std::isfinite(demHeightMinKm)) demHeightMinKm = -0.012f;
-        if (!std::isfinite(demHeightMaxKm)) demHeightMaxKm = 0.012f;
+        if (!std::isfinite(demHeightMinKm)) demHeightMinKm = -12.0f;
+        if (!std::isfinite(demHeightMaxKm)) demHeightMaxKm = 12.0f;
         if (demHeightMinKm > demHeightMaxKm) std::swap(demHeightMinKm, demHeightMaxKm);
     }
 };

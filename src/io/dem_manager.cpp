@@ -516,7 +516,9 @@ void DemManager::WorkerLoop() {
             
             if (!running_) break;
             
-            while (!requestQueue_.empty() && static_cast<int>(batch.size()) < 1) {
+            const int batchLimit = std::max(1, config_.maxBatchSize);
+
+            while (!requestQueue_.empty() && static_cast<int>(batch.size()) < batchLimit) {
                 DemRequest req = requestQueue_.top();
                 requestQueue_.pop();
 

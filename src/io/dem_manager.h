@@ -64,16 +64,16 @@ const char* DemProviderTypeToString(DemProviderType t);
 
 // DEM telemetry statistics
 struct DemStats {
-    std::atomic<int> fetchSuccess{0};
-    std::atomic<int> fetchFail{0};
-    std::atomic<int> fetchTimeout{0};
-    std::atomic<int> fetchAuth{0};     // 401/403 count
-    std::atomic<int> parseSuccess{0};
-    std::atomic<int> parseFail{0};
-    std::atomic<int> cacheHits{0};
-    std::atomic<int> cacheMisses{0};
-    std::atomic<double> totalFetchMs{0.0};
-    std::atomic<uint64_t> bilinearNonFinite{0};  // Non-finite bilinear samples sanitized to 0
+    mutable std::atomic<int> fetchSuccess{0};
+    mutable std::atomic<int> fetchFail{0};
+    mutable std::atomic<int> fetchTimeout{0};
+    mutable std::atomic<int> fetchAuth{0};     // 401/403 count
+    mutable std::atomic<int> parseSuccess{0};
+    mutable std::atomic<int> parseFail{0};
+    mutable std::atomic<int> cacheHits{0};
+    mutable std::atomic<int> cacheMisses{0};
+    mutable std::atomic<double> totalFetchMs{0.0};
+    mutable std::atomic<uint64_t> bilinearNonFinite{0};  // Non-finite bilinear samples sanitized to 0
     
     int GetTotalFetches() const { return fetchSuccess.load() + fetchFail.load(); }
     double GetAvgFetchMs() const {
@@ -98,6 +98,7 @@ struct DemManagerConfig {
     DemProviderType providerType = DemProviderType::TerrainRGB;
     int meshN = 17;                   // Grid resolution per tile (GE parity: 17x17)
     int maxZoom = 15;                 // Terrain-RGB providers often cap DEM detail below raster max
+    int maxBatchSize = 1;
     size_t cacheSize = 512;           // Max cached tiles
     double heightScale = 0.001;       // Meters to world units (km)
     bool debug = false;

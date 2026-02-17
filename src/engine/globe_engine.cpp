@@ -3794,7 +3794,12 @@ int GlobeEngine::ProcessMeshResults() {
             result.requestedDemEdgeLevelPack == tile.demEdgeLevelPack &&
             result.requestedStitchMask == tile.stitchMask &&
             result.requestedSkirtMask == tile.skirtMask;
-        if (!fingerprintMatch) {
+
+        // Allow a stale flat->DEM upgrade even if topology/coherence changed while the
+        // request was in flight. A completed DEM-capable mesh is still preferable to
+        // keeping older flat geometry and is deterministic for convergence.
+        const bool isDemUpgrade = !tile.demUsed && result.demUsed;
+        if (!fingerprintMatch && !isDemUpgrade) {
             continue;
         }
         
@@ -3804,7 +3809,6 @@ int GlobeEngine::ProcessMeshResults() {
             // flat→DEM rebuild check increments meshRevision every frame while
             // demUsed stays false, and the completed DEM build gets perpetually
             // discarded as "stale" — causing 50-75 wasted rebuilds/frame.
-            const bool isDemUpgrade = !tile.demUsed && result.demUsed;
             if (!isDemUpgrade) {
                 continue;  // Truly stale result
             }

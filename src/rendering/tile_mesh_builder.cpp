@@ -122,8 +122,8 @@ bool SampleDemMeters(const DemTileSampler& sampler, double lonDeg, double latDeg
 float SanitizeHeightKm(float heightKm, const Config& config) {
     float minHeightKm = config.demHeightMinKm;
     float maxHeightKm = config.demHeightMaxKm;
-    if (!std::isfinite(minHeightKm)) minHeightKm = -0.012f;
-    if (!std::isfinite(maxHeightKm)) maxHeightKm = 0.012f;
+    if (!std::isfinite(minHeightKm)) minHeightKm = -12.0f;
+    if (!std::isfinite(maxHeightKm)) maxHeightKm = 12.0f;
     if (minHeightKm > maxHeightKm) std::swap(minHeightKm, maxHeightKm);
     if (!std::isfinite(heightKm)) return 0.0f;
     return std::clamp(heightKm, minHeightKm, maxHeightKm);
