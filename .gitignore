@@ -10,6 +10,9 @@ cmake-build-*/
 
 # Runtime caches
 tile_cache/
+tile_cache_old/
+smoke/
+.p0_hunter/
 
 # IDE
 .vscode/
