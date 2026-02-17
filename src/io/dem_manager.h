@@ -73,6 +73,7 @@ struct DemStats {
     std::atomic<int> cacheHits{0};
     std::atomic<int> cacheMisses{0};
     std::atomic<double> totalFetchMs{0.0};
+    std::atomic<uint64_t> bilinearNonFinite{0};  // Non-finite bilinear samples sanitized to 0
     
     int GetTotalFetches() const { return fetchSuccess.load() + fetchFail.load(); }
     double GetAvgFetchMs() const {
@@ -288,7 +289,7 @@ private:
     std::chrono::steady_clock::time_point backoffUntil_;
     
     // DemStats for telemetry
-    DemStats stats_;
+    mutable DemStats stats_;
     
     // Terminal error state (set when provider reports unrecoverable error)
     std::atomic<bool> terminalError_{false};

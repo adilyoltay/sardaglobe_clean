@@ -11,7 +11,6 @@
 #include "../rendering/tile_renderer.h"
 #include "../rendering/tile_mesh_scheduler.h"
 #include "../rendering/render_frame.h"
-#include "../rendering/heightmap_manager.h"
 #include "../rendering/rockmesh_manager.h"
 #include "../io/dem_manager.h"
 #include "../core/frame_time_tracker.h"
@@ -113,7 +112,6 @@ private:
     bool didAutoFallback_ = false;          // Per-instance fallback guard (resets on Init)
     static constexpr int kMaxNoDataFloorSkipLogs = 8;
     int noDataFloorSkipLogCount_ = 0;       // DEM debug log limiter for no-data floor skip
-    std::unique_ptr<HeightmapManager> heightmapManager_;
     std::unique_ptr<RockMeshManager> rockMeshManager_;
     TilePyramid tilePyramid_;
     JobSystem jobSystem_;
@@ -135,7 +133,6 @@ private:
         bool wireframe = false;
         bool useLogDepth = false;
         float logDepthFarKm = 1.0f;
-        bool useHeightmap = false;
     };
     SceneSnapshot sceneSnapshot_;
     
@@ -238,7 +235,7 @@ private:
         int placeholderTiles = 0;   // Last-resort placeholder
         int leafNoMesh = 0;         // Leaves without mesh
         int leafNoTexture = 0;      // Leaves with mesh but no texture
-        int leafNoTerrain = 0;      // Leaves with mesh+texture but missing terrain data (DEM/heightmap)
+        int leafNoTerrain = 0;      // Leaves with mesh+texture but missing terrain data (DEM)
         // Render-time child quorum (post-selection): how often we had to collapse children to an ancestor
         // due to missing render prerequisites (prevents mixed-LOD tearing/cliff walls at joins).
         int renderQuorumDowngrades = 0;
@@ -262,12 +259,14 @@ private:
         double avgEdgeHeightDeltaM = 0.0;
         int demFlatLeaves = 0;         // Visible leaves with no DEM baked (flat ellipsoid mesh)
         int demPendingLeaves = 0;      // Visible leaves still awaiting exact DEM rebuild
+        int demCoarseningCascadeTiles = 0;         // Unstable-path tiles clamped by cascade guard
+        int demPendingMissingOwnTarget = 0;        // demPending reason: missing target key
+        int demPendingMissingEdgeCoherent = 0;     // demPending reason: missing coherent edge key
+        int demPendingMissingNeighborParent = 0;   // demPending reason: missing coarser-neighbor parent
+        int edgePackAtomicRebuilds = 0;            // Atomic edge-pack + availability rebuilds
+        int seamLatchResetCount = 0;               // Latch resets after stable structural change
         int tilesUsingAncestorDem = 0;
         size_t demCoEvictions = 0;
-        // GPU heightmap terrain telemetry (only meaningful in GPU heightmap mode).
-        int heightmapCacheSize = 0;
-        int heightmapPendingUploads = 0;
-        int heightmapMissingLeaves = 0;  // Leaves with no exact/ancestor heightmap available.
         double seamGapP95M = 0.0;
         double seamGapMaxM = 0.0;
         int cliffEdgeCount = 0;
@@ -298,7 +297,6 @@ private:
         int rockMeshFallbackTextureUsed = 0;        // Fallback texture used for textureless meshes
     };
     DebugStats debugStats_;
-    DisplacementMode lastTerrainMode_ = DisplacementMode::CPU_MESH_BAKE;
     bool showDebugPanel_ = true;
 
     // Render-time quorum counters (computed during Update; displayed in RenderDebugPanel).
@@ -318,6 +316,12 @@ private:
     double adaptiveBaseMeshUploadBudgetMs_ = 0.0;
     double adaptivePressure_ = 0.0;
     size_t demCoEvictions_ = 0;
+    int demCoarseningCascadeTilesFrame_ = 0;
+    int demPendingMissingOwnTargetFrame_ = 0;
+    int demPendingMissingEdgeCoherentFrame_ = 0;
+    int demPendingMissingNeighborParentFrame_ = 0;
+    int edgePackAtomicRebuildsFrame_ = 0;
+    int seamLatchResetCountFrame_ = 0;
 
     FrameTimings frameTimings_;
     FrameTimeTracker frameTimeTracker_;

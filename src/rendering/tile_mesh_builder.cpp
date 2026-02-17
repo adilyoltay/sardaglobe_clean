@@ -45,10 +45,15 @@ double SampleBilinear(const DemGridData& data, double u, double v) {
     const double h10 = data.heights[static_cast<std::size_t>(y0 * meshN + x1)];
     const double h01 = data.heights[static_cast<std::size_t>(y1 * meshN + x0)];
     const double h11 = data.heights[static_cast<std::size_t>(y1 * meshN + x1)];
+    if (!std::isfinite(h00) || !std::isfinite(h10) ||
+        !std::isfinite(h01) || !std::isfinite(h11)) {
+        return 0.0;
+    }
 
     const double h0 = h00 + fx * (h10 - h00);
     const double h1 = h01 + fx * (h11 - h01);
-    return h0 + fy * (h1 - h0);
+    const double sample = h0 + fy * (h1 - h0);
+    return std::isfinite(sample) ? sample : 0.0;
 }
 
 struct DemTileSampler {
@@ -112,6 +117,16 @@ bool SampleDemMeters(const DemTileSampler& sampler, double lonDeg, double latDeg
 
     outMeters = SampleBilinear(sampler.data, u, v);
     return true;
+}
+
+float SanitizeHeightKm(float heightKm, const Config& config) {
+    float minHeightKm = config.demHeightMinKm;
+    float maxHeightKm = config.demHeightMaxKm;
+    if (!std::isfinite(minHeightKm)) minHeightKm = -0.012f;
+    if (!std::isfinite(maxHeightKm)) maxHeightKm = 0.012f;
+    if (minHeightKm > maxHeightKm) std::swap(minHeightKm, maxHeightKm);
+    if (!std::isfinite(heightKm)) return 0.0f;
+    return std::clamp(heightKm, minHeightKm, maxHeightKm);
 }
 
 } // namespace
@@ -184,6 +199,13 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     DemTileSampler demEdge[4];  // N,E,S,W (resolved on self's ancestor chain for determinism)
 
     int clampedTargetLevel = std::clamp(demTargetLevel >= 0 ? demTargetLevel : key.level, 0, key.level);
+    // P0 FIX: Clamp target level to provider's effective max zoom.
+    // Otherwise, requesting a level > providerMax (e.g. 18 > 15) results in
+    // demPending=true forever because demManager only fetches/caches up to providerMax.
+    int effectiveMax = config.demProviderEffectiveMaxZoom;
+    if (effectiveMax <= 0) effectiveMax = 22; // Safety fallback
+    clampedTargetLevel = std::min(clampedTargetLevel, effectiveMax);
+
     TileKey desiredInteriorKey = KeyAtLevel(key, clampedTargetLevel);
     if (demManager && config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
         // "Exact" here must mean the currently requested coherence target key.
@@ -265,7 +287,9 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             return false;
         }
         // GE parity: separated base scale and exaggeration
-        outHeightKm = static_cast<float>(meters * 0.001 * config.demHeightScaleBase * config.demExaggerationFactor);
+        outHeightKm = SanitizeHeightKm(
+            static_cast<float>(meters * 0.001 * config.demHeightScaleBase * config.demExaggerationFactor),
+            config);
         outSourceLevel = sampler.key.level;
         return true;
     };
@@ -378,6 +402,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                     finalH = 0.0f;
                     missingHeightMask[vertexIndex] = 1;
                 }
+                finalH = SanitizeHeightKm(finalH, config);
                 heightsKm[vertexIndex] = finalH;
 
                 if (okInterior && srcInterior >= 0) {
@@ -452,7 +477,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             const float fallbackHeight = (globalCount > 0) ? (globalSum / static_cast<float>(globalCount)) : 0.0f;
             for (size_t i = 0; i < heightsKm.size(); ++i) {
                 if (missingHeightMask[i] != 0) {
-                    heightsKm[i] = fallbackHeight;
+                    heightsKm[i] = SanitizeHeightKm(fallbackHeight, config);
                     missingHeightMask[i] = 0;
                 }
             }
@@ -461,6 +486,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
 
     // Build cartesian positions from final sampled heights.
     for (size_t i = 0; i < heightsKm.size(); ++i) {
+        heightsKm[i] = SanitizeHeightKm(heightsKm[i], config);
         glm::dvec3 pos = ellipsoid.GeodeticToCartesian(sampleLonDeg[i], sampleLatDeg[i], heightsKm[i]);
         positions.push_back(pos);
     }
@@ -582,7 +608,7 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             int idx = iy * (segments + 1) + ix;
             
             glm::dvec3 pos = positions[idx];
-            float heightKm = heightsKm[idx];
+            float heightKm = SanitizeHeightKm(heightsKm[idx], config);
             glm::vec3 normal;
             
             if (result.demUsed) {
@@ -756,29 +782,70 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
             float x = result.vertices[i];
             float y = result.vertices[i + 1];
             float z = result.vertices[i + 2];
-
-            if (std::isnan(x) || std::isnan(y) || std::isnan(z)) {
-                std::fprintf(stderr,
-                             "[KANIT: NAN_VERTEX] Tile_KEY: %s "
-                             "Skirt veya DEM hesaplamasında NaN (Not-a-Number) sızıntısı!\n",
-                             key.ToString().c_str());
-                std::fflush(stderr);
-                std::abort();
-            }
+            const size_t vertexIndex = i / static_cast<size_t>(kVertexStrideFloats);
+            const bool hasNaN = !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z);
 
             // IMPORTANT: result.vertices stores RTE-relative coordinates.
             // Validate collapse in world space, not local tile space.
             glm::vec3 worldPos = glm::vec3(tileOriginECEF) + glm::vec3(x, y, z);
             float dist = glm::length(worldPos);
-            if (dist < 1000.0f) {
+            const bool collapsedToOrigin = !std::isfinite(dist) || dist < 1000.0f;
+            if (!hasNaN && !collapsedToOrigin) {
+                continue;
+            }
+
+            if (!config.demDebugAbortOnInvalidVertex) {
+                float safeHeightKm = 0.0f;
+                glm::dvec3 safeWorld = tileOriginECEF;
+                if (vertexIndex < sampleLonDeg.size() &&
+                    vertexIndex < sampleLatDeg.size() &&
+                    vertexIndex < heightsKm.size()) {
+                    safeHeightKm = SanitizeHeightKm(heightsKm[vertexIndex], config);
+                    safeWorld = ellipsoid.GeodeticToCartesian(
+                        sampleLonDeg[vertexIndex],
+                        sampleLatDeg[vertexIndex],
+                        safeHeightKm);
+                } else {
+                    glm::dvec3 originNormal = ellipsoid.GetSurfaceNormal(tileOriginECEF);
+                    safeWorld = tileOriginECEF + originNormal * 0.001;  // 1m outward safety point
+                    safeHeightKm = 0.0f;
+                }
+
+                glm::vec3 safeRel = glm::vec3(safeWorld - tileOriginECEF);
+                glm::dvec3 safeNrm = ellipsoid.GetSurfaceNormal(safeWorld);
+                result.vertices[i + 0] = safeRel.x;
+                result.vertices[i + 1] = safeRel.y;
+                result.vertices[i + 2] = safeRel.z;
+                result.vertices[i + 3] = static_cast<float>(safeNrm.x);
+                result.vertices[i + 4] = static_cast<float>(safeNrm.y);
+                result.vertices[i + 5] = static_cast<float>(safeNrm.z);
+                result.vertices[i + 8] = safeHeightKm;
+
+                std::fprintf(stderr,
+                             "[KANIT: RECOVERED_VERTEX] Tile_KEY: %s "
+                             "invalid=%s collapse=%s idx=%zu\n",
+                             key.ToString().c_str(),
+                             hasNaN ? "1" : "0",
+                             collapsedToOrigin ? "1" : "0",
+                             vertexIndex);
+                std::fflush(stderr);
+                continue;
+            }
+
+            if (hasNaN) {
+                std::fprintf(stderr,
+                             "[KANIT: NAN_VERTEX] Tile_KEY: %s "
+                             "Skirt veya DEM hesaplamasında NaN (Not-a-Number) sızıntısı!\n",
+                             key.ToString().c_str());
+            } else {
                 std::fprintf(stderr,
                              "[KANIT: ZERO_VERTEX] Tile_KEY: %s "
                              "(0,0,0)'a çöken world-space vertex tespit edildi! Mesafe(km): %.6f\n",
                              key.ToString().c_str(),
                              dist);
-                std::fflush(stderr);
-                std::abort();
             }
+            std::fflush(stderr);
+            std::abort();
         }
     }
     // --- P0 EVIDENCE TRAPS BİTİŞİ ---

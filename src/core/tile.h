@@ -93,6 +93,11 @@ struct Tile {
     // DEM/Elevation
     bool demUsed = false;
     bool demPending = false;
+    // Bitmask describing why demPending is still true in current frame.
+    // 0 means convergence conditions satisfied.
+    uint8_t demPendingReasonMask = 0;
+    // Consecutive frames with demUsed=true and demPending=false.
+    uint8_t stableDemFrames = 0;
     uint8_t demSourceLevelMin = 0;
     uint8_t demSourceLevelMax = 0;
     uint16_t demMissingSamples = 0;
@@ -130,6 +135,9 @@ struct Tile {
     static constexpr uint8_t EDGE_EAST  = 1 << 1;  // 0x02
     static constexpr uint8_t EDGE_SOUTH = 1 << 2;  // 0x04
     static constexpr uint8_t EDGE_WEST  = 1 << 3;  // 0x08
+    static constexpr uint8_t DEM_PENDING_MISSING_OWN_TARGET = 1 << 0;
+    static constexpr uint8_t DEM_PENDING_MISSING_EDGE_COHERENT = 1 << 1;
+    static constexpr uint8_t DEM_PENDING_MISSING_NEIGHBOR_PARENT = 1 << 2;
 
     // GE-style corner LODs for bilinear interpolation in vertex shader.
     // Order: NW, NE, SE, SW (with UV: NW=(0,1), NE=(1,1), SE=(1,0), SW=(0,0)).
@@ -141,7 +149,7 @@ struct Tile {
     bool fadeComplete = false;        // True when fade finished
     static constexpr float FADE_DURATION = 0.3f;  // 300ms default unpop duration
 
-    // Terrain morph (flat -> displaced) to avoid DEM pop on first heightmap availability.
+    // Terrain morph (flat -> displaced) to avoid DEM pop on first DEM-backed mesh availability.
     float terrainMorph = 1.0f;             // 0=flat, 1=full terrain
     double terrainMorphStartTime = 0.0;
     bool terrainMorphActive = false;

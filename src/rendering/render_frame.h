@@ -1,11 +1,9 @@
 #pragma once
 
 #include "../core/tile.h"
-#include "../core/config.h"  // P0: For DisplacementMode
 #include "../io/dem_manager.h"
 #include "tile_renderer.h"
 #include "shader_manager.h"
-#include "heightmap_manager.h"
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,15 +45,13 @@ public:
         float logDepthFarKm,
         bool wireframe,
         uint32_t loadingTexture,  // Placeholder texture ID
-        HeightmapManager* heightmapManager = nullptr,  // Optional: GPU terrain displacement
         DemManager* demManager = nullptr,              // Optional: DEM coverage for terrain gating
         bool useRte = true,                            // RTE/RTC jitter-free rendering
         bool fallbackRequireParentUntilChildrenReady = true, // Parent fallback control
         bool useTextureArray = false,                  // Faz 2B: Use GL_TEXTURE_2D_ARRAY
         bool useDistanceBasedTerrainMorph = true,      // P2: Distance-based terrain morph
         float terrainMorphDistanceRangeKm = 0.2f,      // P2: Morph band width in km
-        bool enableTerrainMorphTimeFallback = true,    // P2: Allow time fallback if distance invalid
-        DisplacementMode displacementMode = DisplacementMode::CPU_MESH_BAKE  // P0: Displacement mode for morph compatibility
+        bool enableTerrainMorphTimeFallback = true     // P2: Allow time fallback if distance invalid
     );
 
 private:

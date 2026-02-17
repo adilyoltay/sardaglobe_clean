@@ -674,11 +674,21 @@ double DemManager::SampleBilinear(const DemGridData& data, double u, double v) c
     const double h10 = data.heights[y0 * n + x1];
     const double h01 = data.heights[y1 * n + x0];
     const double h11 = data.heights[y1 * n + x1];
+    if (!std::isfinite(h00) || !std::isfinite(h10) ||
+        !std::isfinite(h01) || !std::isfinite(h11)) {
+        stats_.bilinearNonFinite.fetch_add(1, std::memory_order_relaxed);
+        return 0.0;
+    }
     
-    return h00 * (1 - dx) * (1 - dy) +
+    const double sample = h00 * (1 - dx) * (1 - dy) +
            h10 * dx * (1 - dy) +
            h01 * (1 - dx) * dy +
            h11 * dx * dy;
+    if (!std::isfinite(sample)) {
+        stats_.bilinearNonFinite.fetch_add(1, std::memory_order_relaxed);
+        return 0.0;
+    }
+    return sample;
 }
 
 } // namespace globe

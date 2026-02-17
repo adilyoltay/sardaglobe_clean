@@ -61,25 +61,20 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     float logDepthFarKm,
     bool wireframe,
     uint32_t loadingTexture,
-    HeightmapManager* heightmapManager,
     DemManager* demManager,
     bool useRte,
     bool fallbackRequireParentUntilChildrenReady,
     bool useTextureArray,
     bool useDistanceBasedTerrainMorph,
     float terrainMorphDistanceRangeKm,
-    bool enableTerrainMorphTimeFallback,
-    DisplacementMode displacementMode
+    bool enableTerrainMorphTimeFallback
 ) {
     TileDrawStats stats;
     
-    // P0 CRITICAL: Distance-based morph is ONLY compatible with GPU_HEIGHTMAP_DISPLACE mode
-    // CPU_MESH_BAKE mode uses per-tile mesh baked with specific DEM, so distance morph
-    // creates phase mismatches between adjacent tiles (different spawn distances = different morph phases)
-    // This causes visible seams/walls at tile boundaries (km-level height differences)
-    const bool effectiveUseDistanceBasedMorph = 
-        useDistanceBasedTerrainMorph && 
-        (displacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE);
+    (void)useDistanceBasedTerrainMorph;
+    // Single terrain authority: CPU mesh bake.
+    // Distance-based morph is disabled in this mode to avoid adjacent tile phase mismatch.
+    const bool effectiveUseDistanceBasedMorph = false;
     
     const float fadeDurationSec = ComputeUnpopDurationSec(cameraSpeedKmPerSec);
     const bool bypassUnpop = ShouldBypassUnpop(cameraSpeedKmPerSec);
@@ -103,19 +98,6 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     
     renderableLeaves.reserve(leafSet.size());
 
-    auto hasAnyHeightmap = [&](const TileKey& key) -> bool {
-        if (!heightmapManager) return false;
-        TileKey probe = key;
-        while (true) {
-            if (heightmapManager->HasTexture(probe)) {
-                return true;
-            }
-            if (probe.level == 0) break;
-            probe = probe.Parent();
-        }
-        return false;
-    };
-
     auto hasAnyDemCoverage = [&](const TileKey& key) -> bool {
         if (!demManager) return false;
         return demManager->HasDataOrAncestor(key);
@@ -136,7 +118,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                                         (allowPlaceholder || tile.textureId != loadingTexture) &&
                                         !tile.mostlyBlackOpaqueRaster;
                 if (hasSurfaceGeometry && hasTexture) {
-                    bool hasTerrain = heightmapManager ? hasAnyHeightmap(parentKey) : tile.demUsed;
+                    bool hasTerrain = tile.demUsed;
                     if (!hasTerrain) {
                         const bool terrainExpected = tile.demPending || hasAnyDemCoverage(parentKey);
                         if (!terrainExpected) {
@@ -205,11 +187,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                                     !tile.mostlyBlackOpaqueRaster;
         bool hasRequiredTerrain = true;
         if (requireTerrainForLeaves) {
-            if (heightmapManager) {
-                hasRequiredTerrain = hasAnyHeightmap(tile.key);
-            } else {
-                hasRequiredTerrain = tile.demUsed;
-            }
+            hasRequiredTerrain = tile.demUsed;
             if (!hasRequiredTerrain) {
                 const bool terrainExpected = tile.demPending || hasAnyDemCoverage(tile.key);
                 if (!terrainExpected) {
@@ -315,30 +293,6 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         return glm::dot(delta, delta);
     };
 
-    auto resolveHeightmap = [&](const TileKey& tileKey,
-                                HeightmapTexture& outTex,
-                                glm::vec4& outUvTransform) -> bool {
-        if (!heightmapManager) {
-            return false;
-        }
-        TileKey probe = tileKey;
-        while (true) {
-            HeightmapTexture tex;
-            if (heightmapManager->GetTexture(probe, tex)) {
-                outTex = tex;
-                outUvTransform = (probe == tileKey)
-                    ? glm::vec4(1.0f, 1.0f, 0.0f, 0.0f)
-                    : ComputeUnpopUvTransform(tileKey, probe);
-                return true;
-            }
-            if (probe.level == 0) {
-                break;
-            }
-            probe = probe.Parent();
-        }
-        return false;
-    };
-
     // GE P5.2 parity: fallback tiles sorted front-to-back by camera distance.
     std::sort(fallbackTiles.begin(), fallbackTiles.end(),
               [&](const Tile* a, const Tile* b) {
@@ -389,9 +343,9 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     };
     using InstancedBatchMap = std::unordered_map<BatchKey, std::vector<TileRenderer::FlatTileInstance>, BatchKeyHash>;
 
-    auto canBatchFlatTile = [&](const Tile& tile, bool hasHeightmap, bool usesCrossfade) {
+    auto canBatchFlatTile = [&](const Tile& tile, bool usesCrossfade) {
         if (!useInstancedFlatPath) return false;
-        if (usesCrossfade || hasHeightmap) return false;
+        if (usesCrossfade) return false;
         if (tile.demUsed || tile.terrainMorphActive) return false;
         // FIX 1: Tiles awaiting DEM must go through the standard skirt-capable path.
         // Instanced flat path has no skirt geometry, so demPending tiles rendered here
@@ -429,11 +383,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     InstancedBatchMap fallbackInstancedBatches;
     for (Tile* tile : fallbackTiles) {
         glUniform1f(shaderManager_.GetFadeLocation(), 1.0f);
-        // Try heightmap rendering if available
-        HeightmapTexture hmTex;
-        glm::vec4 hmUvTransform{1.0f, 1.0f, 0.0f, 0.0f};
-        bool hasHeightmap = resolveHeightmap(tile->key, hmTex, hmUvTransform);
-        bool hasTerrainData = hasHeightmap || tile->demUsed;
+        bool hasTerrainData = tile->demUsed;
         // P2: Calculate camera distance for distance-based morph
         float distanceKm = glm::length(tile->center - cameraPos);
         // P0: Use effective distance-based morph (disabled for CPU_MESH_BAKE mode)
@@ -442,17 +392,12 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             effectiveUseDistanceBasedMorph, terrainMorphDistanceRangeKm,
             Tile::TERRAIN_MORPH_DURATION, enableTerrainMorphTimeFallback
         );
-        if (canBatchFlatTile(*tile, hasHeightmap, false)) {
+        if (canBatchFlatTile(*tile, false)) {
             BatchKey key{tile->textureId, tile->builtSegments};
             fallbackInstancedBatches[key].push_back(TileRenderer::FlatTileInstance{tile, 1.0f});
             continue;
         }
-        if (hasHeightmap) {
-            tileRenderer_.RenderTileWithHeightmap(*tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight,
-                                                  hmUvTransform, terrainMorph);
-        } else {
-            tileRenderer_.RenderTile(*tile, tile->demUsed ? terrainMorph : 1.0f);
-        }
+        tileRenderer_.RenderTile(*tile, tile->demUsed ? terrainMorph : 1.0f);
     }
     for (auto& [key, instances] : fallbackInstancedBatches) {
         tileRenderer_.RenderFlatTilesInstanced(key.textureId, key.segments, instances);
@@ -462,10 +407,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
     glDisable(GL_POLYGON_OFFSET_FILL);
     InstancedBatchMap leafInstancedBatches;
     for (const RenderableLeaf& leaf : renderableLeaves) {
-        HeightmapTexture hmTex;
-        glm::vec4 hmUvTransform{1.0f, 1.0f, 0.0f, 0.0f};
-        bool hasHeightmap = resolveHeightmap(leaf.tile->key, hmTex, hmUvTransform);
-        bool hasTerrainData = hasHeightmap || leaf.tile->demUsed;
+        bool hasTerrainData = leaf.tile->demUsed;
         // P2: Calculate camera distance for distance-based morph
         float distanceKm = glm::length(leaf.tile->center - cameraPos);
         // P0: Use effective distance-based morph (disabled for CPU_MESH_BAKE mode)
@@ -484,25 +426,20 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 leaf.unpopTarget,
                 leaf.unpopUvTransform,
                 leaf.alpha,
-                hasHeightmap ? hmTex.textureId : 0,
-                hasHeightmap ? hmTex.minHeight : 0.0f,
-                hasHeightmap ? hmTex.maxHeight : 0.0f,
-                hasHeightmap ? hmUvTransform : glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
+                0,
+                0.0f,
+                0.0f,
+                glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
                 terrainMorph
             );
         } else {
-            if (canBatchFlatTile(*leaf.tile, hasHeightmap, false)) {
+            if (canBatchFlatTile(*leaf.tile, false)) {
                 BatchKey key{leaf.tile->textureId, leaf.tile->builtSegments};
                 leafInstancedBatches[key].push_back(TileRenderer::FlatTileInstance{leaf.tile, leaf.alpha});
                 continue;
             }
             glUniform1f(shaderManager_.GetFadeLocation(), leaf.alpha);
-            if (hasHeightmap) {
-                tileRenderer_.RenderTileWithHeightmap(*leaf.tile, hmTex.textureId, hmTex.minHeight, hmTex.maxHeight,
-                                                      hmUvTransform, terrainMorph);
-            } else {
-                tileRenderer_.RenderTile(*leaf.tile, leaf.tile->demUsed ? terrainMorph : 1.0f);
-            }
+            tileRenderer_.RenderTile(*leaf.tile, leaf.tile->demUsed ? terrainMorph : 1.0f);
         }
     }
     for (auto& [key, instances] : leafInstancedBatches) {

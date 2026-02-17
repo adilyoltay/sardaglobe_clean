@@ -336,9 +336,6 @@ bool GlobeEngine::Init() {
             }
         }
         
-        // Init heightmap manager for GPU terrain displacement
-        heightmapManager_ = std::make_unique<HeightmapManager>();
-        
         // P1: Connect DEM manager to tile pyramid for strict DEM+RGB quorum
         tilePyramid_.SetDemManager(demManager_.get());
         
@@ -380,9 +377,6 @@ bool GlobeEngine::Init() {
 
     // Set eviction callback for co-eviction cleanup.
     textureManager_->SetEvictionCallback([this](const TileKey& key) {
-        if (heightmapManager_) {
-            heightmapManager_->Release(key);
-        }
         if (demManager_ && config_.demRasterCoEviction) {
             demManager_->UnpinAndEvict(key);
             ++demCoEvictions_;
@@ -427,9 +421,6 @@ bool GlobeEngine::Init() {
     // Preload base tiles (LOD 0-1) for gap-free startup coverage
     PreloadBaseTiles();
 
-    // Track current terrain mode so runtime toggles can invalidate cleanly.
-    lastTerrainMode_ = config_.terrainDisplacementMode;
-    
     lastFrameTime_ = glfwGetTime();
     return true;
 }
@@ -488,8 +479,6 @@ void GlobeEngine::Shutdown() {
     
     if (demManager_) demManager_->Shutdown();
     if (meshScheduler_) meshScheduler_->Shutdown();
-    if (heightmapManager_) heightmapManager_->Clear();
-    
     // P0: Shutdown RockMeshManager with proper cleanup sequence
     // 1. Signal shutdown (stops new work)
     // 2. Join worker threads
@@ -573,6 +562,12 @@ bool GlobeEngine::GetScreenPointFromGeo(double lon, double lat, double& outScree
 void GlobeEngine::Update(double dt, double currentTime) {
     double updateStartMs = glfwGetTime() * 1000.0;
     ++frameSerial_;
+    demCoarseningCascadeTilesFrame_ = 0;
+    demPendingMissingOwnTargetFrame_ = 0;
+    demPendingMissingEdgeCoherentFrame_ = 0;
+    demPendingMissingNeighborParentFrame_ = 0;
+    edgePackAtomicRebuildsFrame_ = 0;
+    seamLatchResetCountFrame_ = 0;
 
     // Update flight controller (handles momentum, animations)
     flightController_->Update(dt, currentTime);
@@ -614,57 +609,8 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
     }
 
-    // Terrain displacement mode is user-toggleable from the debug UI.
-    // Invalidate all meshes/heightmaps on mode switches to avoid mixing CPU-baked geometry
-    // with GPU heightmap displacement (double-displacement = kilometer-scale cliffs/walls).
-    if (config_.terrainDisplacementMode != lastTerrainMode_) {
-        std::cout << "[Terrain] Displacement mode changed: "
-                  << (lastTerrainMode_ == DisplacementMode::CPU_MESH_BAKE ? "CPU" : "GPU")
-                  << " -> "
-                  << (config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE ? "CPU" : "GPU")
-                  << std::endl;
-
-        // Clear GPU heightmaps so min/max normalization stays consistent.
-        if (heightmapManager_) {
-            heightmapManager_->Clear();
-        }
-
-        rebuildPending_.clear();
-        demMeshWaitStartSec_.clear();
-
-        for (auto& [_, tile] : tiles_) {
-            if (tile.hasMesh) {
-                TileMeshBuilder::DeleteMesh(tile);
-            }
-            tile.meshPending = false;
-            ++tile.meshRevision;
-            tile.meshBuiltRevision = 0;
-            tile.prevEdgeCoarserMask = 0;
-            tile.edgeCoarserMask = 0;
-            tile.stitchMask = 0;
-            tile.skirtMask = 0;
-            tile.cornerLods = glm::vec4(0.0f);
-            tile.edgeGapMaxM = 0.0f;
-            tile.edgeGapM = glm::vec4(0.0f);
-            tile.seamGapMask = 0;
-            tile.demUsed = false;
-            tile.demPending = false;
-            tile.demEffectiveLevel = tile.demTargetLevel;
-        }
-
-        // Rebuild base tiles immediately so we always have fallback coverage.
-        for (const TileKey& base : baseTileKeys_) {
-            auto it = tiles_.find(base);
-            if (it == tiles_.end()) continue;
-            Tile& tile = it->second;
-            if (!tile.hasMesh || tile.meshBuiltRevision != tile.meshRevision) {
-                BuildTileMesh(tile);
-            }
-        }
-
-        lastTerrainMode_ = config_.terrainDisplacementMode;
-        frameRequested_ = true;
-    }
+    // Single terrain authority: always CPU mesh bake.
+    config_.terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;
     
     // Get camera position (in km from EarthCamera)
     glm::dvec3 cameraPosD = camera_->GetPositionECEF();
@@ -899,29 +845,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
         config_.demEnabled &&
         demManager_ &&
         (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
-    const bool useHeightmapForTerrain =
-        (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) &&
-        demManager_ &&
-        (demManager_->GetHealthStatus() == DemHealthStatus::Healthy) &&
-        heightmapManager_;
-
-    auto hasAnyHeightmap = [&](const TileKey& key) -> bool {
-        if (!useHeightmapForTerrain || !heightmapManager_) {
-            return false;
-        }
-        TileKey probe = key;
-        while (true) {
-            if (heightmapManager_->HasTexture(probe)) {
-                return true;
-            }
-            if (probe.level == 0) {
-                break;
-            }
-            probe = probe.Parent();
-        }
-        return false;
-    };
-
     auto hasAnyDemCoverage = [&](const TileKey& key) -> bool {
         if (!demManager_) {
             return false;
@@ -946,7 +869,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             return RenderBlockReason::NoTexture;
         }
         if (requireTerrainForQuorum) {
-            const bool hasTerrain = useHeightmapForTerrain ? hasAnyHeightmap(tile.key) : tile.demUsed;
+            const bool hasTerrain = tile.demUsed;
             // Only block rendering when terrain is expected to be available for this tile.
             // Some coarse/world-covering tiles have no DEM coverage; forcing a terrain quorum
             // on those tiles collapses the entire frame to a single blurry ancestor tile.
@@ -1327,9 +1250,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
     int textureUploadsThisFrame = textureManager_->ProcessUploads(tiles_, config_.uploadBudgetMs);
     frameTimings_.textureUploadMs = (glfwGetTime() * 1000.0) - uploadStartMs;
 
-    int heightmapUploadsThisFrame = 0;
-    
-    // DEM update + optional heightmap upload.
+    // DEM update.
     // Requests are already coordinated in the required imagery traversal above (P5.3).
     double demUpdateStartMs = glfwGetTime() * 1000.0;
     if (demManager_) {
@@ -1404,83 +1325,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
 
         demManager_->Update();
         
-        // Queue DEM data for GPU heightmap texture upload only when DEM endpoint is healthy.
-        // Otherwise mixed displaced/non-displaced tiles cause visible artifacts.
-        bool gpuDisplacementAllowed =
-            (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) &&
-            (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
-        if (heightmapManager_ && gpuDisplacementAllowed) {
-            // Use ranked required keys (view-centered) so visible tiles get heightmaps first.
-            int queued = 0;
-            constexpr int kMaxQueuesPerFrame = 256;
-            for (const RankedTile& ranked : tilePyramid_.GetRankedRequired()) {
-                if (queued >= kMaxQueuesPerFrame) break;
-                const TileKey& key = ranked.key;
-                if (!demManager_->HasData(key)) continue;
-                if (heightmapManager_->HasTexture(key)) continue;
-                DemGridData demData;
-                if (demManager_->GetGridData(key, demData)) {
-                    heightmapManager_->QueueUpload(key, demData, static_cast<float>(config_.demHeightScaleBase * config_.demExaggerationFactor));
-                    ++queued;
-                }
-            }
-
-            // Also queue heightmaps for leaf tiles (render + desired sets).
-            // Render set keeps currently drawn fallbacks complete; desired set prevents
-            // deadlock where quorum collapse shrinks renderLeafSet_ and starves fine-tile
-            // heightmap uploads forever.
-            auto queueLeafHeightmapWithAncestorFallback = [&](const TileKey& key) {
-                if (queued >= kMaxQueuesPerFrame) {
-                    return;
-                }
-                // Skip if any ancestor already has a heightmap (matches the missing-leaf check).
-                {
-                    bool anyHm = false;
-                    TileKey probe = key;
-                    while (true) {
-                        if (heightmapManager_->HasTexture(probe)) { anyHm = true; break; }
-                        if (probe.level == 0) break;
-                        probe = probe.Parent();
-                    }
-                    if (anyHm) {
-                        return;
-                    }
-                }
-                // Try exact DEM, then walk ancestors.
-                TileKey demKey = key;
-                bool foundDem = false;
-                while (true) {
-                    if (demManager_->HasData(demKey)) { foundDem = true; break; }
-                    if (demKey.level == 0) break;
-                    demKey = demKey.Parent();
-                }
-                if (!foundDem) {
-                    // DEM data missing — request it so the heightmap can be uploaded next frame.
-                    demManager_->Request(key, /*priority=*/2, /*score=*/100.0);
-                    return;
-                }
-                DemGridData demData;
-                if (demManager_->GetGridData(demKey, demData)) {
-                    heightmapManager_->QueueUpload(demKey, demData, static_cast<float>(config_.demHeightScaleBase * config_.demExaggerationFactor));
-                    ++queued;
-                }
-            };
-            for (const TileKey& key : renderLeafSet_) {
-                if (queued >= kMaxQueuesPerFrame) break;
-                queueLeafHeightmapWithAncestorFallback(key);
-            }
-            for (const TileKey& key : desiredLeafSet) {
-                if (queued >= kMaxQueuesPerFrame) break;
-                queueLeafHeightmapWithAncestorFallback(key);
-            }
-
-            // Process pending heightmap uploads (budgeted).
-            double budgetMs = 2.0;
-            if (heightmapManager_->GetPendingCount() > 0) {
-                budgetMs = 3.0;
-            }
-            heightmapUploadsThisFrame = heightmapManager_->ProcessUploads(budgetMs);
-        }
+        // GPU heightmap terrain path removed: DEM drives CPU mesh bake only.
     }
     
     // Compute edge masks + DEM effective level for seam/cliff fixes.
@@ -1490,13 +1335,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
     double edgeMaskStartMs = glfwGetTime() * 1000.0;
     const bool hasDem = (demManager_ != nullptr);
 
-    // We need two leaf contexts:
-    // - renderLeafSet_: what we actually draw this frame (post render-time quorum).
-    // - desiredLeafSet: what we are refining toward (pre-quorum).
-    //
-    // IMPORTANT: DEM/mesh readiness must keep advancing for desired tiles even when we
-    // temporarily render an ancestor fallback; otherwise the engine can get stuck drawing
-    // only coarse tiles (no progress toward refinement).
+    // Authoritative context for seam/stitch/DEM target computation is the actual render set.
+    // Desired-only keys are used for prefetch and request progress, but they do not drive
+    // render-edge state to avoid frame-level context divergence.
     const std::unordered_set<TileKey>& renderLeafSetForMasks = renderLeafSet_;
     const std::unordered_set<TileKey>& desiredLeafSetForMasks = desiredLeafSet;
 
@@ -1546,7 +1387,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
     };
 
     const std::unordered_set<TileKey> renderLeafCoverage = buildLeafCoverage(renderLeafSetForMasks);
-    const std::unordered_set<TileKey> desiredLeafCoverage = buildLeafCoverage(desiredLeafSetForMasks);
 
     auto keyAtLevel = [](TileKey k, int targetLevel) -> TileKey {
         int lvl = std::clamp(targetLevel, 0, k.level);
@@ -1650,11 +1490,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
         int effectiveDemLevel = key.level;
         if (demManager_) {
             const int maxReachableDemLevel = std::clamp(demProviderEffectiveMaxZoom_, 0, key.level);
+            const int coarseningDelta = std::clamp(config_.demMaxCoarseningDeltaLod, 0, 22);
+            const int minUnstableDemLevel =
+                std::clamp(key.level - (coarseningDelta + 2), 0, maxReachableDemLevel);
             const int currentTargetDemLevel =
                 std::clamp(static_cast<int>(tile.demTargetLevel), 0, maxReachableDemLevel);
             const TileKey currentTargetDemKey = keyAtLevel(key, currentTargetDemLevel);
             const bool hasExactSelfDemTile = demManager_->HasData(currentTargetDemKey);
             const bool selfDemUnstable = !tile.demUsed || (tile.demPending && !hasExactSelfDemTile);
+            bool unstableCascadeGuardHit = false;
             int cachedSelfDemLevel = 0;
             const bool hasCachedSelfDemAncestor =
                 demManager_->GetBestAvailableLevel(key, cachedSelfDemLevel);
@@ -1722,13 +1566,21 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     // common ancestor level to avoid large cliffs/walls on shared borders.
                     // Once stable, allow limited mismatch to preserve detail.
                     if (coarserLodEdge || openCoverageEdge || selfDemUnstable || neighborDemUnstable) {
+                        const int prevLevel = effectiveDemLevel;
                         effectiveDemLevel = std::min(effectiveDemLevel, neighborLevel);
+                        if (effectiveDemLevel < minUnstableDemLevel) {
+                            effectiveDemLevel = minUnstableDemLevel;
+                            unstableCascadeGuardHit = unstableCascadeGuardHit || (prevLevel > minUnstableDemLevel);
+                        }
                     } else if (effectiveDemLevel > neighborLevel + 1) {
                         // Same-LOD neighbors: allow at most one-level mismatch to reduce cliffs
                         // without collapsing whole regions to a deep ancestor level.
                         effectiveDemLevel = neighborLevel + 1;
                     }
                 }
+            }
+            if (unstableCascadeGuardHit) {
+                ++demCoarseningCascadeTilesFrame_;
             }
             effectiveDemLevel = std::clamp(effectiveDemLevel, 0, maxReachableDemLevel);
             // Guardrail: avoid deep, frame-to-frame coarsening cascades on seam feedback.
@@ -1737,7 +1589,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
             // and the tile is stable. Applying floor while only ancestor DEM exists can
             // force unavailable/coarser transitions and create visible seam walls.
             if (hasCachedSelfDemAncestor && hasExactSelfDemTile && !selfDemUnstable) {
-                const int coarseningDelta = std::clamp(config_.demMaxCoarseningDeltaLod, 0, 22);
                 const int minStableDemLevel =
                     std::max(0, std::min(key.level - coarseningDelta, maxReachableDemLevel));
                 effectiveDemLevel = std::max(effectiveDemLevel, minStableDemLevel);
@@ -1845,24 +1696,40 @@ void GlobeEngine::Update(double dt, double currentTime) {
             // Topology changes (edgeCoarserMask, stitchMask) still reset it.
         }
 
-        // FIX A: Reset seam-skirt latch on structural changes so stale skirts
-        // are re-evaluated with fresh geometry. Without this, skirts latched from
-        // an old DEM level persist forever even when no longer needed.
-        if (structuralChange) {
-            tile.latchedSeamSkirtMask = 0;
-        }
-
         // Check DEM availability - check edge-specific coarser neighbor parents
         if (demManager_ && tile.demPending) {
             const int targetDemLevel = std::clamp(static_cast<int>(tile.demTargetLevel), 0, key.level);
             const TileKey targetDemKey = keyAtLevel(key, targetDemLevel);
             const bool hasOwnDem = demManager_->HasData(targetDemKey);
             const bool hasAnyDem = demManager_->HasDataOrAncestor(targetDemKey);
+            bool hasAllEdgeCoherentDem = true;
             bool hasAllCoarserDem = true;
+
+            int edgeLevels[4] = {
+                static_cast<int>(tile.demEdgeLevelPack & 0xFFu),
+                static_cast<int>((tile.demEdgeLevelPack >> 8) & 0xFFu),
+                static_cast<int>((tile.demEdgeLevelPack >> 16) & 0xFFu),
+                static_cast<int>((tile.demEdgeLevelPack >> 24) & 0xFFu)
+            };
+            for (int dir = 0; dir < 4; ++dir) {
+                const int lvl = std::clamp(edgeLevels[dir], 0, key.level);
+                if (lvl < targetDemLevel) {
+                    const TileKey edgeKey = keyAtLevel(key, lvl);
+                    if (!demManager_->HasDataOrAncestor(edgeKey)) {
+                        hasAllEdgeCoherentDem = false;
+                        break;
+                    }
+                }
+            }
             
             // For each flagged edge, check if the neighbor's parent DEM is available
             // The neighbor's parent is the tile that provides coarser elevation data
-            if (key.level > 0 && tile.edgeCoarserMask != 0) {
+            if (key.level > 0) {
+                if (!demManager_->HasDataOrAncestor(key.Parent())) {
+                    hasAllCoarserDem = false;
+                }
+            }
+            if (hasAllCoarserDem && key.level > 0 && tile.edgeCoarserMask != 0) {
                 static const int edgeDx[] = {0, 1, 0, -1};  // N, E, S, W
                 static const int edgeDy[] = {-1, 0, 1, 0};
                 static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
@@ -1891,11 +1758,61 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     revisionChanged = true;
                     ++demTriggeredMeshRebuilds_;
                 }
-            } else if (hasOwnDem && hasAllCoarserDem) {
-                revisionChanged = true;
-                tile.demPending = false;
-                ++demTriggeredMeshRebuilds_;
+            } else {
+                uint8_t pendingReasons = 0;
+                if (!hasOwnDem) {
+                    pendingReasons |= Tile::DEM_PENDING_MISSING_OWN_TARGET;
+                }
+                if (!hasAllEdgeCoherentDem) {
+                    pendingReasons |= Tile::DEM_PENDING_MISSING_EDGE_COHERENT;
+                }
+                if (!hasAllCoarserDem) {
+                    pendingReasons |= Tile::DEM_PENDING_MISSING_NEIGHBOR_PARENT;
+                }
+                tile.demPendingReasonMask = pendingReasons;
+                if ((pendingReasons & Tile::DEM_PENDING_MISSING_OWN_TARGET) != 0) {
+                    ++demPendingMissingOwnTargetFrame_;
+                }
+                if ((pendingReasons & Tile::DEM_PENDING_MISSING_EDGE_COHERENT) != 0) {
+                    ++demPendingMissingEdgeCoherentFrame_;
+                }
+                if ((pendingReasons & Tile::DEM_PENDING_MISSING_NEIGHBOR_PARENT) != 0) {
+                    ++demPendingMissingNeighborParentFrame_;
+                }
+
+                if (pendingReasons == 0 && hasAnyDem) {
+                    revisionChanged = true;
+                    tile.demPending = false;
+                    ++demTriggeredMeshRebuilds_;
+                }
             }
+        } else {
+            tile.demPendingReasonMask = 0;
+        }
+
+        if (tile.demUsed && !tile.demPending) {
+            tile.stableDemFrames = static_cast<uint8_t>(std::min<int>(255, static_cast<int>(tile.stableDemFrames) + 1));
+        } else {
+            tile.stableDemFrames = 0;
+        }
+
+        // Reset seam-skirt latch only when structural topology changed and DEM is stable.
+        if (structuralChange && !tile.demPending && tile.stableDemFrames >= 2) {
+            tile.latchedSeamSkirtMask = 0;
+            ++seamLatchResetCountFrame_;
+        }
+
+        if (!tile.demPending && tile.demPendingReasonMask != 0) {
+            tile.demPendingReasonMask = 0;
+        }
+
+        if (demManager_ && tile.demPending &&
+            tile.demPendingReasonMask == 0 &&
+            tile.demUsed &&
+            demManager_->HasDataOrAncestor(keyAtLevel(key, static_cast<int>(tile.demTargetLevel)))) {
+            revisionChanged = true;
+            tile.demPending = false;
+            ++demTriggeredMeshRebuilds_;
         }
 
         // Hard safety: in CPU mesh-bake mode, a render-leaf mesh should never remain "flat"
@@ -1950,8 +1867,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
     };
 
-    // Update desired-only tiles first so DEM/mask revisions can progress even when
-    // renderLeafSet_ collapses to a coarse fallback.
+    // Desired-only keys are tracked for prefetch/request progress only.
     std::vector<TileKey> desiredOnlyKeys;
     desiredOnlyKeys.reserve(desiredLeafSetForMasks.size());
     for (const TileKey& key : desiredLeafSetForMasks) {
@@ -1960,7 +1876,15 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
     }
     for (const TileKey& key : desiredOnlyKeys) {
-        updateTileMasksAndDemTargets(key, desiredLeafSetForMasks, desiredLeafCoverage);
+        auto it = tiles_.find(key);
+        if (it == tiles_.end()) {
+            continue;
+        }
+        if (demManager_ && config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
+            const int targetDemLevel = std::clamp(static_cast<int>(it->second.demTargetLevel), 0, key.level);
+            const TileKey targetDemKey = keyAtLevel(key, targetDemLevel);
+            demManager_->Request(targetDemKey, /*priority=*/1, /*score=*/it->second.importance);
+        }
     }
     for (const TileKey& key : renderLeafSetForMasks) {
         updateTileMasksAndDemTargets(key, renderLeafSetForMasks, renderLeafCoverage);
@@ -2076,10 +2000,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
                 edgeLevels[dir] = std::clamp(chosenLevel, 0, selfDemLevel);
             }
 
-            uint32_t packed = packEdgeLevels(edgeLevels[0], edgeLevels[1], edgeLevels[2], edgeLevels[3]);
-            if (tile.demEdgeLevelPack != packed) {
+            const uint32_t packed = packEdgeLevels(edgeLevels[0], edgeLevels[1], edgeLevels[2], edgeLevels[3]);
+            const bool packChanged = (tile.demEdgeLevelPack != packed);
+            if (packChanged) {
                 tile.demEdgeLevelPack = packed;
-                ++tile.meshRevision;
             }
 
             // Request edge-coherent DEM keys when they are coarser than our current coherence target.
@@ -2096,6 +2020,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             // Mesh invalidation for coherent DEM edge keys:
             // When edge-coherent DEM keys (common ancestors) arrive after a mesh was baked using
             // only finer per-tile DEM keys, rebuild so border sampling converges and seams fade.
+            bool edgeAvailabilityRebuild = false;
             {
                 int levels[4] = {edgeLevels[0], edgeLevels[1], edgeLevels[2], edgeLevels[3]};
                 for (int dir = 0; dir < 4; ++dir) {
@@ -2108,15 +2033,18 @@ void GlobeEngine::Update(double dt, double currentTime) {
                         tile.demSourceLevelMin > static_cast<uint8_t>(lvl) &&
                         demManager_->HasData(edgeKey) &&
                         !tile.meshPending) {
-                        ++tile.meshRevision;
+                        edgeAvailabilityRebuild = true;
                     }
+                }
+            }
+            if (packChanged || edgeAvailabilityRebuild) {
+                ++tile.meshRevision;
+                if (packChanged && edgeAvailabilityRebuild) {
+                    ++edgePackAtomicRebuildsFrame_;
                 }
             }
         };
 
-        for (const TileKey& key : desiredOnlyKeys) {
-            updateDemEdgePackForTile(key, desiredLeafSetForMasks);
-        }
         for (const TileKey& key : renderLeafSetForMasks) {
             updateDemEdgePackForTile(key, renderLeafSetForMasks);
         }
@@ -2214,10 +2142,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
         if (tile.state == TileState::Unloaded || tile.state == TileState::Canceled) {
             double last = tile.lastAccessTime;
             if (last <= 0.0 || (cleanupNow - last) > UNLOADED_STALE_SEC) {
-                // Release heightmap texture before erasing
-                if (heightmapManager_) {
-                    heightmapManager_->Release(it->first);
-                }
                 if (textureManager_) {
                     textureManager_->ReleaseTileResources(tile);
                 }
@@ -2237,10 +2161,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
         } else if (tile.state == TileState::Failed) {
             double last = tile.lastRetryTime > 0.0 ? tile.lastRetryTime : tile.lastAccessTime;
             if (last <= 0.0 || (cleanupNow - last) > FAILED_STALE_SEC) {
-                // Release heightmap texture before erasing
-                if (heightmapManager_) {
-                    heightmapManager_->Release(it->first);
-                }
                 if (textureManager_) {
                     textureManager_->ReleaseTileResources(tile);
                 }
@@ -2290,10 +2210,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
     sceneSnapshot_.wireframe = config_.wireframeMode;
     sceneSnapshot_.useLogDepth = config_.logDepthEnabled && !config_.reversedZEnabled;
     sceneSnapshot_.logDepthFarKm = currentFarPlaneKm_;
-    sceneSnapshot_.useHeightmap =
-        (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) &&
-        demManager_ &&
-        (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
 
     bool hasBackgroundWork = false;
     if (flightController_ && flightController_->IsMoving()) {
@@ -2321,12 +2237,6 @@ void GlobeEngine::Update(double dt, double currentTime) {
         hasBackgroundWork = true;
     }
     if (demManager_ && demManager_->GetPendingCount() > 0) {
-        hasBackgroundWork = true;
-    }
-    if (heightmapManager_ && heightmapManager_->GetPendingCount() > 0) {
-        hasBackgroundWork = true;
-    }
-    if (heightmapUploadsThisFrame > 0) {
         hasBackgroundWork = true;
     }
 
@@ -2451,30 +2361,25 @@ void GlobeEngine::Render() {
 
     // RenderScene: consume immutable snapshot produced during Update.
     const glm::mat4& mvp = sceneSnapshot_.mvp;
-    HeightmapManager* hmForRender = sceneSnapshot_.useHeightmap ? heightmapManager_.get() : nullptr;
     const bool requireTerrainForSeamStats =
         config_.demEnabled &&
         demManager_ &&
         (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
     const bool requireTerrainForDraw = requireTerrainForSeamStats;
-    // P0 CRITICAL: Pass displacement mode to ensure distance-based morph is only used
-    // with GPU_HEIGHTMAP_DISPLACE mode. CPU_MESH_BAKE mode requires time-based morph
-    // to avoid phase mismatches between adjacent tiles (different spawn distances).
+    // CPU mesh bake is the single terrain authority.
     auto drawStats = renderFrame_->DrawTiles(
         sceneSnapshot_.leafSet, tiles_, mvp, sceneSnapshot_.cameraPos,
         sceneSnapshot_.currentTime, cameraSpeedKmPerSec_,
         requireTerrainForDraw,
         sceneSnapshot_.useLogDepth, sceneSnapshot_.logDepthFarKm,
         sceneSnapshot_.wireframe, sceneSnapshot_.loadingTexture,
-        hmForRender,
         demManager_.get(),
         config_.useRteRender,
         config_.fallbackRequireParentUntilChildrenReady,
         config_.useTexture2DArray,  // Faz 2B: Texture array support
         config_.useDistanceBasedTerrainMorph,  // P2: Distance-based morph
         config_.terrainMorphDistanceRangeKm,   // P2: Morph band width
-        config_.enableTerrainMorphTimeFallback, // P2: Time fallback on invalid distance
-        config_.terrainDisplacementMode        // P0: Displacement mode for morph compatibility
+        config_.enableTerrainMorphTimeFallback // P2: Time fallback on invalid distance
     );
     const auto& renderStats = tileRenderer_->GetStats();
 
@@ -2903,36 +2808,13 @@ void GlobeEngine::Render() {
         : 0.0;
     debugStats_.demFlatLeaves = demFlatLeaves;
     debugStats_.demPendingLeaves = demPendingLeaves;
+    debugStats_.demCoarseningCascadeTiles = demCoarseningCascadeTilesFrame_;
+    debugStats_.demPendingMissingOwnTarget = demPendingMissingOwnTargetFrame_;
+    debugStats_.demPendingMissingEdgeCoherent = demPendingMissingEdgeCoherentFrame_;
+    debugStats_.demPendingMissingNeighborParent = demPendingMissingNeighborParentFrame_;
+    debugStats_.edgePackAtomicRebuilds = edgePackAtomicRebuildsFrame_;
+    debugStats_.seamLatchResetCount = seamLatchResetCountFrame_;
     debugStats_.demCoEvictions = demCoEvictions_;
-    debugStats_.heightmapCacheSize = heightmapManager_ ? heightmapManager_->GetCacheSize() : 0;
-    debugStats_.heightmapPendingUploads = heightmapManager_ ? heightmapManager_->GetPendingCount() : 0;
-    debugStats_.heightmapMissingLeaves = 0;
-    if (sceneSnapshot_.useHeightmap && heightmapManager_) {
-        for (const TileKey& key : sceneSnapshot_.leafSet) {
-            TileKey probe = key;
-            bool found = false;
-            while (true) {
-                if (heightmapManager_->HasTexture(probe)) {
-                    found = true;
-                    break;
-                }
-                if (probe.level == 0) {
-                    break;
-                }
-                probe = probe.Parent();
-            }
-            if (!found) {
-                // Only count as "missing" if DEM data IS available (exact or ancestor)
-                // but the heightmap texture wasn't uploaded. If DEM data is genuinely
-                // unavailable (e.g. root tile 0/0/0 with world-spanning bbox rejected
-                // by the DEM service), GPU heightmap displacement simply can't be applied.
-                bool hasDemAnywhere = demManager_ && demManager_->HasDataOrAncestor(key);
-                if (hasDemAnywhere) {
-                    ++debugStats_.heightmapMissingLeaves;
-                }
-            }
-        }
-    }
     debugStats_.tilesUsingAncestorDem = tilesUsingAncestorDem;
     debugStats_.seamGapP95M = seamGapP95M;
     debugStats_.seamGapMaxM = seamGapMaxM;
@@ -3473,29 +3355,20 @@ void GlobeEngine::RenderDebugPanel() {
                 ImGui::Text("Terrain Required: %s", terrainRequired ? "yes" : "no");
                 ImGui::Text("DEM Co-Evicts: %zu", debugStats_.demCoEvictions);
             }
-            if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) {
-                ImGui::Text("Heightmap Cache/Pending: %d / %d",
-                            debugStats_.heightmapCacheSize,
-                            debugStats_.heightmapPendingUploads);
-                if (debugStats_.heightmapMissingLeaves > 0) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f),
-                                       "Heightmap Missing Leaves: %d",
-                                       debugStats_.heightmapMissingLeaves);
-                } else {
-                    ImGui::Text("Heightmap Missing Leaves: %d",
-                                debugStats_.heightmapMissingLeaves);
-                }
-            } else {
-                ImGui::Text("DEM Flat/Pending: %d / %d",
-                            debugStats_.demFlatLeaves, debugStats_.demPendingLeaves);
-                ImGui::Text("Ancestor DEM Ratio: %.1f%%",
-                            debugStats_.ancestorDemRatio * 100.0);
-            }
+            ImGui::Text("DEM Flat/Pending: %d / %d",
+                        debugStats_.demFlatLeaves, debugStats_.demPendingLeaves);
+            ImGui::Text("DEM Pending Reasons (Own/Edge/Nbr): %d / %d / %d",
+                        debugStats_.demPendingMissingOwnTarget,
+                        debugStats_.demPendingMissingEdgeCoherent,
+                        debugStats_.demPendingMissingNeighborParent);
+            ImGui::Text("DEM Cascade Guard Hits: %d", debugStats_.demCoarseningCascadeTiles);
+            ImGui::Text("EdgePack Atomic Rebuilds: %d", debugStats_.edgePackAtomicRebuilds);
+            ImGui::Text("Seam Latch Resets: %d", debugStats_.seamLatchResetCount);
+            ImGui::Text("Ancestor DEM Ratio: %.1f%%",
+                        debugStats_.ancestorDemRatio * 100.0);
             ImGui::Text("Legacy Seam Edges: %d", debugStats_.seamEdgeCount);
             ImGui::Text("Legacy Avg Edge Delta: %.2f m", debugStats_.avgEdgeHeightDeltaM);
-            if (config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
-                ImGui::Text("Ancestor DEM Tiles: %d", debugStats_.tilesUsingAncestorDem);
-            }
+            ImGui::Text("Ancestor DEM Tiles: %d", debugStats_.tilesUsingAncestorDem);
             if (debugStats_.placeholderTiles > 0) {
                 ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Placeholder: %d", debugStats_.placeholderTiles);
             }
@@ -3579,18 +3452,7 @@ void GlobeEngine::RenderDebugPanel() {
                 frameRequested_ = true;
             }
             
-            // Displacement mode toggle
-            const char* modeNames[] = { "CPU Mesh Bake", "GPU Heightmap" };
-            int currentMode = static_cast<int>(config_.terrainDisplacementMode);
-            if (ImGui::Combo("Terrain Mode", &currentMode, modeNames, 2)) {
-                config_.terrainDisplacementMode = static_cast<DisplacementMode>(currentMode);
-            }
-            if (config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE &&
-                demManager_ &&
-                demManager_->GetHealthStatus() != DemHealthStatus::Healthy) {
-                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
-                    "GPU terrain gecici devre disi (DEM sagliksiz)");
-            }
+            ImGui::Text("Terrain Mode: CPU Mesh Bake");
             
             // DEM Telemetry
             if (demManager_) {
@@ -4089,9 +3951,6 @@ bool GlobeEngine::RunSmokeTest() {
         if (demManager_ && demManager_->GetPendingCount() > 0) {
             return true;
         }
-        if (heightmapManager_ && heightmapManager_->GetPendingCount() > 0) {
-            return true;
-        }
         // Crossfade/morph can remain active even when background queues drain.
         if (debugStats_.crossfadingLeaves > 0) {
             return true;
@@ -4108,9 +3967,7 @@ bool GlobeEngine::RunSmokeTest() {
         int maxRenderQuorumDowngrades = 0;
         double maxSeamGapMaxM = 0.0;
         int maxCliffEdgeCount = 0;
-        int maxHeightmapMissingLeaves = 0;
         int endPlaceholderTiles = 0;
-        int endHeightmapMissingLeaves = 0;
         double endSeamGapMaxM = 0.0;
         int endCliffEdgeCount = 0;
         int endDemPendingLeaves = 0;
@@ -4127,7 +3984,6 @@ bool GlobeEngine::RunSmokeTest() {
         m.maxRenderQuorumDowngrades = std::max(m.maxRenderQuorumDowngrades, debugStats_.renderQuorumDowngrades);
         m.maxSeamGapMaxM = std::max(m.maxSeamGapMaxM, debugStats_.seamGapMaxM);
         m.maxCliffEdgeCount = std::max(m.maxCliffEdgeCount, debugStats_.cliffEdgeCount);
-        m.maxHeightmapMissingLeaves = std::max(m.maxHeightmapMissingLeaves, debugStats_.heightmapMissingLeaves);
         m.leafUnderflowDelta = debugStats_.leafUnderflowFrames - leafUnderflowStart;
     };
 
@@ -4142,7 +3998,6 @@ bool GlobeEngine::RunSmokeTest() {
             }
         }
         m.endPlaceholderTiles = debugStats_.placeholderTiles;
-        m.endHeightmapMissingLeaves = debugStats_.heightmapMissingLeaves;
         m.endSeamGapMaxM = debugStats_.seamGapMaxM;
         m.endCliffEdgeCount = debugStats_.cliffEdgeCount;
         m.endDemPendingLeaves = debugStats_.demPendingLeaves;
@@ -4222,8 +4077,6 @@ bool GlobeEngine::RunSmokeTest() {
                 " cliffs(max/end)=" + std::to_string(metrics.maxCliffEdgeCount) + "/" +
                 std::to_string(metrics.endCliffEdgeCount) +
                 " placeholder(end)=" + std::to_string(metrics.endPlaceholderTiles) +
-                " hmMissing(max/end)=" + std::to_string(metrics.maxHeightmapMissingLeaves) + "/" +
-                std::to_string(metrics.endHeightmapMissingLeaves) +
                 " demFlat(end)=" + std::to_string(metrics.endDemFlatLeaves) +
                 " demPending(end)=" + std::to_string(metrics.endDemPendingLeaves) +
                 " leafUnderflow(delta)=" + std::to_string(metrics.leafUnderflowDelta));
@@ -4238,18 +4091,10 @@ bool GlobeEngine::RunSmokeTest() {
             ok = false;
             logLine("FAIL: placeholderTiles > 0 at end (imagery incomplete/unavailable).");
         }
-        if (config_.demEnabled && demManager_ && demManager_->GetHealthStatus() == DemHealthStatus::Healthy &&
-            config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
+        if (config_.demEnabled && demManager_ && demManager_->GetHealthStatus() == DemHealthStatus::Healthy) {
             if (metrics.endSeamGapMaxM > 50.0) {
                 ok = false;
                 logLine("FAIL: seamGapMax exceeded 50m (terrain continuity).");
-            }
-        }
-        if (config_.demEnabled && demManager_ && demManager_->GetHealthStatus() == DemHealthStatus::Healthy &&
-            config_.terrainDisplacementMode == DisplacementMode::GPU_HEIGHTMAP_DISPLACE) {
-            if (metrics.endHeightmapMissingLeaves > 0) {
-                ok = false;
-                logLine("FAIL: heightmapMissingLeaves > 0 at end (GPU terrain incomplete).");
             }
         }
 
@@ -4258,30 +4103,11 @@ bool GlobeEngine::RunSmokeTest() {
 
     bool overallOk = true;
 
-    // Run for current mode; if DEM is healthy, also toggle and run the other terrain authority.
-    std::vector<DisplacementMode> modes;
-    modes.push_back(config_.terrainDisplacementMode);
-    if (config_.demEnabled && demManager_ && demManager_->GetHealthStatus() == DemHealthStatus::Healthy) {
-        DisplacementMode other =
-            (config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE)
-                ? DisplacementMode::GPU_HEIGHTMAP_DISPLACE
-                : DisplacementMode::CPU_MESH_BAKE;
-        modes.push_back(other);
-    }
-
-    for (DisplacementMode mode : modes) {
-        config_.terrainDisplacementMode = mode;
-        const char* name = (mode == DisplacementMode::CPU_MESH_BAKE) ? "CPU_MESH_BAKE" : "GPU_HEIGHTMAP";
-        logLine(std::string("\n-- Terrain mode: ") + name + " --");
-
-        // Give Update() a few frames to process mode switch invalidation.
-        for (int i = 0; i < 10; ++i) {
-            if (!stepFrame()) return false;
-        }
-
-        bool ok = runScenario(name);
-        overallOk = overallOk && ok;
-    }
+    config_.terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;
+    const char* name = "CPU_MESH_BAKE";
+    logLine(std::string("\n-- Terrain mode: ") + name + " --");
+    bool ok = runScenario(name);
+    overallOk = overallOk && ok;
 
     logLine(std::string("\nSMOKE TEST RESULT: ") + (overallOk ? "PASS" : "FAIL"));
     logLine("Report: smoke/smoke_report.txt");
@@ -4434,7 +4260,10 @@ void GlobeEngine::RunPanProfile() {
     std::cerr << "frame,zoom,leaves,tiles,lod_ms,req_ms,sched_ms,texUp_ms,"
               << "demUp_ms,edgeMask_ms,mesh_ms,render_ms,total_ms,"
               << "meshRebuilds,pendFetch,pendDecode,rebuildPending,"
-              << "triangles,maxLeafLevel,avgLeafSeg,minLeafSeg,maxLeafSeg\n";
+              << "triangles,maxLeafLevel,avgLeafSeg,minLeafSeg,maxLeafSeg,"
+              << "demPendingLeaves,seamGapMaxM,demCascadeGuard,"
+              << "demPendingOwn,demPendingEdge,demPendingNeighbor,"
+              << "edgePackAtomic,seamLatchReset\n";
 
     auto logFrame = [&](int frame) {
         int minSeg = std::numeric_limits<int>::max();
@@ -4478,6 +4307,14 @@ void GlobeEngine::RunPanProfile() {
             << "," << avgSeg
             << "," << minSeg
             << "," << maxSeg
+            << "," << debugStats_.demPendingLeaves
+            << "," << debugStats_.seamGapMaxM
+            << "," << debugStats_.demCoarseningCascadeTiles
+            << "," << debugStats_.demPendingMissingOwnTarget
+            << "," << debugStats_.demPendingMissingEdgeCoherent
+            << "," << debugStats_.demPendingMissingNeighborParent
+            << "," << debugStats_.edgePackAtomicRebuilds
+            << "," << debugStats_.seamLatchResetCount
             << "\n";
     };
 

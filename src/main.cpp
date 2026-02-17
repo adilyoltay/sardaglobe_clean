@@ -661,8 +661,6 @@ int main(int argc, char** argv) {
             runPanProfile = true;
         } else if (std::strcmp(argv[i], "--precision-report") == 0) {
             runPrecisionReport = true;
-        } else if (std::strcmp(argv[i], "--gpu-terrain") == 0) {
-            config.terrainDisplacementMode = globe::DisplacementMode::GPU_HEIGHTMAP_DISPLACE;
         } else if (std::strcmp(argv[i], "--quality") == 0 && i + 1 < argc) {
             const char* q = argv[++i];
             if (std::strcmp(q, "low") == 0) config.qualityMode = globe::QualityMode::LOW;
@@ -746,7 +744,6 @@ int main(int argc, char** argv) {
                       << "  --smoke           Run smoke test (zoom in/out + terrain) and exit\n"
                       << "  --profile-pan     Run zoom/pan profiler and print per-frame CSV\n"
                       << "  --precision-report  CPU-only precision baseline (Track A: #8)\n"
-                      << "  --gpu-terrain     Use GPU heightmap displacement (default: CPU mesh bake)\n"
                       << "  --quality MODE    Render quality: low | medium | high | ultra (default: medium)\n"
                       << "  --help            Show this help\n"
                       << "\nEnvironment:\n"

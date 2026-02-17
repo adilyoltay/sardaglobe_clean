@@ -11,8 +11,7 @@ namespace globe {
 
 // Terrain displacement authority
 enum class DisplacementMode {
-    CPU_MESH_BAKE,        // DEM baked into mesh vertices (default, proven)
-    GPU_HEIGHTMAP_DISPLACE // Flat mesh + GPU vertex shader displacement
+    CPU_MESH_BAKE        // DEM baked into mesh vertices (single authority)
 };
 
 // Google Earth quality modes for LOD selection
@@ -252,6 +251,11 @@ struct Config {
     bool demRasterCoEviction = true;  // Evict DEM cache entries when matching raster tile is evicted
     int demEdgeBlendSegments = 2;     // Edge coherence blend band (in vertex rings). 0 disables blending.
     bool demDebug = false;            // Enable DEM debug logging
+    // DEM mesh safety clamp (km). Prevents NaN/extreme input from collapsing vertices.
+    float demHeightMinKm = -0.012f;
+    float demHeightMaxKm = 0.012f;
+    // Evidence-trap mode: abort on invalid vertex in demDebug, or auto-recover when false.
+    bool demDebugAbortOnInvalidVertex = false;
     DisplacementMode terrainDisplacementMode = DisplacementMode::CPU_MESH_BAKE;  // Single authority
     float skirtDepthNearKm = 0.03f;   // Near-view skirt depth (km, ~30 m)
     float skirtDepthFarKm = 0.15f;    // Far-view skirt depth (km, ~150 m)
@@ -313,6 +317,9 @@ struct Config {
         demMaxZoom = std::clamp(demMaxZoom, 0, 22);
         demProviderEffectiveMaxZoom = std::clamp(demProviderEffectiveMaxZoom, 0, 22);
         demMaxCoarseningDeltaLod = std::clamp(demMaxCoarseningDeltaLod, 0, 22);
+        if (!std::isfinite(demHeightMinKm)) demHeightMinKm = -0.012f;
+        if (!std::isfinite(demHeightMaxKm)) demHeightMaxKm = 0.012f;
+        if (demHeightMinKm > demHeightMaxKm) std::swap(demHeightMinKm, demHeightMaxKm);
     }
 };
 

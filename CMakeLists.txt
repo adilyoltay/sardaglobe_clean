@@ -130,7 +130,6 @@ add_executable(native_globe
   src/rendering/tile_mesh_builder.cpp
   src/rendering/tile_mesh_scheduler.cpp
   src/rendering/render_frame.cpp
-  src/rendering/heightmap_manager.cpp
   src/rendering/rockmesh_manager.cpp
   src/rendering/rockmesh_runtime.cpp
   src/rendering/pbo_upload_manager.cpp
@@ -1109,3 +1108,73 @@ target_include_directories(rockmesh_sanity_test PRIVATE
 )
 target_link_libraries(rockmesh_sanity_test PRIVATE glm::glm)
 add_test(NAME RockMeshSanityTest COMMAND rockmesh_sanity_test)
+
+# GE Parity P0 Consolidation tests
+add_executable(mesh_builder_height_sanitize_test
+  tests/mesh_builder_height_sanitize_test.cpp
+  tests/stubs/network_panel_stub.cpp
+  src/rendering/tile_mesh_builder.cpp
+  src/rendering/mesh_template.cpp
+  src/core/ellipsoid.cpp
+  src/io/dem_manager.cpp
+  src/io/providers/dem_fetch_result.cpp
+  src/io/providers/terrain_rgb_provider.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
+)
+target_include_directories(mesh_builder_height_sanitize_test PRIVATE
+  src
+  third_party/glad/include
+)
+target_link_libraries(mesh_builder_height_sanitize_test PRIVATE glad glm::glm CURL::libcurl ZLIB::ZLIB)
+add_test(NAME MeshBuilderHeightSanitizeTest COMMAND mesh_builder_height_sanitize_test)
+
+add_executable(dem_coarsening_cascade_guard_test
+  tests/dem_coarsening_cascade_guard_test.cpp
+)
+target_include_directories(dem_coarsening_cascade_guard_test PRIVATE
+  src
+)
+target_link_libraries(dem_coarsening_cascade_guard_test PRIVATE glm::glm)
+add_test(NAME DemCoarseningCascadeGuardTest COMMAND dem_coarsening_cascade_guard_test)
+
+add_executable(dem_pending_provider_cap_convergence_test
+  tests/dem_pending_provider_cap_convergence_test.cpp
+  tests/stubs/network_panel_stub.cpp
+  src/io/dem_manager.cpp
+  src/io/providers/dem_fetch_result.cpp
+  src/io/providers/terrain_rgb_provider.cpp
+  src/io/terrain_rgb_decoder.cpp
+  src/io/stb_image_impl.c
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/google_earth_elevation_provider.cpp
+  src/io/providers/google_earth_dem_provider.cpp
+)
+target_include_directories(dem_pending_provider_cap_convergence_test PRIVATE
+  src
+)
+target_link_libraries(dem_pending_provider_cap_convergence_test PRIVATE glm::glm CURL::libcurl ZLIB::ZLIB)
+add_test(NAME DemPendingProviderCapConvergenceTest COMMAND dem_pending_provider_cap_convergence_test)
+
+add_executable(dem_edge_pack_atomicity_test
+  tests/dem_edge_pack_atomicity_test.cpp
+)
+target_include_directories(dem_edge_pack_atomicity_test PRIVATE
+  src
+)
+target_link_libraries(dem_edge_pack_atomicity_test PRIVATE glm::glm)
+add_test(NAME DemEdgePackAtomicityTest COMMAND dem_edge_pack_atomicity_test)
+
+add_executable(render_desired_context_consistency_test
+  tests/render_desired_context_consistency_test.cpp
+)
+target_include_directories(render_desired_context_consistency_test PRIVATE
+  src
+)
+target_link_libraries(render_desired_context_consistency_test PRIVATE glm::glm)
+add_test(NAME RenderDesiredContextConsistencyTest COMMAND render_desired_context_consistency_test)
