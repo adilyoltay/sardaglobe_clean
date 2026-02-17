@@ -62,6 +62,20 @@ std::optional<DemProviderType> ParseDemProvider(const std::string& provider) {
     return std::nullopt;
 }
 
+int ProviderMaxDemZoom(DemProviderType provider) {
+    switch (provider) {
+        case DemProviderType::GoogleEarth:
+            return 22;
+        case DemProviderType::TerrainRGB:
+            return 15;
+    }
+    return 15;
+}
+
+const char* ProviderLabel(DemProviderType provider) {
+    return provider == DemProviderType::GoogleEarth ? "google-earth" : "terrain-rgb";
+}
+
 } // namespace
 
 GlobeEngine::GlobeEngine(const Config& config)
@@ -75,6 +89,8 @@ GlobeEngine::~GlobeEngine() {
 bool GlobeEngine::Init() {
     shutdown_ = false;
     glReady_ = false;
+    didAutoFallback_ = false;
+    noDataFloorSkipLogCount_ = 0;
     
     // P1-4: Config validasyonu (çakışan ayarları düzelt)
     config_.Validate();
@@ -181,10 +197,20 @@ bool GlobeEngine::Init() {
                       << "Expected: terrain-rgb, terrarium, google-earth" << std::endl;
             return false;
         }
+        const DemProviderType selectedProvider = providerOpt.value();
+        const int requestedDemMaxZoom = std::clamp(config_.demMaxZoom, 0, 22);
+        const int providerDemMaxZoom = ProviderMaxDemZoom(selectedProvider);
+        demProviderEffectiveMaxZoom_ = std::min(requestedDemMaxZoom, providerDemMaxZoom);
+        config_.demProviderEffectiveMaxZoom = demProviderEffectiveMaxZoom_;
+        std::cout << "[DEM] Provider=" << ProviderLabel(selectedProvider)
+                  << " | RequestedMaxZoom=" << requestedDemMaxZoom
+                  << " | ProviderCap=" << providerDemMaxZoom
+                  << " | EffectiveMaxZoom=" << demProviderEffectiveMaxZoom_
+                  << std::endl;
 
         // Resolve GE epoch from RockMesh octree when requested.
         std::string resolvedGeEpoch = config_.geEpoch;
-        const bool wantGeEpochAutoDetect = (providerOpt.value() == DemProviderType::GoogleEarth) &&
+        const bool wantGeEpochAutoDetect = (selectedProvider == DemProviderType::GoogleEarth) &&
                                           config_.geEpochAutoDetect &&
                                           config_.geMeshEnabled() &&
                                           config_.rockMeshRenderEnabled &&  // P0: Kill-switch check
@@ -204,15 +230,21 @@ bool GlobeEngine::Init() {
             }
 
             if (rockMeshManager_) {
-                const auto start = std::chrono::steady_clock::now();
-                const auto deadline = start + std::chrono::milliseconds(900);
-
-                while (std::chrono::steady_clock::now() < deadline) {
-                    resolvedGeEpoch = rockMeshManager_->GetResolvedEpoch();
-                    if (!resolvedGeEpoch.empty()) {
-                        break;
+                constexpr int kEpochResolveAttempts = 2;
+                for (int attempt = 0; attempt < kEpochResolveAttempts && resolvedGeEpoch.empty(); ++attempt) {
+                    const int waitMs = (attempt == 0) ? 900 : 1400;
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
+                    while (std::chrono::steady_clock::now() < deadline) {
+                        resolvedGeEpoch = rockMeshManager_->GetResolvedEpoch();
+                        if (!resolvedGeEpoch.empty()) {
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    if (resolvedGeEpoch.empty() && attempt + 1 < kEpochResolveAttempts) {
+                        std::cerr << "[DEM] GE epoch auto-detect retrying..." << std::endl;
+                    }
                 }
             }
 
@@ -224,9 +256,9 @@ bool GlobeEngine::Init() {
             }
         }
 
-        demConfig.providerType = providerOpt.value();
+        demConfig.providerType = selectedProvider;
         demConfig.meshN = config_.demMeshN;
-        demConfig.maxZoom = config_.demMaxZoom;
+        demConfig.maxZoom = demProviderEffectiveMaxZoom_;
         demConfig.cacheSize = config_.demCacheSize;
         demConfig.debug = config_.demDebug;
         demConfig.demNoDataMinHeightM = config_.demNoDataMinHeightM;
@@ -248,7 +280,6 @@ bool GlobeEngine::Init() {
         
         // Startup health check
         auto health = demManager_->CheckHealth();
-        static bool didAutoFallback = false;  // Guard: prevent recursive fallback loops
         
         if (health != DemHealthStatus::Healthy) {
             // CRITICAL FIX: Auto-fallback from google-earth to terrain-rgb on auth failure
@@ -256,9 +287,9 @@ bool GlobeEngine::Init() {
                 (health == DemHealthStatus::AuthFailed ||
                  health == DemHealthStatus::BadResponse ||
                  health == DemHealthStatus::Blocked) &&
-                !didAutoFallback) {
+                !didAutoFallback_) {
                 
-                didAutoFallback = true;  // Mark fallback as attempted
+                didAutoFallback_ = true;  // Mark fallback as attempted
                 std::cerr << "[DEM] GE Elevation unavailable (auth/blocked). "
                           << "Auto-fallback to terrain-rgb..." << std::endl;
                 
@@ -267,6 +298,11 @@ bool GlobeEngine::Init() {
                 
                 DemManager::Config fallbackConfig = demConfig;
                 fallbackConfig.providerType = DemProviderType::TerrainRGB;
+                const int fallbackProviderDemMaxZoom = ProviderMaxDemZoom(fallbackConfig.providerType);
+                demProviderEffectiveMaxZoom_ =
+                    std::min(requestedDemMaxZoom, fallbackProviderDemMaxZoom);
+                config_.demProviderEffectiveMaxZoom = demProviderEffectiveMaxZoom_;
+                fallbackConfig.maxZoom = demProviderEffectiveMaxZoom_;
                 // Use keyless public Terrarium URL if not provided
                 if (fallbackConfig.baseUrl.empty() || 
                     fallbackConfig.baseUrl.find("earth-pa.clients6.google.com") != std::string::npos) {
@@ -277,14 +313,16 @@ bool GlobeEngine::Init() {
                 health = demManager_->CheckHealth();
                 
                 if (health == DemHealthStatus::Healthy) {
-                    std::cerr << "[DEM] Auto-fallback to terrain-rgb SUCCESSFUL." << std::endl;
+                    std::cerr << "[DEM] Auto-fallback to terrain-rgb SUCCESSFUL. "
+                              << "EffectiveMaxZoom=" << demProviderEffectiveMaxZoom_
+                              << std::endl;
                 } else {
                     std::cerr << "[DEM] Auto-fallback to terrain-rgb also failed (" 
                               << DemHealthStatusToString(health) 
                               << "). If using Mapbox tiles set NATIVE_GLOBE_DEM_TOKEN; "
                               << "public Terrarium works without a key." << std::endl;
                 }
-            } else if (demConfig.providerType == DemProviderType::GoogleEarth && !didAutoFallback) {
+            } else if (demConfig.providerType == DemProviderType::GoogleEarth && !didAutoFallback_) {
                 // Other GE failures (not auth) - hard fail
                 std::cerr << "[DEM] ERROR: google-earth provider initialization failed (" 
                           << DemHealthStatusToString(health) << "). "
@@ -1611,8 +1649,16 @@ void GlobeEngine::Update(double dt, double currentTime) {
         Tile& tile = it->second;
         int effectiveDemLevel = key.level;
         if (demManager_) {
-            const bool selfDemUnstable = tile.demPending || !tile.demUsed;
-            effectiveDemLevel = resolveBestAvailableDemLevel(key);
+            const int maxReachableDemLevel = std::clamp(demProviderEffectiveMaxZoom_, 0, key.level);
+            const int currentTargetDemLevel =
+                std::clamp(static_cast<int>(tile.demTargetLevel), 0, maxReachableDemLevel);
+            const TileKey currentTargetDemKey = keyAtLevel(key, currentTargetDemLevel);
+            const bool hasExactSelfDemTile = demManager_->HasData(currentTargetDemKey);
+            const bool selfDemUnstable = !tile.demUsed || (tile.demPending && !hasExactSelfDemTile);
+            int cachedSelfDemLevel = 0;
+            const bool hasCachedSelfDemAncestor =
+                demManager_->GetBestAvailableLevel(key, cachedSelfDemLevel);
+            effectiveDemLevel = hasCachedSelfDemAncestor ? cachedSelfDemLevel : 0;
             static const int dx[] = {0, 1, 0, -1};
             static const int dy[] = {-1, 0, 1, 0};
             static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
@@ -1684,7 +1730,30 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     }
                 }
             }
-            effectiveDemLevel = std::clamp(effectiveDemLevel, 0, key.level);
+            effectiveDemLevel = std::clamp(effectiveDemLevel, 0, maxReachableDemLevel);
+            // Guardrail: avoid deep, frame-to-frame coarsening cascades on seam feedback.
+            // Large DEM level drops are the primary source of kilometer-scale plate cliffs.
+            // Keep coherence adaptation local, but only when exact DEM is already cached
+            // and the tile is stable. Applying floor while only ancestor DEM exists can
+            // force unavailable/coarser transitions and create visible seam walls.
+            if (hasCachedSelfDemAncestor && hasExactSelfDemTile && !selfDemUnstable) {
+                const int coarseningDelta = std::clamp(config_.demMaxCoarseningDeltaLod, 0, 22);
+                const int minStableDemLevel =
+                    std::max(0, std::min(key.level - coarseningDelta, maxReachableDemLevel));
+                effectiveDemLevel = std::max(effectiveDemLevel, minStableDemLevel);
+            } else if (!hasCachedSelfDemAncestor) {
+                // No DEM chain in cache: preserve root fallback so terrain appears immediately.
+                effectiveDemLevel = 0;
+                if (config_.demDebug && noDataFloorSkipLogCount_ < kMaxNoDataFloorSkipLogs) {
+                    ++noDataFloorSkipLogCount_;
+                    std::cerr << "[DEM] No cached DEM ancestor chain for " << key.ToString()
+                              << "; preserving root fallback level 0"
+                              << " (effective=" << effectiveDemLevel
+                              << ", log " << noDataFloorSkipLogCount_
+                              << "/" << kMaxNoDataFloorSkipLogs << ")"
+                              << std::endl;
+                }
+            }
         }
 
         // FIX A: Seam→skirt feedback with hysteresis (latch).
@@ -1785,8 +1854,10 @@ void GlobeEngine::Update(double dt, double currentTime) {
 
         // Check DEM availability - check edge-specific coarser neighbor parents
         if (demManager_ && tile.demPending) {
-            const bool hasOwnDem = demManager_->HasData(key);
-            const bool hasAnyDem = demManager_->HasDataOrAncestor(key);
+            const int targetDemLevel = std::clamp(static_cast<int>(tile.demTargetLevel), 0, key.level);
+            const TileKey targetDemKey = keyAtLevel(key, targetDemLevel);
+            const bool hasOwnDem = demManager_->HasData(targetDemKey);
+            const bool hasAnyDem = demManager_->HasDataOrAncestor(targetDemKey);
             bool hasAllCoarserDem = true;
             
             // For each flagged edge, check if the neighbor's parent DEM is available
@@ -1802,7 +1873,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
                         TileKey neighbor = key.Neighbor(edgeDx[dir], edgeDy[dir]);
                         if (neighbor.IsValid()) {
                             TileKey neighborParent = neighbor.Parent();
-                            if (!demManager_->HasData(neighborParent)) {
+                            if (!demManager_->HasDataOrAncestor(neighborParent)) {
                                 hasAllCoarserDem = false;
                                 break;
                             }
@@ -1998,17 +2069,9 @@ void GlobeEngine::Update(double dt, double currentTime) {
                     }
                 }
 
-                // Seam feedback: if we still measure a significant gap on this edge,
-                // bias ONE level coarser so both sides converge on a shared ancestor DEM.
-                //
-                // IMPORTANT: Do NOT use gap-proportional bias (e.g. log2(gapM/threshold)).
-                // That creates a positive feedback catastrophe: large gap → aggressive bias →
-                // edge samples at root DEM level → even larger gap → locked at max bias.
-                // The commonAncestorLevel() above already finds the correct shared level;
-                // at most one extra coarsening step is needed for residual rounding.
-                if (tile.seamGapMask & edgeBits[dir]) {
-                    chosenLevel = std::max(0, chosenLevel - 1);
-                }
+                // Seam feedback coarsening disabled:
+                // The extra "-1 level" heuristic can accumulate across frames and
+                // collapse edge DEM levels to the root, producing large tile plate cliffs.
 
                 edgeLevels[dir] = std::clamp(chosenLevel, 0, selfDemLevel);
             }

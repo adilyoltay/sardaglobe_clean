@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <iostream>
 #include <cassert>
 
@@ -55,6 +56,54 @@ struct DrawCallBreakdown {
     int drawCalls = 0;
     int triangles = 0;
 };
+
+bool TextureBindTelemetryEnabled() {
+    static int enabled = []() -> int {
+        const char* env = std::getenv("NATIVE_GLOBE_TEXTURE_BIND_DEBUG");
+        if (!env || env[0] == '\0') {
+            return 0;
+        }
+        const char c = env[0];
+        return (c == '1' || c == 'y' || c == 'Y' || c == 't' || c == 'T') ? 1 : 0;
+    }();
+    return enabled != 0;
+}
+
+void LogTextureBindTelemetry(const char* stage, GLenum target, GLuint expectedTexture, int layer) {
+    if (!TextureBindTelemetryEnabled()) {
+        return;
+    }
+    GLint boundTexture = 0;
+    GLint activeTexture = 0;
+    GLint currentProgram = 0;
+    if (target == GL_TEXTURE_2D) {
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
+    } else if (target == GL_TEXTURE_2D_ARRAY) {
+        glGetIntegerv(GL_TEXTURE_BINDING_2D_ARRAY, &boundTexture);
+    }
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+
+    const bool badBinding =
+        expectedTexture == 0 || boundTexture == 0 || static_cast<GLuint>(boundTexture) != expectedTexture;
+    if (!badBinding) {
+        return;
+    }
+
+    static int emitted = 0;
+    if (emitted >= 32) {
+        return;
+    }
+    ++emitted;
+    std::cerr << "[TextureBind][WARN] stage=" << stage
+              << " target=" << (target == GL_TEXTURE_2D_ARRAY ? "2D_ARRAY" : "2D")
+              << " expectedTex=" << expectedTexture
+              << " boundTex=" << boundTexture
+              << " activeUnit=" << (activeTexture - GL_TEXTURE0)
+              << " program=" << currentProgram
+              << " layer=" << layer
+              << std::endl;
+}
 
 DrawCallBreakdown DrawTileGeometry(const Tile& tile) {
     DrawCallBreakdown out;
@@ -537,11 +586,13 @@ void TileRenderer::RenderTile(const Tile& tile, float terrainMorph) {
     if (useArrayTexture) {
         // Texture array path - bind array and set layer
         glBindTexture(GL_TEXTURE_2D_ARRAY, tile.textureId);
+        LogTextureBindTelemetry("RenderTile.mainArray", GL_TEXTURE_2D_ARRAY, tile.textureId, tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetTextureLayerLocation(), tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetUseTexture2DLocation(), 0);
     } else {
         // Legacy 2D texture path
         glBindTexture(GL_TEXTURE_2D, tile.textureId);
+        LogTextureBindTelemetry("RenderTile.main2D", GL_TEXTURE_2D, tile.textureId, -1);
         if (useTextureArrayBatch_) {
             glUniform1i(shaderManager_.GetUseTexture2DLocation(), 1);
         }
@@ -618,10 +669,13 @@ void TileRenderer::RenderTileWithHeightmap(const Tile& tile, uint32_t heightmapI
     glActiveTexture(GL_TEXTURE0);
     if (useArrayTexture) {
         glBindTexture(GL_TEXTURE_2D_ARRAY, tile.textureId);
+        LogTextureBindTelemetry("RenderTileWithHeightmap.mainArray", GL_TEXTURE_2D_ARRAY,
+                                tile.textureId, tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetTextureLayerLocation(), tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetUseTexture2DLocation(), 0);
     } else {
         glBindTexture(GL_TEXTURE_2D, tile.textureId);
+        LogTextureBindTelemetry("RenderTileWithHeightmap.main2D", GL_TEXTURE_2D, tile.textureId, -1);
         if (useTextureArrayBatch_) {
             glUniform1i(shaderManager_.GetUseTexture2DLocation(), 1);
         }
@@ -733,12 +787,15 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
         useTextureArrayBatch_ && tile.usesTextureArray && tile.textureArrayLayer >= 0;
     if (useMainTextureArray) {
         glBindTexture(GL_TEXTURE_2D_ARRAY, tile.textureId);
+        LogTextureBindTelemetry("RenderTileWithCrossfade.mainArray", GL_TEXTURE_2D_ARRAY,
+                                tile.textureId, tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetTextureLayerLocation(), tile.textureArrayLayer);
     } else {
         if (useTextureArrayBatch_) {
             glUniform1i(shaderManager_.GetUseTexture2DLocation(), 1);
         }
         glBindTexture(GL_TEXTURE_2D, tile.textureId);
+        LogTextureBindTelemetry("RenderTileWithCrossfade.main2D", GL_TEXTURE_2D, tile.textureId, -1);
     }
     ApplyPerTileUniforms(shaderManager_, tile, tile.texScaleOffset, useRteBatch_);
 
@@ -752,10 +809,13 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 1);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), unpopTextureLayer);
         glBindTexture(GL_TEXTURE_2D_ARRAY, unpopTextureId);
+        LogTextureBindTelemetry("RenderTileWithCrossfade.unpopArray", GL_TEXTURE_2D_ARRAY,
+                                unpopTextureId, unpopTextureLayer);
     } else {
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 0);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), 0);
         glBindTexture(GL_TEXTURE_2D, unpopTextureId);
+        LogTextureBindTelemetry("RenderTileWithCrossfade.unpop2D", GL_TEXTURE_2D, unpopTextureId, -1);
     }
 
     glUniform1i(shaderManager_.GetRasterCrossfadeLocation(), 1);

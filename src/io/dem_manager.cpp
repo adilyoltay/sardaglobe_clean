@@ -114,6 +114,7 @@ DemManager::DemManager(const Config& config) : config_(config) {
                                  std::getenv(config_.geTokenEnv.c_str()) : "";
             geConfig.elevationType = config_.geElevationType;
             geConfig.meshN = config_.meshN;
+            geConfig.maxZoom = config_.maxZoom;
             geConfig.timeoutSec = config_.timeoutSec;
             provider_ = std::make_unique<GoogleEarthDemProvider>(geConfig);
             break;

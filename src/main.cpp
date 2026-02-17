@@ -13,6 +13,14 @@
 #include <string>
 #include <limits>
 #include <cerrno>
+#include <cstdint>
+
+#if defined(__APPLE__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 // Phase 6.4: Strict numeric parsing helper for CLI flags with overflow protection
 // Returns true on success, false on parse failure
@@ -110,6 +118,57 @@ std::string RedactSensitiveUrlParams(const std::string& input) {
     redact(masked, "access_token");
     redact(masked, "key");
     return masked;
+}
+
+uint64_t DetectPhysicalMemoryBytes() {
+#if defined(__APPLE__)
+    uint64_t memBytes = 0;
+    size_t len = sizeof(memBytes);
+    int mib[2] = {CTL_HW, HW_MEMSIZE};
+    if (sysctl(mib, 2, &memBytes, &len, nullptr, 0) == 0) {
+        return memBytes;
+    }
+#elif defined(__linux__)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long pageSize = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && pageSize > 0) {
+        return static_cast<uint64_t>(pages) * static_cast<uint64_t>(pageSize);
+    }
+#endif
+    return 0;
+}
+
+void AutoTuneMemoryCaches(globe::Config& config) {
+    if (!config.autoTuneMemoryCache) {
+        return;
+    }
+
+    constexpr uint64_t kDefaultPerCache = 1024ull * 1024ull * 1024ull;  // 1GB
+    if (config.memoryCacheMaxBytes != kDefaultPerCache ||
+        config.decodedMemoryCacheMaxBytes != kDefaultPerCache) {
+        return;  // User-configured values: don't override.
+    }
+
+    const uint64_t physicalBytes = DetectPhysicalMemoryBytes();
+    if (physicalBytes == 0) {
+        return;
+    }
+
+    constexpr uint64_t kMinTotalBudget = 512ull * 1024ull * 1024ull;   // 512MB total
+    constexpr uint64_t kMaxTotalBudget = 2ull * 1024ull * 1024ull * 1024ull;  // 2GB total
+
+    uint64_t totalBudget = physicalBytes / 4;  // 25% of physical RAM
+    totalBudget = std::clamp(totalBudget, kMinTotalBudget, kMaxTotalBudget);
+    const uint64_t perCacheBudget = totalBudget / 2;
+
+    config.memoryCacheMaxBytes = static_cast<size_t>(perCacheBudget);
+    config.decodedMemoryCacheMaxBytes = static_cast<size_t>(perCacheBudget);
+
+    std::cout << "[Config] Auto memory cache sizing: RAM="
+              << (physicalBytes / (1024ull * 1024ull))
+              << "MB -> Memory=" << (perCacheBudget / (1024ull * 1024ull))
+              << "MB, Decoded=" << (perCacheBudget / (1024ull * 1024ull))
+              << "MB\n";
 }
 
 // Track A: #8 Precision Baseline Report
@@ -627,7 +686,7 @@ int main(int argc, char** argv) {
                       << "  --dem-auth U:P    DEM HTTP basic auth (user:password)\n"
                       << "  --dem-api-key KEY DEM Terrain-RGB API key (optional)\n"
                       << "  --dem-api-key-env ENV DEM API key env var (default: NATIVE_GLOBE_DEM_TOKEN)\n"
-                      << "  --dem-max-zoom N  Max DEM source zoom level (default 15)\n"
+                      << "  --dem-max-zoom N  Max DEM source zoom level (default 22)\n"
                       << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
                       << "  --ge-elevation-endpoint URL  Google Earth elevation endpoint\n"
                       << "  --ge-elevation-path PATH     Override {path} in elevation URL (default: Elevation)\n"
@@ -719,6 +778,8 @@ int main(int argc, char** argv) {
         }
     }
     
+    AutoTuneMemoryCaches(config);
+
     std::cout << "Native Globe - Clean Architecture\n";
     std::cout << "Tile URL: " << config.tileUrl << "\n";
     if (config.demProvider == "google-earth") {

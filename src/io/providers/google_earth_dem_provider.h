@@ -14,6 +14,7 @@ struct GoogleEarthDemConfig {
     std::string authToken;
     int elevationType = 0;  // 0=ELLIPSOID, 1=TERRAIN, 2=SEA_LEVEL
     int meshN = 17;         // Grid resolution per tile
+    int maxZoom = 22;       // Provider max zoom cap
     int timeoutSec = 30;
 };
 
@@ -42,6 +43,7 @@ public:
 private:
     std::unique_ptr<IElevationProvider> elevationProvider_;
     int meshN_;
+    int maxZoom_ = 22;
     std::string elevationEndpoint_;  // For NetworkPanel logging
     std::atomic<DemHealthStatus> healthStatus_{DemHealthStatus::Unknown};
     

@@ -20,7 +20,9 @@ static GoogleEarthElevationConfig ToElevationConfig(const GoogleEarthDemConfig& 
 }
 
 GoogleEarthDemProvider::GoogleEarthDemProvider(const GoogleEarthDemConfig& config)
-    : meshN_(config.meshN), elevationEndpoint_(config.elevationEndpoint) {
+    : meshN_(config.meshN),
+      maxZoom_(std::clamp(config.maxZoom, 0, 22)),
+      elevationEndpoint_(config.elevationEndpoint) {
     // Create elevation provider
     elevationProvider_ = std::make_unique<GoogleEarthElevationProvider>(
         ToElevationConfig(config));
@@ -29,7 +31,10 @@ GoogleEarthDemProvider::GoogleEarthDemProvider(const GoogleEarthDemConfig& confi
 GoogleEarthDemProvider::GoogleEarthDemProvider(std::unique_ptr<IElevationProvider> elevationProvider,
                                                int meshN,
                                                const std::string& elevationEndpoint)
-    : elevationProvider_(std::move(elevationProvider)), meshN_(meshN), elevationEndpoint_(elevationEndpoint) {
+    : elevationProvider_(std::move(elevationProvider)),
+      meshN_(meshN),
+      maxZoom_(22),
+      elevationEndpoint_(elevationEndpoint) {
 }
 
 GoogleEarthDemProvider::~GoogleEarthDemProvider() = default;
@@ -113,13 +118,21 @@ bool GoogleEarthDemProvider::FetchDemTile(const TileKey& key, DemGridData& outDa
                                           DemFetchResult& outResult) {
     // NetworkPanel: record start
     NetworkPanel::Instance().RecordStart(key, RequestType::DemMesh, elevationEndpoint_);
+
+    TileKey requestKey = key;
+    if (maxZoom_ >= 0 && requestKey.level > maxZoom_) {
+        const int shift = requestKey.level - maxZoom_;
+        requestKey.level = maxZoom_;
+        requestKey.x >>= shift;
+        requestKey.y >>= shift;
+    }
     
     // Generate grid points for this tile
-    std::vector<GeoPoint> points = GenerateTileGrid(key);
+    std::vector<GeoPoint> points = GenerateTileGrid(requestKey);
     
     // Query elevations
     ElevationOptions opt;
-    opt.targetLevel = key.level;
+    opt.targetLevel = requestKey.level;
     
     ElevationBatchResult batchResult = elevationProvider_->BatchQuery(points, opt);
     

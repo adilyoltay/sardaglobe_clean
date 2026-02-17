@@ -4,6 +4,8 @@
 #include "../math/tile_math.h"  // GE parity: ComputeGeometricError for skirt depth
 #include <glad/glad.h>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <array>
 #include <algorithm>
 #include <limits>
@@ -184,7 +186,10 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     int clampedTargetLevel = std::clamp(demTargetLevel >= 0 ? demTargetLevel : key.level, 0, key.level);
     TileKey desiredInteriorKey = KeyAtLevel(key, clampedTargetLevel);
     if (demManager && config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
-        hasExactDemTile = demManager->HasData(key);
+        // "Exact" here must mean the currently requested coherence target key.
+        // Using the full child key keeps demPending=true forever on provider-capped
+        // sources (e.g. terrain-rgb max zoom), which destabilizes neighbor coherence.
+        hasExactDemTile = demManager->HasData(desiredInteriorKey);
 
         if (ResolveDemSampler(desiredInteriorKey, demManager, demInterior)) {
             demSamplingEnabled = true;
@@ -205,9 +210,9 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
     result.demEffectiveLevel = static_cast<uint8_t>(std::clamp(authoritativeLevel, 0, 255));
     
     result.demUsed = false;
-    // Keep pending=true while exact child DEM is missing, even if parent fallback provides heights
-    // or there is currently no cached DEM at all. Otherwise tiles built "flat" early will never
-    // rebuild when DEM arrives, causing persistent cliffs/walls at tile boundaries.
+    // Keep pending=true while the requested coherence-target DEM key is missing, even if parent
+    // fallback provides heights or there is currently no cached DEM at all. Otherwise tiles built
+    // "flat" early will never rebuild when DEM arrives, causing persistent cliffs/walls at joins.
     result.demPending = (demManager != nullptr) &&
                         (config.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) &&
                         !hasExactDemTile;
@@ -316,24 +321,31 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
                 influence = std::clamp(influence, 0.0f, 1.0f);
 
                 const DemTileSampler* edgeSampler = &demInterior;
-                // Choose the coarsest resolved edge sampler among influenced borders.
+                // Pick the edge sampler with strongest local edge influence.
+                // Previous "always choose coarsest level" behavior could pull samples from the
+                // wrong edge near corners (e.g. east border using north level), creating
+                // border spikes/gaps despite coherent edge levels being available.
                 if (influence > 0.0f) {
-                    if (infN > 0.0f && demEdge[0].valid &&
-                        (!edgeSampler->valid || demEdge[0].key.level < edgeSampler->key.level)) {
-                        edgeSampler = &demEdge[0];
-                    }
-                    if (infE > 0.0f && demEdge[1].valid &&
-                        (!edgeSampler->valid || demEdge[1].key.level < edgeSampler->key.level)) {
-                        edgeSampler = &demEdge[1];
-                    }
-                    if (infS > 0.0f && demEdge[2].valid &&
-                        (!edgeSampler->valid || demEdge[2].key.level < edgeSampler->key.level)) {
-                        edgeSampler = &demEdge[2];
-                    }
-                    if (infW > 0.0f && demEdge[3].valid &&
-                        (!edgeSampler->valid || demEdge[3].key.level < edgeSampler->key.level)) {
-                        edgeSampler = &demEdge[3];
-                    }
+                    float bestInfluence = -1.0f;
+                    int bestLevel = std::numeric_limits<int>::max();
+                    auto considerEdgeSampler = [&](float inf, const DemTileSampler& sampler) {
+                        if (inf <= 0.0f || !sampler.valid) {
+                            return;
+                        }
+                        // Primary key: strongest influence (local edge ownership).
+                        // Tie-break: coarser level for deterministic corner handling.
+                        if (inf > bestInfluence ||
+                            (std::abs(inf - bestInfluence) <= 1e-6f &&
+                             sampler.key.level < bestLevel)) {
+                            edgeSampler = &sampler;
+                            bestInfluence = inf;
+                            bestLevel = sampler.key.level;
+                        }
+                    };
+                    considerEdgeSampler(infN, demEdge[0]);
+                    considerEdgeSampler(infE, demEdge[1]);
+                    considerEdgeSampler(infS, demEdge[2]);
+                    considerEdgeSampler(infW, demEdge[3]);
                 }
 
                 float hInterior = 0.0f;
@@ -735,6 +747,41 @@ TileMeshBuilder::BuildResult TileMeshBuilder::Build(
         }
         result.indexCount = static_cast<uint32_t>(result.indices.size());
     }
+
+    // --- P0 EVIDENCE TRAPS BAŞLANGICI ---
+    // Keep diagnostics out of the hot path unless explicit DEM debug mode is enabled.
+    if (config.demDebug) {
+        // [TUZAK]: MERKEZE ÇÖKME (ORIGIN SPIKING) VE NAN SIZINTISI
+        for (size_t i = 0; i < result.vertices.size(); i += kVertexStrideFloats) {
+            float x = result.vertices[i];
+            float y = result.vertices[i + 1];
+            float z = result.vertices[i + 2];
+
+            if (std::isnan(x) || std::isnan(y) || std::isnan(z)) {
+                std::fprintf(stderr,
+                             "[KANIT: NAN_VERTEX] Tile_KEY: %s "
+                             "Skirt veya DEM hesaplamasında NaN (Not-a-Number) sızıntısı!\n",
+                             key.ToString().c_str());
+                std::fflush(stderr);
+                std::abort();
+            }
+
+            // IMPORTANT: result.vertices stores RTE-relative coordinates.
+            // Validate collapse in world space, not local tile space.
+            glm::vec3 worldPos = glm::vec3(tileOriginECEF) + glm::vec3(x, y, z);
+            float dist = glm::length(worldPos);
+            if (dist < 1000.0f) {
+                std::fprintf(stderr,
+                             "[KANIT: ZERO_VERTEX] Tile_KEY: %s "
+                             "(0,0,0)'a çöken world-space vertex tespit edildi! Mesafe(km): %.6f\n",
+                             key.ToString().c_str(),
+                             dist);
+                std::fflush(stderr);
+                std::abort();
+            }
+        }
+    }
+    // --- P0 EVIDENCE TRAPS BİTİŞİ ---
     
     return result;
 }
@@ -758,10 +805,15 @@ void TileMeshBuilder::GenerateSkirts(
     // Base skirt depth: ~50 pixels worth of geometric error
     double baseSkirtDepthKm = (geometricErrorM * 50.0) * 0.001;
 
-    // Apply LOD-based range from config
+    // Apply LOD-based range from config.
+    // IMPORTANT: Upper bound must be the configured max, otherwise low-LOD geometric
+    // error can explode skirt depth into hundreds of km and create giant wall artifacts.
+    double clampMaxDepth = std::max(static_cast<double>(config.skirtMaxDepthKm),
+                                    static_cast<double>(config.skirtMinDepthKm));
     double minDepth = std::max(baseSkirtDepthKm, static_cast<double>(config.skirtDepthNearKm));
+    minDepth = std::min(minDepth, clampMaxDepth);
     double farDepth = std::max(minDepth, static_cast<double>(config.skirtDepthFarKm));
-    double clampMaxDepth = std::max(farDepth, static_cast<double>(config.skirtMaxDepthKm));
+    farDepth = std::min(farDepth, clampMaxDepth);
 
     // Interpolate based on tile arc length (zoom level)
     // Guard against extreme level values causing integer overflow in (1 << level)

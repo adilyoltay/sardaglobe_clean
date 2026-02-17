@@ -109,6 +109,10 @@ private:
     std::unique_ptr<TileRenderer> tileRenderer_;
     std::unique_ptr<TileMeshScheduler> meshScheduler_;
     std::unique_ptr<DemManager> demManager_;
+    int demProviderEffectiveMaxZoom_ = 15;  // Runtime effective DEM cap after provider clamp
+    bool didAutoFallback_ = false;          // Per-instance fallback guard (resets on Init)
+    static constexpr int kMaxNoDataFloorSkipLogs = 8;
+    int noDataFloorSkipLogCount_ = 0;       // DEM debug log limiter for no-data floor skip
     std::unique_ptr<HeightmapManager> heightmapManager_;
     std::unique_ptr<RockMeshManager> rockMeshManager_;
     TilePyramid tilePyramid_;

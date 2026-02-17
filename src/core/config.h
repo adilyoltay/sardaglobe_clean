@@ -133,6 +133,7 @@ struct Config {
     std::string cacheDir = "tile_cache";
     bool useDiskCache = true;
     bool useMemoryCache = true;
+    bool autoTuneMemoryCache = true;                       // Auto-size memory caches from system RAM
     size_t memoryCacheMaxEntries = 16384;                   // 8x - Cache thrashing önlemi
     size_t memoryCacheMaxBytes = 1024 * 1024 * 1024;        // 1 GB (8x) compressed tile bytes
     bool useDecodedMemoryCache = true;
@@ -234,7 +235,9 @@ struct Config {
     std::string demApiKeyEnv = "NATIVE_GLOBE_DEM_TOKEN";      // Env var for DEM API key
     // DEM Provider: terrain-rgb (default, public) | google-earth (internal, requires auth)
     std::string demProvider = "google-earth";  // Default: Google Earth elevation API (may require browser context)
-    int demMaxZoom = 15;               // Clamp DEM requests above provider max zoom
+    int demMaxZoom = 22;               // Requested DEM max zoom (provider cap applied at runtime)
+    int demProviderEffectiveMaxZoom = 15; // Runtime effective DEM max zoom after provider cap
+    int demMaxCoarseningDeltaLod = 2;  // Max DEM coarsening below tile LOD (seam stability guardrail)
     int demMeshN = 17;                // Grid resolution per tile (17x17 = 289 samples, GE parity)
                                       // Old: 5x5 = 25 samples (blocky terrain)
                                       // New: 17x17 = 289 samples (smooth terrain)
@@ -306,6 +309,10 @@ struct Config {
         if (!std::isfinite(rockMeshMaxVertexDistanceFromOriginKm) || rockMeshMaxVertexDistanceFromOriginKm <= 0.0f) {
             rockMeshMaxVertexDistanceFromOriginKm = 300.0f;
         }
+
+        demMaxZoom = std::clamp(demMaxZoom, 0, 22);
+        demProviderEffectiveMaxZoom = std::clamp(demProviderEffectiveMaxZoom, 0, 22);
+        demMaxCoarseningDeltaLod = std::clamp(demMaxCoarseningDeltaLod, 0, 22);
     }
 };
 

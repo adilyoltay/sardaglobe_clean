@@ -1058,6 +1058,7 @@ add_executable(instanced_array_rendering_test
   src/rendering/shader_manager.cpp
   src/rendering/pbo_upload_manager.cpp
   src/rendering/texture_array_manager.cpp
+  src/rendering/texture_atlas_allocator.cpp
   src/rendering/texture_manager.cpp
   src/io/memory_tile_cache.cpp
   src/io/tile_cache.cpp
@@ -1070,7 +1071,9 @@ add_executable(instanced_array_rendering_test
   src/io/providers/protobuf_wire.cpp
   src/io/providers/google_earth_elevation_provider.cpp
   src/io/providers/google_earth_dem_provider.cpp
+  src/debug/network_panel.cpp
   src/core/ellipsoid.cpp
+  src/scheduling/tile_state_machine.cpp
   src/scheduling/tile_pyramid.cpp
   src/scheduling/lod_selector.cpp
 )
