@@ -845,10 +845,17 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // The terrainExpected guard in classifyRenderBlockReason prevents over-collapse:
     // tiles with no DEM coverage render flat without blocking; tiles where DEM IS expected
     // but hasn't arrived collapse to parent (prevents flat-vs-displaced cliff artifacts).
-    const bool requireTerrainForQuorum =
-        config_.demEnabled &&
-        demManager_ &&
-        (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
+    const bool requireTerrainForQuorum = [&]() -> bool {
+        if (!config_.demEnabled || !demManager_) {
+            return false;
+        }
+        for (const TileKey& key : renderLeafSet_) {
+            if (demManager_->HasDataOrAncestor(key)) {
+                return true;
+            }
+        }
+        return false;
+    }();
     auto hasAnyDemCoverage = [&](const TileKey& key) -> bool {
         if (!demManager_) {
             return false;
@@ -877,7 +884,7 @@ void GlobeEngine::Update(double dt, double currentTime) {
             // Only block rendering when terrain is expected to be available for this tile.
             // Some coarse/world-covering tiles have no DEM coverage; forcing a terrain quorum
             // on those tiles collapses the entire frame to a single blurry ancestor tile.
-            const bool terrainExpected = tile.demPending || hasAnyDemCoverage(tile.key);
+            const bool terrainExpected = tile.demPending || tile.meshPending || hasAnyDemCoverage(tile.key);
             if (!hasTerrain && terrainExpected) {
                 return RenderBlockReason::NoTerrain;
             }
@@ -2384,10 +2391,17 @@ void GlobeEngine::Render() {
 
     // RenderScene: consume immutable snapshot produced during Update.
     const glm::mat4& mvp = sceneSnapshot_.mvp;
-    const bool requireTerrainForSeamStats =
-        config_.demEnabled &&
-        demManager_ &&
-        (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
+    const bool requireTerrainForSeamStats = [&]() -> bool {
+        if (!config_.demEnabled || !demManager_) {
+            return false;
+        }
+        for (const TileKey& key : sceneSnapshot_.leafSet) {
+            if (demManager_->HasDataOrAncestor(key)) {
+                return true;
+            }
+        }
+        return false;
+    }();
     const bool requireTerrainForDraw = requireTerrainForSeamStats;
     // CPU mesh bake is the single terrain authority.
     auto drawStats = renderFrame_->DrawTiles(
@@ -2801,6 +2815,7 @@ void GlobeEngine::Render() {
     debugStats_.leafNoMesh = drawStats.leafNoMesh;
     debugStats_.leafNoTexture = drawStats.leafNoTexture;
     debugStats_.leafNoTerrain = drawStats.leafNoTerrain;
+    debugStats_.demUsedButCoverageMismatchLeaves = drawStats.demUsedButCoverageMismatchLeaves;
     renderFallbackDivergenceLeavesFrame_ = drawStats.renderFallbackDivergenceLeaves;
     debugStats_.renderFallbackDivergenceLeaves = drawStats.renderFallbackDivergenceLeaves;
     debugStats_.renderQuorumDowngrades = renderQuorumDowngrades_;
@@ -3374,13 +3389,22 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Cliff Edge Count: %d", debugStats_.cliffEdgeCount);
             if (demManager_) {
                 ImGui::Text("DEM Health: %s", DemHealthStatusToString(demManager_->GetHealthStatus()));
-                bool terrainRequired = config_.demEnabled &&
-                                       (demManager_->GetHealthStatus() == DemHealthStatus::Healthy);
+                bool terrainRequired = false;
+                if (config_.demEnabled) {
+                    for (const TileKey& key : sceneSnapshot_.leafSet) {
+                        if (demManager_->HasDataOrAncestor(key)) {
+                            terrainRequired = true;
+                            break;
+                        }
+                    }
+                }
                 ImGui::Text("Terrain Required: %s", terrainRequired ? "yes" : "no");
                 ImGui::Text("DEM Co-Evicts: %zu", debugStats_.demCoEvictions);
             }
             ImGui::Text("DEM Flat/Pending: %d / %d",
                         debugStats_.demFlatLeaves, debugStats_.demPendingLeaves);
+            ImGui::Text("DEM Used but coverage exists: %d",
+                        debugStats_.demUsedButCoverageMismatchLeaves);
             ImGui::Text("DEM Pending Reasons (Own/Edge/Nbr): %d / %d / %d",
                         debugStats_.demPendingMissingOwnTarget,
                         debugStats_.demPendingMissingEdgeCoherent,
@@ -3704,8 +3728,7 @@ bool GlobeEngine::QueueMeshBuild(const TileKey& key, bool isVisible) {
     // every frame and preventing mesh convergence.
     if (isVisible && !tile.hasMesh &&
         demManager_ &&
-        config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE &&
-        demManager_->GetHealthStatus() == DemHealthStatus::Healthy) {
+        config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
         constexpr double kDemMeshWaitTimeoutSec = 0.5;
         // Wait for the DEM level that this tile is actually targeting (which can be an
         // ancestor level for coherence). Waiting only on the exact child key causes

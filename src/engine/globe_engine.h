@@ -237,6 +237,7 @@ private:
         int leafNoTexture = 0;      // Leaves with mesh but no texture
         int leafNoTerrain = 0;      // Leaves with mesh+texture but missing terrain data (DEM)
         int renderFallbackDivergenceLeaves = 0;  // Render leaf set still needed fallback (should converge to 0)
+        int demUsedButCoverageMismatchLeaves = 0; // DEM coverage exists but tile.demUsed is false
         // Render-time child quorum (post-selection): how often we had to collapse children to an ancestor
         // due to missing render prerequisites (prevents mixed-LOD tearing/cliff walls at joins).
         int renderQuorumDowngrades = 0;

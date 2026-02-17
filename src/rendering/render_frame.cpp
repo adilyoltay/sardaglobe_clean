@@ -120,7 +120,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                 if (hasSurfaceGeometry && hasTexture) {
                     bool hasTerrain = tile.demUsed;
                     if (!hasTerrain) {
-                        const bool terrainExpected = tile.demPending || hasAnyDemCoverage(parentKey);
+                        const bool terrainExpected = tile.demPending || tile.meshPending ||
+                                                     hasAnyDemCoverage(parentKey);
                         if (!terrainExpected) {
                             // No DEM coverage for this region: allow flat ancestor rendering.
                             hasTerrain = true;
@@ -189,12 +190,16 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         if (requireTerrainForLeaves) {
             hasRequiredTerrain = tile.demUsed;
             if (!hasRequiredTerrain) {
-                const bool terrainExpected = tile.demPending || hasAnyDemCoverage(tile.key);
+                const bool terrainExpected = tile.demPending || tile.meshPending ||
+                                             hasAnyDemCoverage(tile.key);
                 if (!terrainExpected) {
                     // DEM unavailable for this tile/ancestors: don't block rendering.
                     hasRequiredTerrain = true;
                 }
             }
+        }
+        if (requireTerrainForLeaves && !hasRequiredTerrain && !tile.demUsed && hasAnyDemCoverage(tile.key)) {
+            ++stats.demUsedButCoverageMismatchLeaves;
         }
         bool isRenderable = HasRenderableSurface(tile) && hasRealTexture && hasRequiredTerrain;
         
