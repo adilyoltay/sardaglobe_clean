@@ -211,9 +211,9 @@ struct Config {
     size_t pboUploadSize = 4 * 1024 * 1024; // Default PBO buffer size (4MB)
     
     // Faz 2B: Texture2DArray (layer-based texture storage)
-    // P0-2: Default enabled for GE visual parity (bleeding prevention)
-    // Runtime capability check in GlobeEngine::Init() may auto-fallback to atlas
-    bool useTexture2DArray = true;  // Enable Texture2DArray (prevents bleeding, default true)
+    // Disabled by default to avoid startup regressions on some GL drivers.
+    // Runtime capability check in GlobeEngine::Init() may auto-enable on stable environments.
+    bool useTexture2DArray = false;  // Enable Texture2DArray (default false for stability)
     
     // Faz 3: Performance optimizations
     // Horizon Culling
