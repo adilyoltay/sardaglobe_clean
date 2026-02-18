@@ -1,83 +1,130 @@
 # Native Globe - Session Handoff (Yeni Oturum İçin)
 
-## Durum Özeti
-- Şu anki branch: `main`
-- Son commit: `3962748`
-- Son commit mesajı: `chore: finalize p0/p1 updates and harden p1-4`
-- Push: `origin/main` üzerine başarılı şekilde gönderildi.
-- Repo durumu (komut anında): temiz (`git status --short` boş)
+## Amaç
+Bu doküman, `native_globe_clean` projesinde bu oturumda yapılan geliştirmeleri, onayları, test sonuçlarını ve kalan işleri sonraki asistana hızlı transfer için tek kaynakta toplar.
 
-Bu oturumda yapılanları yeni oturuma taşınabilir şekilde toplu bir doküman olarak bırakıyorum.
+## Bağlam ve Durum Özeti
+1. Aktif branch: `main`
+2. Remote: `origin` -> `https://github.com/adilyoltay/sardaglobe_clean.git`
+3. En yeni commit: `da6fea7`
+4. Ana fonksiyonel commit: `3962748` (P0/P1 tamamlayıcı değişiklikler)
+5. Çalışma alanı: temiz (`git status --short` boş)
 
-## Tamamlanan Bloklar (Onaylananlar)
+## Commit zinciri (referans)
+1. `da6fea7` — `docs: add session handover and remaining work tracker`
+2. `3962748` — `chore: finalize p0/p1 updates and harden p1-4`
+3. `7dd12af` — `Fix DEM terrain render authority to depend on coverage instead of provider health`
+4. `f37684c` — `Adjust DEM terrain clamp and preserve DEM upgrade mesh results`
+5. `9761eaa` — `chore: ignore runtime test artifacts from patch`
+6. `c2257d1` — `GE parity: stabilize seam/quorum pipeline and visual smoke gates`
 
-### P0 tamamlandı
-- **P0-2 Texture2DArray default açma + fallback hardening**
-  - `config.h`: `useTexture2DArray` varsayılanı aktif
-  - Cap-check ve fallback davranışı: GL_MAX_ARRAY_TEXTURE_LAYERS eşiklenmesi (>=128)
-  - Runtime log ayrımı: `requested=..., effective=...`
-  - CLI doğrulama ve test eklendi (batch-config test benzeri yaklaşım)
-- **P0-3 Pipeline ayrışması**
-  - `SceneSnapshot` tabanlı update/render ayrımı
-  - Double-buffer + atomic publish pattern
-  - Thread-safe fallback ve render side yalnızca snapshot tüketimi
-- **P0-1 Atmosphere/Sky Dome**
-  - Atmosphere renderer eklenmesi
-  - Rayleigh/Mie tabanlı shader yaklaşımı
-  - CLI + ImGui runtime toggle
-  - Horizon continuity / mavi tonlu sky etkisi eklendi
+## Kapsam (Bu oturumda hedeflenen hedefler)
+1. P0-2 Texture2DArray default açma ve fallback
+2. P0-3 pipeline ayrışma (update/render)
+3. P0-1 atmosphere/sky dome
+4. P1-4 DEM batch fetch restorasyonu
+5. Geçiş belgesi oluşturma ve push etmek
+6. Operasyonel problem: globe görünümünde eksiklik olup olmadığını anlamak
 
-### P1 tamamlandı
-- **P1-4 DEM Batch Fetch Restore / runtime ayarları**
-  - `maxBatchSize` için default 8’e taşındı
-  - `batchBackoffMs` runtime parametresi
-  - `DemManager` içinde backoff logic’inin uygulanması
-  - CLI doğrulama ve test (`--dem-batch-size`, `--dem-batch-backoff`)
+## Tamamlanan bloklar (onaylı)
 
-## Eklenen Dosyalar
-- `src/rendering/atmosphere_renderer.h`
-- `src/rendering/atmosphere_renderer.cpp`
-- `src/scheduling/predictive_prefetcher.h`
-- `src/scheduling/predictive_prefetcher.cpp`
-- `tests/dem_batch_config_test.cpp`
-- `tests/texture_array_capability_fallback_test.cpp`
+### P0-2 Texture2DArray default + fallback hardening
+- Hedef: terrain tile bleeding riskini azaltmak için texture array path'i varsayılan açmak
+- Uygulama: `useTexture2DArray` default true
+- GL yetenek kontrolü: `GL_MAX_ARRAY_TEXTURE_LAYERS` ile gate
+- Eşik: `<128` olursa array path fallback
+- Log standardı: `requested` ve `effective` ayrımı
+- CLI doğrulama: `--dem-batch-size`, `--dem-batch-backoff` benzeri pattern ile güvenli parse
+- Eklenen/uygulanan test: `tests/texture_array_capability_fallback_test.cpp`
+- Durum: kabul edildi (no must-fix)
 
-## Bu Commit’te Değişen Önemli Dosyalar
-- `src/core/config.h`
-- `src/engine/globe_engine.h`
-- `src/engine/globe_engine.cpp`
-- `src/io/dem_manager.h`
-- `src/io/dem_manager.cpp`
-- `src/main.cpp`
-- `src/rendering/render_frame.cpp`
-- `src/rendering/shader_manager.h`
-- `src/rendering/shader_manager.cpp`
-- `src/rendering/texture_array_manager.cpp`
-- `src/rendering/tile_renderer.h`
-- `src/rendering/tile_renderer.cpp`
-- `CMakeLists.txt`
-- `docs/GE_TILE_DEM_RENDER_PARITY_REVIEW_PROMPT.md`
+### P0-3 Pipeline ayrışması
+- Hedef: micro-stutter azaltımı ve update/render ayrımını sağlamlaştırma
+- Uygulama: SceneSnapshot çift tampon + atomik publish/consume modeli
+- Thread güvenliği: snapshot write tarafı kilitli, read tarafı lock-free
+- Render davranışı: yalnızca snapshot okuma
+- Fallback: geçersiz snapshot yerine alternatif buffer güvenliği
+- Durum: kabul edildi, lock/fallback düzeltmeleri tamamlandı
 
-## Doğrulama / Test Notları
-- `git log -1 --oneline` -> `3962748 chore: finalize p0/p1 updates and harden p1-4`
+### P0-1 Atmosphere/Sky Dome
+- Hedef: uzaydan inişte horizon continuity
+- Uygulama: AtmosphereRenderer sınıfı, yeni shader seti
+- Render sırası: sky dome terrain öncesi render
+- Runtime kontrol: `--atmosphere`, `--no-atmosphere`, turbidity ve intensity
+- UI kontrolü: ImGui toggle ve slider desteği
+- Durum: kabul edildi (must-fix ve should-fix kapandı)
+
+### P1-4 DEM Batch Fetch
+- Hedef: DEM fetch performansını batch’e taşımak ve runtime tuning açmak
+- Uygulama: `maxBatchSize=8`, `batchBackoffMs` config alanı
+- Backoff mantığı: slot toplama sonrası zamanlama gecikmesi
+- CLI seçenekleri: `--dem-batch-size N`, `--dem-batch-backoff MS`
+- Güvenlik: range check, negatif değer clamp, üst sınır clamp
+- Test: `tests/dem_batch_config_test.cpp`
+- Log: `[DEM] Batch: size=8, backoff=0ms`
+- Durum: kabul edildi
+
+### Docs ve push
+- Hedef: oturum kapanışını taşınabilir kılacak dokümantasyon
+- Uygulama: `docs/SESSION_HANDOVER_GE_PARITY_PROGRESS.md` oluşturuldu
+- Hedeflenen commit: `da6fea7`
+- Push durumu: `origin/main` güncel
+
+## Commit `3962748` kapsamındaki kritik dosya değişiklikleri
+1. `CMakeLists.txt`
+2. `src/core/config.h`
+3. `src/engine/globe_engine.cpp`
+4. `src/engine/globe_engine.h`
+5. `src/io/dem_manager.cpp`
+6. `src/io/dem_manager.h`
+7. `src/main.cpp`
+8. `src/rendering/atmosphere_renderer.cpp`
+9. `src/rendering/atmosphere_renderer.h`
+10. `src/rendering/render_frame.cpp`
+11. `src/rendering/shader_manager.cpp`
+12. `src/rendering/shader_manager.h`
+13. `src/rendering/texture_array_manager.cpp`
+14. `src/rendering/tile_renderer.cpp`
+15. `src/rendering/tile_renderer.h`
+16. `src/scheduling/predictive_prefetcher.cpp`
+17. `src/scheduling/predictive_prefetcher.h`
+18. `tests/dem_batch_config_test.cpp`
+19. `tests/texture_array_capability_fallback_test.cpp`
+20. `docs/GE_TILE_DEM_RENDER_PARITY_REVIEW_PROMPT.md`
+
+## Doğrulama ve gözlem kayıtları
+- `git log -1 --oneline` => `da6fea7`
 - `git push origin main` başarılı
-- `./build/native_globe --smoke-test 60` çalıştırıldı; uygulama başlar ve bazı önemli loglar görüldü.
-  - Default tile URL: `https://goksun.pirireis.com.tr/gorsun/gorsun/tile/HGM_Orthofoto/{z}/{x}/{y}`
-  - `Texture`: `requested=Array, effective=Array (maxLayers=2048)`
-  - Atmosphere initialized / enabled logları görüldü
-  - `DEM` Google Earth endpoint’lerinde bazı erişim hataları sonrası `terrain-rgb` fallback başarılı (`GE Elevation unavailable (auth/blocked). Auto-fallback to terrain-rgb SUCCESSFUL`)
-- `--smoke-test 60` çıktısının sonu CLI tarafından erken kapatılamadı; süreç uzun süre açıkta kalabiliyor.
+- `./build/native_globe --smoke-test 60` ile başlatma çalıştı
+- Tile URL: `https://goksun.pirireis.com.tr/gorsun/gorsun/tile/HGM_Orthofoto/{z}/{x}/{y}`
+- `[Config] Auto memory cache sizing: RAM=...`
+- `[Texture] requested=Array, effective=Array (maxLayers=2048)`
+- `[AtmosphereRenderer] Initialized`
+- `[Atmosphere] enabled (turbidity=2, intensity=1, groundColor=[0.05,0.06,0.09])`
+- `[DEM] GE Elevation unavailable (auth/blocked). Auto-fallback to terrain-rgb SUCCESSFUL. EffectiveMaxZoom=15`
+- Not: smoke süreci bazen manuel/timeout ile sonlandırılmadığında açık kalabiliyor
 
-## Kalanlar / Henüz Tamamlanmayanlar
-- **P1-1 Water Rendering**: Henüz uygulanmadı
-- **P1-2 Label/Annotation**: Henüz uygulanmadı
-- **P1-5 GPU Terrain Morph**: Son kullanıcıda kapanış/uygulama kaydı görünmüyor; bu blok henüz uygulanmadı (sadece planlama düzeyi)
-- **P1-6 Predictive prefetcher**:
-  - `predictive_prefetcher.*` dosyaları eklendi ama tam entegrasyon/ops runtime davranışı doğrulanmadı
-- **P1-7/1-8 RockMesh atlas + LOD transition**: Kalmaya devam eden teknik borç
-- **Tile source erişim sorunu** (kritik operasyonel): `HGM_Orthofoto` servisi için kullanıcı tarafında `401`/erişim problemi gözlendi; bu yüzeyin yüklenememesine/ dünya gölgesine neden olabilir.
-  - Opsiyon: açık endpoint’e geçiş veya gerekli auth (basic/bearer header/token) eklemek
+## Operasyonel kritik bulgu (oturumu etkileyecek)
+1. `HGM_Orthofoto` kaynak adresinin bazı test koşullarında 401 yetki hatası verme olasılığı tespit edildi
+2. Google Earth elevation endpoint’lerinde de erişim kısıtları nedeniyle otomatik fallback davranışı görüldü
+3. Bu durum görsel olarak “spinner + atmosfer” izlenimine yol açabilir
+4. Atmosphere ve pipeline teknik olarak çalışsa bile harita dokusu gelmiyorsa kullanıcıya boş/karanlık küre görünümü kalır
 
-## Not
-- `docs/GE_TILE_DEM_RENDER_PARITY_REVIEW_PROMPT.md` bir review prompt/özet belge olarak saklandı.
-- Bu dosya, bir sonraki oturumda doğrudan devam edilecek kaynak-kontrol listesi ve risk kayıtları için referans olarak kullanılabilir.
+## Hızlı teşhis adımları (bir sonraki oturum için)
+1. `./build/native_globe --tile-url <public-orthophoto-url> --smoke-test 60` ile erişilebilir bir raster endpoint ile test
+2. `--dem-provider terrain-rgb` ve `--no-atmosphere` kombinasyonu ile DEM ve texture etkisini ayır
+3. `./build/native_globe --help | rg dem` ile CLI parametrelerinin varlığı kontrol
+4. Tile URL servisi 401 veriyorsa auth yöntemini aktif etme veya endpoint değişimi planla
+
+## Kalan görevler (öncelik + etkisi)
+1. P1-5 GPU Terrain Morph: `uCornerLods` ile uyumlu morph transition tasarımının uygulanması
+2. P1-1 Water Rendering: Okyanus/deniz görsel karakterinin tamamlanması
+3. P1-6 Predictive Prefetcher: Predicted quadkey prefetch + TTL + cache pollution korumasının eklenmesi
+4. P1-2 Label/Annotation: Görsel UX ve navigasyonun tamamlanması
+5. P1-7/1-8 RockMesh atlas ve LOD geçişi: Atlas/path ve fade sisteminin eklenmesi
+6. DEM batch ölçüm ve görsel metrik otomasyonu
+
+## Notlar
+1. `predictive_prefetcher.*` dosyaları mevcut ama tam entegrasyon/ops geçerliliği ayrı bir adım gerektiriyor
+2. Geçici olarak en güçlü engel teknik değil, servis erişim katmanıdır
+3. Yeni oturumda ilk kontrol: tile source erişimi ve GL loglarında `effective=Array` doğrulanması
