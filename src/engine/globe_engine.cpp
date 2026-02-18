@@ -106,7 +106,8 @@ bool GlobeEngine::Init() {
     std::cout << "[Config] RTE/RTC: " << (config_.useRteRender ? "Enabled" : "Disabled") << "\n";
     std::cout << "[Config] Cache: Memory=" << (config_.memoryCacheMaxBytes / (1024*1024)) 
               << "MB, Decoded=" << (config_.decodedMemoryCacheMaxBytes / (1024*1024)) << "MB\n";
-    std::cout << "[Config] Texture: " << (config_.useTexture2DArray ? "Array" : "Atlas/2D") << "\n";
+    // P0-2: Texture2DArray status placeholder - actual check after GLAD init
+    std::cout << "[Config] Texture2DArray: pending GL capability check...\n";
     std::cout << "[Config] =========================================\n";
 
     // Init GLFW
@@ -162,6 +163,30 @@ bool GlobeEngine::Init() {
     
     std::cout << "OpenGL: " << glGetString(GL_VERSION) << std::endl;
     
+    // P0-2: GL capability check for Texture2DArray (after GL context is ready)
+    const bool requestedTextureArray = config_.useTexture2DArray;  // User intent
+    if (config_.useTexture2DArray) {
+        GLint maxLayers = 0;
+        glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        
+        // Check GL error first - if query failed, safe fallback
+        GLenum err = glGetError();
+        bool glError = (err != GL_NO_ERROR);
+        
+        if (glError || maxLayers < 128) {
+            // Insufficient support - fallback to atlas
+            config_.useTexture2DArray = false;
+            std::cout << "[Texture] requested=Array, effective=Atlas/2D (unavailable" 
+                      << (glError ? ", GL error)" : ", maxLayers=" + std::to_string(maxLayers) + " < 128)")
+                      << "\n";
+        } else {
+            std::cout << "[Texture] requested=Array, effective=Array (maxLayers=" << maxLayers << ")\n";
+        }
+    } else {
+        std::cout << "[Texture] requested=Atlas/2D, effective=Atlas/2D (user disabled)\n";
+    }
+    (void)requestedTextureArray;  // Mark as used for potential future debug output
+    
     // Init camera system (Google Earth parity)
     camera_ = std::make_unique<earth::PerspectiveCamera>();
     camera_->SetFov(config_.fovDegrees);
@@ -182,6 +207,23 @@ bool GlobeEngine::Init() {
     shaderManager_ = std::make_unique<ShaderManager>();
     tileRenderer_ = std::make_unique<TileRenderer>(*shaderManager_);
     renderFrame_ = std::make_unique<RenderFrame>(*tileRenderer_, *shaderManager_);
+    
+    // P0-1: Init atmosphere renderer
+    atmosphereRenderer_ = std::make_unique<AtmosphereRenderer>();
+    if (config_.atmosphere.enabled) {
+        if (!atmosphereRenderer_->Init()) {
+            std::cerr << "[Atmosphere] Failed to initialize, disabling\n";
+            config_.atmosphere.enabled = false;
+        } else {
+            std::cout << "[Atmosphere] enabled (turbidity=" << config_.atmosphere.turbidity
+                      << ", intensity=" << config_.atmosphere.intensity
+                      << ", groundColor=[" << config_.atmosphere.groundColor[0] << ","
+                      << config_.atmosphere.groundColor[1] << ","
+                      << config_.atmosphere.groundColor[2] << "])\n";
+        }
+    } else {
+        std::cout << "[Atmosphere] disabled\n";
+    }
     
     // Init DEM manager for terrain elevation
     if (config_.demEnabled) {
@@ -206,6 +248,9 @@ bool GlobeEngine::Init() {
                   << " | RequestedMaxZoom=" << requestedDemMaxZoom
                   << " | ProviderCap=" << providerDemMaxZoom
                   << " | EffectiveMaxZoom=" << demProviderEffectiveMaxZoom_
+                  << std::endl;
+        std::cout << "[DEM] Batch: size=" << config_.demBatchDefaultSize
+                  << ", backoff=" << config_.demBatchBackoffMs << "ms"
                   << std::endl;
 
         // Resolve GE epoch from RockMesh octree when requested.
@@ -261,6 +306,10 @@ bool GlobeEngine::Init() {
         demConfig.maxZoom = demProviderEffectiveMaxZoom_;
         demConfig.cacheSize = config_.demCacheSize;
         demConfig.debug = config_.demDebug;
+        
+        // P1-4: DEM batch fetch configuration
+        demConfig.maxBatchSize = config_.demBatchDefaultSize;
+        demConfig.batchBackoffMs = config_.demBatchBackoffMs;
         demConfig.demNoDataMinHeightM = config_.demNoDataMinHeightM;
         demConfig.demNoDataReplacementM = config_.demNoDataReplacementM;
         demConfig.forceClampTerrainNoData = config_.forceClampTerrainNoData;
@@ -486,6 +535,12 @@ void GlobeEngine::Shutdown() {
     if (rockMeshManager_) {
         rockMeshManager_->Shutdown();
         rockMeshManager_.reset();
+    }
+    
+    // P0-1: Shutdown atmosphere renderer
+    if (atmosphereRenderer_) {
+        atmosphereRenderer_->Shutdown();
+        atmosphereRenderer_.reset();
     }
 
     // Ensure a current GL context while destructing GL-owning subsystems/resources.
@@ -2230,16 +2285,45 @@ void GlobeEngine::Update(double dt, double currentTime) {
     // Evict old tiles (respects pinned tiles)
     textureManager_->EvictIfNeeded(tiles_, config_.maxTiles);
 
-    // BuildNextScene snapshot (P2.1): Render consumes this immutable frame input.
-    sceneSnapshot_.valid = true;
-    sceneSnapshot_.mvp = mvp;
-    sceneSnapshot_.cameraPos = cameraPos;
-    sceneSnapshot_.leafSet = renderLeafSet_;
-    sceneSnapshot_.currentTime = currentTime;
-    sceneSnapshot_.loadingTexture = textureManager_ ? textureManager_->GetLoadingTexture() : 0;
-    sceneSnapshot_.wireframe = config_.wireframeMode;
-    sceneSnapshot_.useLogDepth = config_.logDepthEnabled && !config_.reversedZEnabled;
-    sceneSnapshot_.logDepthFarKm = currentFarPlaneKm_;
+    // P0-3: BuildNextScene snapshot with double-buffered handoff.
+    // Update thread writes to writeBuffer, then atomically swaps.
+    {
+        std::lock_guard<std::mutex> lock(snapshotMutex_);
+        
+        size_t writeIndex = 1 - readBufferIndex_.load(std::memory_order_relaxed);
+        SceneSnapshot& writeBuffer = sceneSnapshots_[writeIndex];
+        
+        // P0-3: Write all fields first, then set valid flag last (publication safety)
+        writeBuffer.frameId = frameSerial_;
+        writeBuffer.version = ++snapshotVersion_;
+        writeBuffer.mvp = mvp;
+        writeBuffer.cameraPos = cameraPos;
+        writeBuffer.leafSet = renderLeafSet_;  // Copy-by-value (immutable snapshot)
+        writeBuffer.currentTime = currentTime;
+        writeBuffer.loadingTexture = textureManager_ ? textureManager_->GetLoadingTexture() : 0;
+        writeBuffer.wireframe = config_.wireframeMode;
+        writeBuffer.useLogDepth = config_.logDepthEnabled && !config_.reversedZEnabled;
+        writeBuffer.logDepthFarKm = currentFarPlaneKm_;
+        
+        // P0-1: Atmosphere settings (immutable snapshot)
+        writeBuffer.atmosphereEnabled = config_.atmosphere.enabled;
+        writeBuffer.atmosphereTurbidity = config_.atmosphere.turbidity;
+        writeBuffer.atmosphereIntensity = config_.atmosphere.intensity;
+        writeBuffer.atmosphereGroundColor[0] = config_.atmosphere.groundColor[0];
+        writeBuffer.atmosphereGroundColor[1] = config_.atmosphere.groundColor[1];
+        writeBuffer.atmosphereGroundColor[2] = config_.atmosphere.groundColor[2];
+        
+        // P1-5: GPU Terrain Morph settings (immutable snapshot)
+        writeBuffer.useDistanceBasedTerrainMorph = config_.useDistanceBasedTerrainMorph;
+        writeBuffer.terrainMorphDistanceRangeKm = config_.terrainMorphDistanceRangeKm;
+        
+        // Set valid flag AFTER all fields written (memory barrier via mutex unlock)
+        writeBuffer.valid = true;
+        
+        // Atomically swap buffers: render thread now sees the new snapshot
+        // The old buffer becomes the "fallback" buffer for next frame
+        readBufferIndex_.store(writeIndex, std::memory_order_release);
+    }
 
     bool hasBackgroundWork = false;
     if (flightController_ && flightController_->IsMoving()) {
@@ -2342,8 +2426,61 @@ void GlobeEngine::Render() {
     glClearColor(0.02f, 0.02f, 0.05f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
-    if (!sceneSnapshot_.valid) {
-        return;
+    // P0-3: Acquire immutable snapshot for this frame (lock-free read)
+    size_t readIndex = readBufferIndex_.load(std::memory_order_acquire);
+    const SceneSnapshot& currentSnapshot = sceneSnapshots_[readIndex];
+    
+    // P0-3: Both buffers are always valid for atomic read (no mutex needed)
+    // If current buffer is invalid, use the other buffer (which has last valid frame)
+    const SceneSnapshot* snapshot = &currentSnapshot;
+    bool usedFallback = false;
+    if (!currentSnapshot.valid) {
+        size_t otherIndex = 1 - readIndex;
+        const SceneSnapshot& otherSnapshot = sceneSnapshots_[otherIndex];
+        if (otherSnapshot.valid) {
+            snapshot = &otherSnapshot;
+            usedFallback = true;
+        } else {
+            return;  // No valid snapshot available yet (startup edge case)
+        }
+    }
+    
+    // P0-3: Debug observability - log snapshot correlation (once per second)
+    static double lastSnapshotLogTime = 0.0;
+    if (snapshot->currentTime - lastSnapshotLogTime > 1.0) {
+        lastSnapshotLogTime = snapshot->currentTime;
+        std::cout << "[P0-3] Snapshot: frameId=" << snapshot->frameId 
+                  << ", version=" << snapshot->version 
+                  << ", leafCount=" << snapshot->leafSet.size()
+                  << (usedFallback ? " (fallback)" : "")
+                  << "\n";
+    }
+    
+    // P0-3: Use immutable snapshot leafSet for all render operations
+    const auto& leafSet = snapshot->leafSet;
+    
+    // P0-1: Render atmosphere/sky dome BEFORE terrain (space-to-surface continuity)
+    if (atmosphereRenderer_ && snapshot->atmosphereEnabled) {
+        AtmosphereSettings settings;
+        settings.enabled = snapshot->atmosphereEnabled;
+        settings.turbidity = snapshot->atmosphereTurbidity;
+        settings.intensity = snapshot->atmosphereIntensity;
+        settings.groundColor[0] = snapshot->atmosphereGroundColor[0];
+        settings.groundColor[1] = snapshot->atmosphereGroundColor[1];
+        settings.groundColor[2] = snapshot->atmosphereGroundColor[2];
+        
+        // Calculate inverse view-projection for ray reconstruction
+        glm::mat4 invViewProj = glm::inverse(snapshot->mvp);
+        
+        // Sun direction (simplified: fixed direction for now)
+        glm::vec3 sunDir = glm::normalize(glm::vec3(0.3f, 0.8f, 0.2f));
+        
+        atmosphereRenderer_->Render(
+            invViewProj,
+            snapshot->cameraPos,
+            sunDir,
+            settings
+        );
     }
     
     // FAZ 6 KAPANIŞ: Optimize Cache Pinning
@@ -2353,21 +2490,21 @@ void GlobeEngine::Render() {
         scheduler_->UnpinAllCacheEntries();
         
         // 1. Render leaf set'i pin'le (görünür tile'lar)
-        for (const TileKey& key : sceneSnapshot_.leafSet) {
+        for (const TileKey& key : leafSet) {
             scheduler_->PinCacheEntry(key);
             ++pinnedCount;
         }
         
         // 2. TilePyramid required set'i pin'le (yüklenmekte olanlar)
         for (const auto& ranked : tilePyramid_.GetRankedRequired()) {
-            if (sceneSnapshot_.leafSet.count(ranked.key) == 0) {
+            if (leafSet.count(ranked.key) == 0) {
                 scheduler_->PinCacheEntry(ranked.key);
                 ++pinnedCount;
             }
         }
         
         // 3. Minimal fallback chain (sadece render edilecek leaf'lerin parent'ları)
-        for (const TileKey& leafKey : sceneSnapshot_.leafSet) {
+        for (const TileKey& leafKey : leafSet) {
             TileKey parent = leafKey;
             int chainDepth = 0;
             // High zoom levels need a deeper pin chain so shared ancestors survive
@@ -2390,12 +2527,12 @@ void GlobeEngine::Render() {
     }
 
     // RenderScene: consume immutable snapshot produced during Update.
-    const glm::mat4& mvp = sceneSnapshot_.mvp;
+    const glm::mat4& mvp = snapshot->mvp;
     const bool requireTerrainForSeamStats = [&]() -> bool {
         if (!config_.demEnabled || !demManager_) {
             return false;
         }
-        for (const TileKey& key : sceneSnapshot_.leafSet) {
+        for (const TileKey& key : leafSet) {
             if (demManager_->HasDataOrAncestor(key)) {
                 return true;
             }
@@ -2405,18 +2542,17 @@ void GlobeEngine::Render() {
     const bool requireTerrainForDraw = requireTerrainForSeamStats;
     // CPU mesh bake is the single terrain authority.
     auto drawStats = renderFrame_->DrawTiles(
-        sceneSnapshot_.leafSet, tiles_, mvp, sceneSnapshot_.cameraPos,
-        sceneSnapshot_.currentTime, cameraSpeedKmPerSec_,
+        leafSet, tiles_, mvp, snapshot->cameraPos,
+        snapshot->currentTime, cameraSpeedKmPerSec_,
         requireTerrainForDraw,
-        sceneSnapshot_.useLogDepth, sceneSnapshot_.logDepthFarKm,
-        sceneSnapshot_.wireframe, sceneSnapshot_.loadingTexture,
+        snapshot->useLogDepth, snapshot->logDepthFarKm,
+        snapshot->wireframe, snapshot->loadingTexture,
         demManager_.get(),
         config_.useRteRender,
         config_.fallbackRequireParentUntilChildrenReady,
-        config_.useTexture2DArray,  // Faz 2B: Texture array support
-        config_.useDistanceBasedTerrainMorph,  // P2: Distance-based morph
-        config_.terrainMorphDistanceRangeKm,   // P2: Morph band width
-        config_.enableTerrainMorphTimeFallback // P2: Time fallback on invalid distance
+        snapshot->useDistanceBasedTerrainMorph,  // P1-5: Distance-based morph from snapshot
+        snapshot->terrainMorphDistanceRangeKm,   // P1-5: Morph band width from snapshot
+        config_.enableTerrainMorphTimeFallback   // P1-5: Time fallback on invalid distance
     );
     const auto& renderStats = tileRenderer_->GetStats();
 
@@ -2432,13 +2568,13 @@ void GlobeEngine::Render() {
     int cliffEdgeCount = 0;
     double ancestorDemRatio = 0.0;
     if (demManager_ && config_.terrainDisplacementMode == DisplacementMode::CPU_MESH_BAKE) {
-        const uint32_t loadingTex = sceneSnapshot_.loadingTexture;
+        const uint32_t loadingTex = snapshot->loadingTexture;
         auto isRenderableLeafForDemStats = [&](const Tile& tile) -> bool {
             return tile.hasMesh && tile.textureId != 0 && tile.textureId != loadingTex;
         };
 
         int visibleDemTiles = 0;
-        for (const TileKey& key : sceneSnapshot_.leafSet) {
+        for (const TileKey& key : leafSet) {
             auto it = tiles_.find(key);
             if (it == tiles_.end()) {
                 continue;
@@ -2463,7 +2599,7 @@ void GlobeEngine::Render() {
         }
 
         std::vector<double> seamDeltas;
-        seamDeltas.reserve(sceneSnapshot_.leafSet.size() * 8);
+        seamDeltas.reserve(leafSet.size() * 8);
 
         constexpr double kSeamWarnM = 4.0;
         constexpr double kCliffM = 15.0;
@@ -2603,7 +2739,7 @@ void GlobeEngine::Render() {
         };
 
         // Reset per-tile seam metrics before scan.
-        for (const TileKey& key : sceneSnapshot_.leafSet) {
+        for (const TileKey& key : leafSet) {
             auto resetIt = tiles_.find(key);
             if (resetIt != tiles_.end()) {
                 resetIt->second.edgeGapMaxM = 0.0f;
@@ -2618,7 +2754,7 @@ void GlobeEngine::Render() {
         static const uint8_t edgeBits[] = {Tile::EDGE_NORTH, Tile::EDGE_EAST,
                                            Tile::EDGE_SOUTH, Tile::EDGE_WEST};
 
-        for (const TileKey& key : sceneSnapshot_.leafSet) {
+        for (const TileKey& key : leafSet) {
             auto tileIt = tiles_.find(key);
             if (tileIt == tiles_.end()) continue;
             Tile& tileA = tileIt->second;
@@ -2633,10 +2769,10 @@ void GlobeEngine::Render() {
                 std::vector<TileKey> neighborLeaves;
                 neighborLeaves.reserve(2);
 
-                if (sceneSnapshot_.leafSet.count(neighborSame) > 0 && isSeamTile(neighborSame)) {
+                if (leafSet.count(neighborSame) > 0 && isSeamTile(neighborSame)) {
                     neighborLeaves.push_back(neighborSame);
                 } else if (neighborSame.level > 0 &&
-                           sceneSnapshot_.leafSet.count(neighborSame.Parent()) > 0 &&
+                           leafSet.count(neighborSame.Parent()) > 0 &&
                            isSeamTile(neighborSame.Parent())) {
                     // Neighbor region is covered by a coarser leaf (delta-LOD edge).
                     neighborLeaves.push_back(neighborSame.Parent());
@@ -2652,10 +2788,10 @@ void GlobeEngine::Render() {
                     if (a >= 0) {
                         const TileKey childA = children[static_cast<std::size_t>(a)];
                         const TileKey childB = children[static_cast<std::size_t>(b)];
-                        if (sceneSnapshot_.leafSet.count(childA) > 0 && isSeamTile(childA)) {
+                        if (leafSet.count(childA) > 0 && isSeamTile(childA)) {
                             neighborLeaves.push_back(children[static_cast<std::size_t>(a)]);
                         }
-                        if (sceneSnapshot_.leafSet.count(childB) > 0 && isSeamTile(childB)) {
+                        if (leafSet.count(childB) > 0 && isSeamTile(childB)) {
                             neighborLeaves.push_back(children[static_cast<std::size_t>(b)]);
                         }
                     }
@@ -2862,7 +2998,7 @@ void GlobeEngine::Render() {
     // Request-stall diagnostics
     {
         int maxLvl = 0;
-        for (const TileKey& lk : sceneSnapshot_.leafSet) {
+        for (const TileKey& lk : leafSet) {
             maxLvl = std::max(maxLvl, lk.level);
         }
         debugStats_.maxLeafLevel = maxLvl;
@@ -3209,6 +3345,23 @@ void GlobeEngine::RenderDebugPanel() {
         showDebugPanel_ = !showDebugPanel_;
     }
     
+    // P0-3: Acquire immutable snapshot for debug panel (same logic as Render)
+    size_t readIndex = readBufferIndex_.load(std::memory_order_acquire);
+    // P0-3: Get immutable snapshot for debug panel
+    static const std::unordered_set<TileKey> emptyLeafSet;  // Fallback for invalid snapshots
+    const SceneSnapshot& currentSnapshot = sceneSnapshots_[readIndex];
+    const SceneSnapshot* snapshot = &currentSnapshot;
+    if (!currentSnapshot.valid) {
+        size_t otherIndex = 1 - readIndex;
+        const SceneSnapshot& otherSnapshot = sceneSnapshots_[otherIndex];
+        if (otherSnapshot.valid) {
+            snapshot = &otherSnapshot;
+        } else {
+            snapshot = nullptr;  // Both invalid
+        }
+    }
+    const auto& leafSet = snapshot ? snapshot->leafSet : emptyLeafSet;
+    
     if (showDebugPanel_) {
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(280, 380), ImGuiCond_FirstUseEver);
@@ -3391,7 +3544,7 @@ void GlobeEngine::RenderDebugPanel() {
                 ImGui::Text("DEM Health: %s", DemHealthStatusToString(demManager_->GetHealthStatus()));
                 bool terrainRequired = false;
                 if (config_.demEnabled) {
-                    for (const TileKey& key : sceneSnapshot_.leafSet) {
+                    for (const TileKey& key : leafSet) {
                         if (demManager_->HasDataOrAncestor(key)) {
                             terrainRequired = true;
                             break;
@@ -3508,6 +3661,20 @@ void GlobeEngine::RenderDebugPanel() {
             }
             
             ImGui::Text("Terrain Mode: CPU Mesh Bake");
+            
+            // P0-1: Atmosphere controls
+            ImGui::Spacing();
+            if (ImGui::Checkbox("Atmosphere", &config_.atmosphere.enabled)) {
+                frameRequested_ = true;
+            }
+            if (config_.atmosphere.enabled) {
+                if (ImGui::SliderFloat("Turbidity", &config_.atmosphere.turbidity, 0.0f, 10.0f)) {
+                    frameRequested_ = true;
+                }
+                if (ImGui::SliderFloat("Intensity", &config_.atmosphere.intensity, 0.0f, 5.0f)) {
+                    frameRequested_ = true;
+                }
+            }
             
             // DEM Telemetry
             if (demManager_) {
@@ -4287,7 +4454,7 @@ void GlobeEngine::RunVisualLodTest() {
             float worstGap = 0.0f;
             TileKey worstKey;
             bool found = false;
-            for (const TileKey& key : sceneSnapshot_.leafSet) {
+            for (const TileKey& key : renderLeafSet_) {
                 auto it = tiles_.find(key);
                 if (it == tiles_.end()) continue;
                 const Tile& tile = it->second;

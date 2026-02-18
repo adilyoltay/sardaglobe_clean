@@ -295,6 +295,11 @@ void ShaderManager::CacheUniformLocations(uint32_t program) {
     
     terrainMorphLoc_ = glGetUniformLocation(program, "uTerrainMorph");
     
+    // P1-5: Distance-based terrain morph uniforms
+    cameraPosLoc_ = glGetUniformLocation(program, "uCameraPos");
+    useDistanceBasedMorphLoc_ = glGetUniformLocation(program, "uUseDistanceBasedMorph");
+    morphDistanceRangeLoc_ = glGetUniformLocation(program, "uMorphDistanceRangeKm");
+    
     // RTE uniforms
     tileOriginHiLoc_ = glGetUniformLocation(program, "uTileOriginECEFHi");
     tileOriginLoLoc_ = glGetUniformLocation(program, "uTileOriginECEFLo");

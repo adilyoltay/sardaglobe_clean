@@ -71,10 +71,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
 ) {
     TileDrawStats stats;
     
-    (void)useDistanceBasedTerrainMorph;
-    // Single terrain authority: CPU mesh bake.
-    // Distance-based morph is disabled in this mode to avoid adjacent tile phase mismatch.
-    const bool effectiveUseDistanceBasedMorph = false;
+    // P1-5: Distance-based terrain morph enabled
+    const bool effectiveUseDistanceBasedMorph = useDistanceBasedTerrainMorph;
     
     const float fadeDurationSec = ComputeUnpopDurationSec(cameraSpeedKmPerSec);
     const bool bypassUnpop = ShouldBypassUnpop(cameraSpeedKmPerSec);
@@ -338,7 +336,8 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
               });
     
     // Begin batch rendering
-    tileRenderer_.BeginBatch(mvp, wireframe, useLogDepth, logDepthFarKm, useRte, useTextureArray);
+    tileRenderer_.BeginBatch(mvp, wireframe, useLogDepth, logDepthFarKm, useRte, useTextureArray,
+                             cameraPos, useDistanceBasedTerrainMorph, terrainMorphDistanceRangeKm);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 

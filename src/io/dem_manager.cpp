@@ -540,6 +540,31 @@ void DemManager::WorkerLoop() {
         
         if (batch.empty()) continue;
         
+        // P1-4: Batch rate limiting (backoff) - shared across all workers
+        if (config_.batchBackoffMs > 0) {
+            std::unique_lock<std::mutex> backoffLock(batchBackoffMutex_);
+            auto now = std::chrono::steady_clock::now();
+            if (now < nextBatchAllowedAt_) {
+                auto waitTime = nextBatchAllowedAt_ - now;
+                auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(waitTime).count();
+                
+                stats_.batchBackoffDelays.fetch_add(1);
+                // P1-4: Atomic double update (load-add-store pattern for compatibility)
+                double currentTotal = stats_.batchBackoffMsTotal.load();
+                while (!stats_.batchBackoffMsTotal.compare_exchange_weak(currentTotal, currentTotal + waitMs)) {}
+                
+                backoffLock.unlock();
+                std::this_thread::sleep_for(waitTime);
+                backoffLock.lock();
+            }
+            // Schedule next batch slot
+            nextBatchAllowedAt_ = std::chrono::steady_clock::now() + 
+                                  std::chrono::milliseconds(config_.batchBackoffMs);
+        }
+        
+        // P1-4: Increment batch counter
+        stats_.batchCount.fetch_add(1);
+        
         for (const auto& key : batch) {
             DemGridData data;
             bool success = FetchTile(key, data);

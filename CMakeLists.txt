@@ -132,6 +132,7 @@ add_executable(native_globe
   src/rendering/render_frame.cpp
   src/rendering/rockmesh_manager.cpp
   src/rendering/rockmesh_runtime.cpp
+  src/rendering/atmosphere_renderer.cpp
   src/rendering/pbo_upload_manager.cpp
   src/rendering/texture_array_manager.cpp
   src/io/node_data_cache.cpp
@@ -979,6 +980,24 @@ else()
 endif()
 add_test(NAME TextureArrayManagerTest COMMAND texture_array_manager_test)
 
+# P0-2 Should-fix: Texture2DArray capability fallback regression test
+add_executable(texture_array_capability_fallback_test
+  tests/texture_array_capability_fallback_test.cpp
+)
+target_include_directories(texture_array_capability_fallback_test PRIVATE
+  src
+  _deps/glad-src/include
+)
+target_link_libraries(texture_array_capability_fallback_test PRIVATE glad glm::glm)
+if(APPLE)
+  target_link_libraries(texture_array_capability_fallback_test PRIVATE "-framework OpenGL")
+elseif(WIN32)
+  target_link_libraries(texture_array_capability_fallback_test PRIVATE opengl32)
+else()
+  target_link_libraries(texture_array_capability_fallback_test PRIVATE GL)
+endif()
+add_test(NAME TextureArrayCapabilityFallbackTest COMMAND texture_array_capability_fallback_test)
+
 # RockTree Octree mapping determinism test (Faz 2B closure)
 add_executable(rocktree_octree_mapping_test
   tests/rocktree_octree_mapping_test.cpp
@@ -1197,6 +1216,16 @@ target_include_directories(dem_pending_neighbor_parent_scope_test PRIVATE
 )
 target_link_libraries(dem_pending_neighbor_parent_scope_test PRIVATE glm::glm)
 add_test(NAME DemPendingNeighborParentScopeTest COMMAND dem_pending_neighbor_parent_scope_test)
+
+# P1-4: DEM batch fetch configuration validation test
+add_executable(dem_batch_config_test
+  tests/dem_batch_config_test.cpp
+)
+target_include_directories(dem_batch_config_test PRIVATE
+  src
+)
+target_link_libraries(dem_batch_config_test PRIVATE glm::glm)
+add_test(NAME DemBatchConfigTest COMMAND dem_batch_config_test)
 
 add_executable(seam_feedback_telemetry_only_test
   tests/seam_feedback_telemetry_only_test.cpp

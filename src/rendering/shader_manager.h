@@ -63,6 +63,11 @@ public:
     
     int GetTerrainMorphLocation() const { return terrainMorphLoc_; }
     
+    // P1-5: Distance-based terrain morph uniforms
+    int GetCameraPosLocation() const { return cameraPosLoc_; }
+    int GetUseDistanceBasedMorphLocation() const { return useDistanceBasedMorphLoc_; }
+    int GetMorphDistanceRangeLocation() const { return morphDistanceRangeLoc_; }
+    
     // RTE uniforms
     int GetTileOriginHiLocation() const { return tileOriginHiLoc_; }
     int GetTileOriginLoLocation() const { return tileOriginLoLoc_; }
@@ -103,6 +108,11 @@ private:
     
     int terrainMorphLoc_ = -1;
     
+    // P1-5: Distance-based terrain morph uniforms
+    int cameraPosLoc_ = -1;
+    int useDistanceBasedMorphLoc_ = -1;
+    int morphDistanceRangeLoc_ = -1;
+    
     // RTE uniforms
     int tileOriginHiLoc_ = -1;
     int tileOriginLoLoc_ = -1;
@@ -131,9 +141,14 @@ layout(location = 3) in float aHeightKm;
 
 uniform mat4 uMVP;
 uniform vec4 uCornerLods;  // NW, NE, SE, SW corner LODs for bilinear interpolation
-uniform float uTerrainMorph;  // 0=flat, 1=full displacement
+uniform float uTerrainMorph;  // Base morph value (0=flat, 1=full displacement)
 uniform int uUseLogDepth;
 uniform float uLogDepthFar;
+
+// P1-5: Distance-based terrain morph uniforms
+uniform vec3 uCameraPos;           // Camera position in km (ECEF)
+uniform int uUseDistanceBasedMorph; // 0=use uTerrainMorph directly, 1=calculate based on distance
+uniform float uMorphDistanceRangeKm; // Distance over which morph occurs (km)
 
 // RTE (Relative-to-Center) uniforms for jitter-free rendering
 uniform vec3 uTileOriginECEFHi;  // High 16 bits of tile origin
@@ -158,14 +173,50 @@ void main() {
     vec3 normal = normalize(aNormal);
     vec3 radialDir = normalize(worldPos);
 
+    // P1-3: Corner LOD bilinear interpolation for seam smoothing
+    // uCornerLods: NW(x), NE(y), SE(z), SW(w)
+    // Calculate weighted LOD blend based on UV position
+    float lodNW = uCornerLods.x * (1.0 - aTexCoord.x) * aTexCoord.y;
+    float lodNE = uCornerLods.y * aTexCoord.x * aTexCoord.y;
+    float lodSE = uCornerLods.z * aTexCoord.x * (1.0 - aTexCoord.y);
+    float lodSW = uCornerLods.w * (1.0 - aTexCoord.x) * (1.0 - aTexCoord.y);
+    float edgeLodBlend = lodNW + lodNE + lodSE + lodSW;
+    
+    // P1-3: Clamp edgeLodBlend to valid range (0-2 based on max possible corner LOD sum)
+    edgeLodBlend = clamp(edgeLodBlend, 0.0, 2.0);
+    
+    // Corner LOD blend reduces height displacement at edges where neighbor is coarser
+    // Clamp to ensure valid morph range [0.0, 1.0]
+    float cornerLodMorph = clamp(1.0 - edgeLodBlend * 0.5, 0.0, 1.0);
+
+    // P1-5: Distance-based terrain morph calculation
+    // Calculate morph based on vertex distance from camera
+    float distanceMorph;
+    if (uUseDistanceBasedMorph == 1) {
+        // Distance from camera to vertex (in km)
+        float distKm = length(worldPos - uCameraPos);
+        // Morph is 0 (flat) at camera, transitions to 1 (full) over uMorphDistanceRangeKm
+        distanceMorph = clamp(distKm / uMorphDistanceRangeKm, 0.0, 1.0);
+    } else {
+        // Use uniform morph value directly
+        distanceMorph = uTerrainMorph;
+    }
+    
     // CPU mesh bake path: smoothly remove baked elevation during morph start.
     // aHeightKm is vertex-local DEM height above/below the ellipsoid surface.
-    float morph = clamp(uTerrainMorph, 0.0, 1.0);
-    if (abs(aHeightKm) > 1e-6 && morph < 1.0) {
-        pos = worldPos - radialDir * (aHeightKm * (1.0 - morph));
-        normal = normalize(mix(radialDir, aNormal, morph));
-    } else if (morph < 1.0) {
-        normal = normalize(mix(radialDir, aNormal, morph));
+    float morph = clamp(distanceMorph, 0.0, 1.0);
+    
+    // P1-3: Apply corner LOD blend to height morph
+    // Coarser edges (cornerLodMorph -> 0) should reduce displacement
+    // Smooth edges (cornerLodMorph -> 1) use normal morph
+    float adjustedMorph = clamp(morph * cornerLodMorph, 0.0, 1.0);
+    
+    if (abs(aHeightKm) > 1e-6 && adjustedMorph < 1.0) {
+        pos = worldPos - radialDir * (aHeightKm * (1.0 - adjustedMorph));
+        normal = normalize(mix(radialDir, aNormal, adjustedMorph));
+    } else if (adjustedMorph < 1.0) {
+        // P1-3: Use adjustedMorph for normal consistency
+        normal = normalize(mix(radialDir, aNormal, adjustedMorph));
     }
     
     gl_Position = uMVP * vec4(pos, 1.0);

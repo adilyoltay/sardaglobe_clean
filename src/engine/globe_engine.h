@@ -12,6 +12,7 @@
 #include "../rendering/tile_mesh_scheduler.h"
 #include "../rendering/render_frame.h"
 #include "../rendering/rockmesh_manager.h"
+#include "../rendering/atmosphere_renderer.h"
 #include "../io/dem_manager.h"
 #include "../core/frame_time_tracker.h"
 #include "../camera/earth_camera.h"
@@ -20,6 +21,9 @@
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <array>     // P0-3: Double-buffered snapshots
+#include <atomic>    // P0-3: Lock-free handoff
+#include <mutex>     // P0-3: Snapshot swap protection
 
 struct GLFWwindow;
 
@@ -116,15 +120,19 @@ private:
     TilePyramid tilePyramid_;
     JobSystem jobSystem_;
     std::unique_ptr<RenderFrame> renderFrame_;
+    std::unique_ptr<AtmosphereRenderer> atmosphereRenderer_;  // P0-1: Sky dome renderer
     LayerManager layerManager_;
     
     // Tiles
     std::unordered_map<TileKey, Tile> tiles_;
     std::unordered_set<TileKey> baseTileKeys_;
 
-    // BuildNextScene -> RenderScene snapshot (P2.1).
+    // P0-3: BuildNextScene -> RenderScene snapshot (double-buffered, thread-safe).
+    // SceneSnapshot is immutable after handoff - only pure-copy fields, no pointers.
     struct SceneSnapshot {
         bool valid = false;
+        uint64_t frameId = 0;           // P0-3: Frame correlation ID
+        uint64_t version = 0;           // P0-3: Monotonic version for ordering
         glm::mat4 mvp{1.0f};
         glm::vec3 cameraPos{0.0f};
         std::unordered_set<TileKey> leafSet;
@@ -133,8 +141,34 @@ private:
         bool wireframe = false;
         bool useLogDepth = false;
         float logDepthFarKm = 1.0f;
+        
+        // P0-1: Atmosphere settings (immutable snapshot)
+        bool atmosphereEnabled = true;
+        float atmosphereTurbidity = 2.0f;
+        float atmosphereIntensity = 1.0f;
+        float atmosphereGroundColor[3] = {0.05f, 0.06f, 0.09f};
+        
+        // P1-5: GPU Terrain Morph settings (immutable snapshot)
+        bool useDistanceBasedTerrainMorph = true;
+        float terrainMorphDistanceRangeKm = 0.2f;
+        
+        // P0-3: Immutable snapshot - deep copy semantics
+        SceneSnapshot() = default;
+        SceneSnapshot(const SceneSnapshot&) = default;
+        SceneSnapshot& operator=(const SceneSnapshot&) = default;
+        SceneSnapshot(SceneSnapshot&&) = default;
+        SceneSnapshot& operator=(SceneSnapshot&&) = default;
     };
-    SceneSnapshot sceneSnapshot_;
+    
+    // P0-3: Double-buffered snapshots for lock-free handoff
+    // Index 0: Buffer A
+    // Index 1: Buffer B
+    // Atomic readBufferIndex_ tells Render which buffer to read from
+    // Update always writes to the OTHER buffer, then atomically swaps
+    std::array<SceneSnapshot, 2> sceneSnapshots_;
+    std::atomic<size_t> readBufferIndex_{0};   // Which buffer Render reads from (0 or 1)
+    std::atomic<uint64_t> snapshotVersion_{0}; // Monotonic version for ordering
+    std::mutex snapshotMutex_;                 // Protects write sequence and version increment
     
     // Current leaf set for render filtering (updated each frame in Update)
     std::unordered_set<TileKey> currentLeafSet_;

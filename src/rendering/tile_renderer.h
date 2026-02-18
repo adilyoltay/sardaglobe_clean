@@ -37,7 +37,10 @@ public:
     // Begin a render batch
     void BeginBatch(const glm::mat4& mvp, bool wireframe = false,
                     bool useLogDepth = false, float logDepthFarKm = 1.0f,
-                    bool useRte = true, bool useTextureArray = false);
+                    bool useRte = true, bool useTextureArray = false,
+                    const glm::vec3& cameraPos = glm::vec3(0.0f),
+                    bool useDistanceBasedMorph = false,
+                    float morphDistanceRangeKm = 0.2f);
     
     // Render a single tile (uses tile's own texture)
     void RenderTile(const Tile& tile, float terrainMorph = 1.0f);

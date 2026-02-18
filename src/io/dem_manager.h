@@ -75,6 +75,11 @@ struct DemStats {
     mutable std::atomic<double> totalFetchMs{0.0};
     mutable std::atomic<uint64_t> bilinearNonFinite{0};  // Non-finite bilinear samples sanitized to 0
     
+    // P1-4: Batch fetch telemetry
+    mutable std::atomic<int> batchCount{0};           // Total batches processed
+    mutable std::atomic<int> batchBackoffDelays{0};   // Number of backoff delays applied
+    mutable std::atomic<double> batchBackoffMsTotal{0.0};  // Total backoff wait time
+    
     int GetTotalFetches() const { return fetchSuccess.load() + fetchFail.load(); }
     double GetAvgFetchMs() const {
         int total = fetchSuccess.load();
@@ -98,7 +103,8 @@ struct DemManagerConfig {
     DemProviderType providerType = DemProviderType::TerrainRGB;
     int meshN = 17;                   // Grid resolution per tile (GE parity: 17x17)
     int maxZoom = 15;                 // Terrain-RGB providers often cap DEM detail below raster max
-    int maxBatchSize = 1;
+    int maxBatchSize = 8;             // P1-4: Batch fetch size (8 = parallel, 1 = sequential)
+    int batchBackoffMs = 0;           // P1-4: Rate limiting between batches (0 = disabled)
     size_t cacheSize = 512;           // Max cached tiles
     double heightScale = 0.001;       // Meters to world units (km)
     bool debug = false;
@@ -227,6 +233,10 @@ public:
 
 private:
     Config config_;
+    
+    // P1-4: Batch backoff timing control (shared across all workers)
+    mutable std::mutex batchBackoffMutex_;
+    std::chrono::steady_clock::time_point nextBatchAllowedAt_{};
     
     // Provider implementation (Phase 3 abstraction)
     std::unique_ptr<ITerrainDemProvider> provider_;

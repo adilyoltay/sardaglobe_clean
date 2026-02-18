@@ -357,6 +357,24 @@ int main(int argc, char** argv) {
             config.demMaxZoom = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--dem-mesh-n") == 0 && i + 1 < argc) {
             config.demMeshN = std::max(2, std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--dem-batch-size") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const char* val = argv[++i];
+            long size = std::strtol(val, &end, 10);
+            if (end == val || *end != '\0' || size < 1 || size > 256) {
+                std::cerr << "ERROR: Invalid --dem-batch-size '" << val << "'. Must be 1-256.\n";
+                return 1;
+            }
+            config.demBatchDefaultSize = static_cast<int>(size);
+        } else if (std::strcmp(argv[i], "--dem-batch-backoff") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const char* val = argv[++i];
+            long ms = std::strtol(val, &end, 10);
+            if (end == val || *end != '\0' || ms < 0 || ms > 60000) {
+                std::cerr << "ERROR: Invalid --dem-batch-backoff '" << val << "'. Must be 0-60000 ms.\n";
+                return 1;
+            }
+            config.demBatchBackoffMs = static_cast<int>(ms);
         } else if (std::strcmp(argv[i], "--weighted-scheduler") == 0) {
             config.useWeightedScheduler = true;  // P3: Enable weighted scheduler (default)
         } else if (std::strcmp(argv[i], "--no-weighted-scheduler") == 0) {
@@ -466,6 +484,37 @@ int main(int argc, char** argv) {
             config.rockMeshRenderEnabled = false;  // Kill-switch
         } else if (std::strcmp(argv[i], "--rockmesh") == 0) {
             config.rockMeshRenderEnabled = true;
+        } else if (std::strcmp(argv[i], "--no-atmosphere") == 0) {
+            config.atmosphere.enabled = false;  // P0-1: Disable atmosphere
+        } else if (std::strcmp(argv[i], "--atmosphere") == 0) {
+            config.atmosphere.enabled = true;   // P0-1: Enable atmosphere (default)
+        } else if (std::strcmp(argv[i], "--no-predictive-prefetch") == 0) {
+            config.usePredictivePrefetch = false;  // P1-6: Disable predictive prefetch
+        } else if (std::strcmp(argv[i], "--predictive-prefetch") == 0) {
+            config.usePredictivePrefetch = true;   // P1-6: Enable predictive prefetch (default)
+        } else if (std::strcmp(argv[i], "--predictive-prefetch-max-candidates") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const char* val = argv[++i];
+            long candidates = std::strtol(val, &end, 10);
+            if (end == val || *end != '\0' || candidates < 0 || candidates > 256) {
+                std::cerr << "ERROR: Invalid --predictive-prefetch-max-candidates '" << val << "'. Must be 0-256.\n";
+                return 1;
+            }
+            config.predictivePrefetchMaxCandidates = static_cast<int>(candidates);
+        } else if (std::strcmp(argv[i], "--predictive-prefetch-ttl-ms") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const char* val = argv[++i];
+            long ttl = std::strtol(val, &end, 10);
+            if (end == val || *end != '\0' || ttl < 0 || ttl > 10000) {
+                std::cerr << "ERROR: Invalid --predictive-prefetch-ttl-ms '" << val << "'. Must be 0-10000 ms.\n";
+                return 1;
+            }
+            config.predictivePrefetchTtlMs = static_cast<int>(ttl);
+        } else if (std::strcmp(argv[i], "--atmosphere") == 0) {
+        } else if (std::strcmp(argv[i], "--atmosphere-turbidity") == 0 && i + 1 < argc) {
+            config.atmosphere.turbidity = std::stof(argv[++i]);  // P0-1: Turbidity
+        } else if (std::strcmp(argv[i], "--atmosphere-intensity") == 0 && i + 1 < argc) {
+            config.atmosphere.intensity = std::stof(argv[++i]);  // P0-1: Intensity
         } else if (std::strcmp(argv[i], "--no-rockmesh-sanity") == 0) {
             config.rockMeshSanityEnabled = false;
         } else if (std::strcmp(argv[i], "--rockmesh-sanity") == 0) {
@@ -695,6 +744,8 @@ int main(int argc, char** argv) {
                       << "  --dem-api-key-env ENV DEM API key env var (default: NATIVE_GLOBE_DEM_TOKEN)\n"
                       << "  --dem-max-zoom N  Max DEM source zoom level (default 22)\n"
                       << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
+                      << "  --dem-batch-size N    DEM parallel fetch batch size (default: 8, 1=sequential)\n"
+                      << "  --dem-batch-backoff MS  Rate limit between batches in ms (default: 0=disabled)\n"
                       << "  --ge-elevation-endpoint URL  Google Earth elevation endpoint\n"
                       << "  --ge-elevation-path PATH     Override {path} in elevation URL (default: Elevation)\n"
                       << "  --ge-epoch EPOCH             Manual GE dataset epoch override\n"
@@ -711,6 +762,16 @@ int main(int argc, char** argv) {
                       << "  --rockmesh-max-vertex-dist-km KM  Max vertex distance from mesh origin (default: 300)\n"
                       << "  --rockmesh-fallback-color R,G,B   Fallback color for invalid meshes (default: 128,128,128)\n"
                       << "  --rockmesh-fallback-magenta  Use magenta for invalid meshes (debug mode)\n"
+                      << "\nAtmosphere (Sky Dome) Options:\n"
+                      << "  --no-atmosphere              Disable atmosphere/sky dome rendering\n"
+                      << "  --atmosphere                 Enable atmosphere rendering (default)\n"
+                      << "  --atmosphere-turbidity VAL   Atmospheric turbidity (0-10, default: 2.0)\n"
+                      << "  --atmosphere-intensity VAL   Sky intensity multiplier (0-5, default: 1.0)\n"
+                      << "\nPredictive Prefetch Options (P1-6):\n"
+                      << "  --no-predictive-prefetch         Disable predictive view prefetch\n"
+                      << "  --predictive-prefetch            Enable predictive prefetch (default)\n"
+                      << "  --predictive-prefetch-max-candidates N  Max prefetch tiles per frame (0-256, default: 64)\n"
+                      << "  --predictive-prefetch-ttl-ms MS  Cache protection TTL in ms (0-10000, default: 500)\n"
                       << "  --ge-elevation-type TYPE     Elevation type: ellipsoid | terrain | sea_level\n"
                       << "  --ge-mesh-quadkey QK         RockTree NodeData quadkey (Sprint 1, repeatable, digits 0-7)\n"
                       << "  --ge-mesh-no-flip-v          Disable V coordinate flip for texture (default: flip enabled)\n"

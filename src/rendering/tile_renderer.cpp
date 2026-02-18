@@ -520,7 +520,8 @@ bool TileRenderer::EnsureInstancedGrid(int segments) {
 
 void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
                               bool useLogDepth, float logDepthFarKm, bool useRte,
-                              bool useTextureArray) {
+                              bool useTextureArray, const glm::vec3& cameraPos,
+                              bool useDistanceBasedMorph, float morphDistanceRangeKm) {
     stats_ = RenderStats{};
     batchActive_ = true;
     wireframeMode_ = wireframe;
@@ -562,6 +563,11 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
     glUniform1f(shaderManager_.GetTerrainMorphLocation(), 1.0f);
     glUniform1i(shaderManager_.GetUseLogDepthLocation(), useLogDepthBatch_ ? 1 : 0);
     glUniform1f(shaderManager_.GetLogDepthFarLocation(), logDepthFarBatch_);
+    
+    // P1-5: Distance-based terrain morph uniforms
+    glUniform3fv(shaderManager_.GetCameraPosLocation(), 1, glm::value_ptr(cameraPos));
+    glUniform1i(shaderManager_.GetUseDistanceBasedMorphLocation(), useDistanceBasedMorph ? 1 : 0);
+    glUniform1f(shaderManager_.GetMorphDistanceRangeLocation(), morphDistanceRangeKm);
     
     // Wireframe mode
     if (wireframeMode_) {

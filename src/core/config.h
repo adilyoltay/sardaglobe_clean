@@ -33,6 +33,23 @@ inline float QualityModeToMultiplier(QualityMode mode) {
     return 1.0f;
 }
 
+// P0-1: Atmosphere settings for sky dome rendering (GE parity)
+struct AtmosphereSettings {
+    bool enabled = true;                    // Master toggle
+    float turbidity = 2.0f;                 // Atmospheric turbidity (2.0 = clear, 4.0 = hazy)
+    float intensity = 1.0f;                 // Overall intensity multiplier
+    float groundColor[3] = {0.05f, 0.06f, 0.09f};  // Ground color (dark blue-gray default)
+    
+    // Validate and clamp settings to safe ranges
+    void Validate() {
+        turbidity = std::clamp(turbidity, 0.0f, 10.0f);
+        intensity = std::clamp(intensity, 0.0f, 5.0f);
+        groundColor[0] = std::clamp(groundColor[0], 0.0f, 1.0f);
+        groundColor[1] = std::clamp(groundColor[1], 0.0f, 1.0f);
+        groundColor[2] = std::clamp(groundColor[2], 0.0f, 1.0f);
+    }
+};
+
 // Adaptive mesh segments based on tile zoom level.
 // Higher zoom tiles cover less geographic area → less spherical curvature → fewer segments needed.
 // DEM grid is small (e.g. 5×5), so excessive segments just oversample bilinear interpolation.
@@ -194,7 +211,9 @@ struct Config {
     size_t pboUploadSize = 4 * 1024 * 1024; // Default PBO buffer size (4MB)
     
     // Faz 2B: Texture2DArray (layer-based texture storage)
-    bool useTexture2DArray = false; // Enable Texture2DArray (prevents bleeding, default false for safe rollout)
+    // P0-2: Default enabled for GE visual parity (bleeding prevention)
+    // Runtime capability check in GlobeEngine::Init() may auto-fallback to atlas
+    bool useTexture2DArray = true;  // Enable Texture2DArray (prevents bleeding, default true)
     
     // Faz 3: Performance optimizations
     // Horizon Culling
@@ -224,6 +243,17 @@ struct Config {
     bool useDistanceBasedTerrainMorph = true;        // Enable distance-based morph (default: true)
     float terrainMorphDistanceRangeKm = 0.2f;        // Morph band width in km (default: 200m)
     bool enableTerrainMorphTimeFallback = true;      // Allow time-based fallback if distance invalid
+    
+    // P1-4: DEM batch fetch configuration (GE-style parallel elevation fetching)
+    int demBatchDefaultSize = 8;          // Parallel DEM tile fetch batch size (1 = sequential, 8+ = parallel)
+    int demBatchBackoffMs = 0;            // Batch rate limiting in ms (0 = disabled, >0 = wait between batches)
+    
+    // P1-6: Predictive prefetch configuration (GE-style view prefetching)
+    bool usePredictivePrefetch = true;                    // Enable predictive prefetch (default: true)
+    int predictivePrefetchMaxCandidates = 64;             // Max tiles to prefetch per frame
+    float predictiveVelocityThresholdKmPerSec = 0.05f;    // Minimum speed to trigger prefetch
+    float predictiveLookaheadSpeedScale = 0.0015f;        // Speed multiplier for lookahead time
+    int predictivePrefetchTtlMs = 500;                    // Cache protection TTL (milliseconds)
     
     // DEM/Terrain settings
     // Default: Public AWS Terrarium tile template (no API key required)
@@ -284,6 +314,9 @@ struct Config {
     // Quality mode (GE parity: 1.0/2.0/4.0 multipliers)
     QualityMode qualityMode = QualityMode::MEDIUM;  // Default: GE standard quality
     
+    // P0-1: Atmosphere settings for sky dome (GE visual parity)
+    AtmosphereSettings atmosphere;
+    
     // P1-4: Config validasyonu - çakışan ayarları düzelt
     void Validate() {
         // LogDepth ve Reversed-Z aynı anda aktif olamaz!
@@ -322,6 +355,19 @@ struct Config {
         if (!std::isfinite(demHeightMinKm)) demHeightMinKm = -12.0f;
         if (!std::isfinite(demHeightMaxKm)) demHeightMaxKm = 12.0f;
         if (demHeightMinKm > demHeightMaxKm) std::swap(demHeightMinKm, demHeightMaxKm);
+        
+        // P1-4: DEM batch fetch configuration validation
+        demBatchDefaultSize = std::clamp(demBatchDefaultSize, 1, 256);
+        demBatchBackoffMs = std::max(0, demBatchBackoffMs);
+        
+        // P1-6: Predictive prefetch configuration validation
+        predictivePrefetchMaxCandidates = std::clamp(predictivePrefetchMaxCandidates, 0, 256);
+        predictiveVelocityThresholdKmPerSec = std::max(0.0f, predictiveVelocityThresholdKmPerSec);
+        predictiveLookaheadSpeedScale = std::max(0.0f, predictiveLookaheadSpeedScale);
+        predictivePrefetchTtlMs = std::clamp(predictivePrefetchTtlMs, 0, 10000); // Max 10 seconds
+        
+        // P0-1: Atmosphere settings validation
+        atmosphere.Validate();
     }
 };
 

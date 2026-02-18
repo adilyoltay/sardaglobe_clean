@@ -47,7 +47,16 @@ bool TextureArrayManager::Initialize() {
     
     // Check GL version supports texture arrays
     if (!GLAD_GL_VERSION_3_0 && !GLAD_GL_EXT_texture_array) {
-        std::cerr << "[TextureArrayManager] GL_TEXTURE_2D_ARRAY not supported\n";
+        std::cerr << "[TextureArrayManager] GL_TEXTURE_2D_ARRAY not supported (requires GL 3.0+ or GL_EXT_texture_array)\n";
+        return false;
+    }
+    
+    // P0-2: Check max array layers - need at least 128 for reasonable tile storage
+    GLint maxLayers = 0;
+    glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+    if (maxLayers < 128) {
+        std::cerr << "[TextureArrayManager] Insufficient GL_MAX_ARRAY_TEXTURE_LAYERS (" 
+                  << maxLayers << " < 128), texture arrays disabled\n";
         return false;
     }
     
