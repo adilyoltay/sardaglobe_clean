@@ -80,6 +80,7 @@ const char* ProviderLabel(DemProviderType provider) {
 
 GlobeEngine::GlobeEngine(const Config& config)
     : config_(config) {
+    showDebugPanel_ = config.showDebugPanelEnabled;
 }
 
 GlobeEngine::~GlobeEngine() {
@@ -2550,6 +2551,7 @@ void GlobeEngine::Render() {
         demManager_.get(),
         config_.useRteRender,
         config_.fallbackRequireParentUntilChildrenReady,
+        config_.useTexture2DArray,
         snapshot->useDistanceBasedTerrainMorph,  // P1-5: Distance-based morph from snapshot
         snapshot->terrainMorphDistanceRangeKm,   // P1-5: Morph band width from snapshot
         config_.enableTerrainMorphTimeFallback   // P1-5: Time fallback on invalid distance
@@ -2964,6 +2966,12 @@ void GlobeEngine::Render() {
     debugStats_.trianglesRendered = renderStats.trianglesRendered;
     debugStats_.instancedBatches = renderStats.instancedBatches;
     debugStats_.instancedTiles = renderStats.instancedTiles;
+    debugStats_.instancedArrayBatches = renderStats.instancedArrayBatches;
+    debugStats_.instancedArrayTiles = renderStats.instancedArrayTiles;
+    debugStats_.instancedArraySkipsNotArray = renderStats.instancedArraySkipsNotArray;
+    debugStats_.instancedArraySkipsMissingLayer = renderStats.instancedArraySkipsMissingLayer;
+    debugStats_.arrayCrossfadeTo2dFallbacks = renderStats.arrayCrossfadeTo2dFallbacks;
+    debugStats_.arraySinglePathFallbacks = renderStats.arraySinglePathFallbacks;
     debugStats_.atlasEnabled = textureManager_ && textureManager_->IsAtlasEnabled();
     debugStats_.atlasPages = textureManager_ ? textureManager_->GetAtlasPageCount() : 0;
     debugStats_.atlasUsedSlots = textureManager_ ? textureManager_->GetAtlasUsedSlots() : 0;
@@ -3051,8 +3059,58 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshFallbackTextureUsed = 0;
     }
     
+    const double nowSec = glfwGetTime();
+    if (config_.renderStatsLogging &&
+        config_.renderStatsLogIntervalSec > 0.0f &&
+        (lastRenderStatsLogTimeSec_ <= 0.0 ||
+         (nowSec - lastRenderStatsLogTimeSec_) >= static_cast<double>(config_.renderStatsLogIntervalSec))) {
+        lastRenderStatsLogTimeSec_ = nowSec;
+        std::cout << "[Render][STATS]"
+                  << " frame=" << frameSerial_
+                  << " draw=" << debugStats_.drawCalls
+                  << " tri=" << debugStats_.trianglesRendered
+                  << " leaves=" << debugStats_.leafNoTexture + debugStats_.leafNoTerrain + debugStats_.leafNoMesh
+                  << " renderable=" << debugStats_.renderableLeaves
+                  << " fallback=" << debugStats_.fallbackTiles
+                  << " placeholders=" << debugStats_.placeholderTiles
+                  << " demFlat=" << debugStats_.demFlatLeaves
+                  << " demPending=" << debugStats_.demPendingLeaves
+                  << " arrayCrossfade=" << debugStats_.arrayCrossfadeTo2dFallbacks
+                  << " arrayInstSkips=" << debugStats_.instancedArraySkipsNotArray
+                  << " arrayInstMissLayer=" << debugStats_.instancedArraySkipsMissingLayer
+                  << " arraySinglePath=" << renderStats.arraySinglePathFallbacks
+                  << " fps=" << debugStats_.fps
+                  << " frameMs=" << debugStats_.renderMs
+                  << "\n";
+    }
+
+    if (config_.viewDebugLogging &&
+        config_.viewDebugLogIntervalSec > 0.0f &&
+        (lastViewDebugLogTimeSec_ <= 0.0 ||
+         (nowSec - lastViewDebugLogTimeSec_) >= static_cast<double>(config_.viewDebugLogIntervalSec))) {
+        lastViewDebugLogTimeSec_ = nowSec;
+        glm::dvec3 centerPoint{0.0, 0.0, 0.0};
+        const bool centerWorldHit = PickGlobe(config_.windowWidth * 0.5, config_.windowHeight * 0.5, centerPoint);
+        const double centerDepthKm = centerWorldHit
+            ? (glm::length(centerPoint) - earth::EARTH_RADIUS_KM)
+            : 1.0;
+        std::cout << "[ViewDebugState]"
+                  << " frame=" << frameSerial_
+                  << " centerWorldHit=" << (centerWorldHit ? 1 : 0)
+                  << " centerDepth=" << centerDepthKm
+                  << " centerLat=" << debugStats_.latitude
+                  << " centerLon=" << debugStats_.longitude
+                  << " centerAltKm=" << debugStats_.altitude / 1000.0
+                  << " heading=" << debugStats_.heading
+                  << " tilt=" << debugStats_.tilt
+                  << " pick=" << (centerWorldHit ? "ok" : "miss")
+                  << "\n";
+    }
+
     // Render ImGui debug panel
-    RenderDebugPanel();
+    if (config_.showDebugPanelEnabled) {
+        RenderDebugPanel();
+    }
 
     frameTimings_.renderMs = (glfwGetTime() * 1000.0) - renderStartMs;
     frameTimings_.totalMs = frameTimings_.totalMs + frameTimings_.renderMs;
@@ -3396,6 +3454,13 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Triangles: %d", debugStats_.trianglesRendered);
             ImGui::Text("Instanced: %d batches / %d tiles",
                         debugStats_.instancedBatches, debugStats_.instancedTiles);
+            ImGui::Text("Instanced(Array): %d batches / %d tiles",
+                        debugStats_.instancedArrayBatches, debugStats_.instancedArrayTiles);
+            ImGui::Text("Array fallback: %d notArray / %d missingLayer / %d crossfade->2D / %d singlePath",
+                        debugStats_.instancedArraySkipsNotArray,
+                        debugStats_.instancedArraySkipsMissingLayer,
+                        debugStats_.arrayCrossfadeTo2dFallbacks,
+                        debugStats_.arraySinglePathFallbacks);
             if (debugStats_.atlasEnabled) {
                 ImGui::Text("Atlas Slots: %d / %d (%d pages)",
                             debugStats_.atlasUsedSlots,

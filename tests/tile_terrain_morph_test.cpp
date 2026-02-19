@@ -66,24 +66,26 @@ int main() {
         Tile tile2(key2);
         
         // Test 1: Spawn at distance = morph 0
-        float spawnDist = 1.0f;  // 1km away
+        float spawnDist = 1000.0f;  // 1000km away
         float rangeKm = 0.2f;    // 200m morph band
         float mSpawn = tile2.UpdateTerrainMorph(0.0, true, spawnDist, true, rangeKm, 
                                                  Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mSpawn, 0.0f), "P2: spawn at distance should yield morph 0");
         
-        // Test 2: Approach by 100m = morph 0.5
-        float mHalf = tile2.UpdateTerrainMorph(0.0, true, 0.9f, true, rangeKm,
+        // Test 2: Halfway through adaptive morph band (~50km) -> 0.5
+        float halfApproachDist = spawnDist - (spawnDist * 0.05f * 0.5f);
+        float mHalf = tile2.UpdateTerrainMorph(0.0, true, halfApproachDist, true, rangeKm,
                                                  Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mHalf, 0.5f, 1e-3f), "P2: halfway approach should yield morph 0.5");
         
-        // Test 3: Full approach = morph 1
-        float mFull = tile2.UpdateTerrainMorph(0.0, true, 0.8f, true, rangeKm,
+        // Test 3: Full approach to band end -> morph 1
+        float fullApproachDist = spawnDist * 0.95f; // spawn - 5%
+        float mFull = tile2.UpdateTerrainMorph(0.0, true, fullApproachDist, true, rangeKm,
                                                  Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mFull, 1.0f, 1e-3f), "P2: full approach should yield morph 1");
         
         // Test 4: Monotonic - moving away shouldn't decrease morph
-        float mAway = tile2.UpdateTerrainMorph(0.0, true, 1.5f, true, rangeKm,
+        float mAway = tile2.UpdateTerrainMorph(0.0, true, spawnDist * 2.0f, true, rangeKm,
                                                  Tile::TERRAIN_MORPH_DURATION, true);
         failed += !Expect(Near(mAway, 1.0f, 1e-3f), "P2: moving away should keep morph at 1 (monotonic)");
         

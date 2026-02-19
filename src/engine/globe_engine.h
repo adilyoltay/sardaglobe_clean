@@ -287,6 +287,12 @@ private:
         int atlasCapacitySlots = 0;
         int instancedBatches = 0;
         int instancedTiles = 0;
+        int instancedArrayBatches = 0;
+        int instancedArrayTiles = 0;
+        int instancedArraySkipsNotArray = 0;
+        int instancedArraySkipsMissingLayer = 0;
+        int arrayCrossfadeTo2dFallbacks = 0;
+        int arraySinglePathFallbacks = 0;
         float cameraSpeedKmPerSec = 0.0f;
         double demWaitMs = 0.0;
         size_t meshRebuildCount = 0;
@@ -337,6 +343,8 @@ private:
     };
     DebugStats debugStats_;
     bool showDebugPanel_ = true;
+    double lastRenderStatsLogTimeSec_ = 0.0;
+    double lastViewDebugLogTimeSec_ = 0.0;
 
     // Render-time quorum counters (computed during Update; displayed in RenderDebugPanel).
     int renderQuorumDowngrades_ = 0;

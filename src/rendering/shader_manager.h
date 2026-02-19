@@ -193,10 +193,12 @@ void main() {
     // Calculate morph based on vertex distance from camera
     float distanceMorph;
     if (uUseDistanceBasedMorph == 1) {
-        // Distance from camera to vertex (in km)
-        float distKm = length(worldPos - uCameraPos);
-        // Morph is 0 (flat) at camera, transitions to 1 (full) over uMorphDistanceRangeKm
-        distanceMorph = clamp(distKm / uMorphDistanceRangeKm, 0.0, 1.0);
+        // CPU tracks morph state in uTerrainMorph and applies
+        // distance/time-based policy with stable thresholds.
+        // Keep shader-path in sync with CPU state to avoid unit/semantic drift.
+        // Use CPU output directly; uMorphDistanceRangeKm remains for telemetry/debug,
+        // but we keep this branch for command compatibility.
+        distanceMorph = clamp(uTerrainMorph, 0.0, 1.0);
     } else {
         // Use uniform morph value directly
         distanceMorph = uTerrainMorph;

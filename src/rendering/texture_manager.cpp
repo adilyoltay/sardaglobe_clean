@@ -9,6 +9,23 @@ namespace globe {
 
 namespace {
 
+bool TextureArrayMipmapsEnabled() {
+    static int enabled = []() -> int {
+        const char* env = std::getenv("NATIVE_GLOBE_ARRAY_NO_MIPMAP");
+        if (!env || env[0] == '\0') {
+            return 1;
+        }
+        const char c = env[0];
+        if (c == '0' || c == 'n' || c == 'N' || c == 'f' || c == 'F' || c == 'o' || c == 'O') {
+            return 0;
+        }
+        return 1;
+    }();
+    return enabled != 0;
+}
+
+}
+
 std::vector<uint8_t> BuildDilatedRgba(
     const std::vector<uint8_t>& src,
     int width,
@@ -58,8 +75,6 @@ std::vector<uint8_t> BuildDilatedRgba(
 
     return padded;
 }
-
-} // namespace
 
 TextureManager::TextureManager(const Config& config)
     : config_(config)
@@ -130,7 +145,7 @@ void TextureManager::InitializeArrayManager() {
     arrayConfig.useTexture2DArray = true;
     arrayConfig.initialLayersPerTier = config_.pboUploadCount * 8;  // Scale with PBO count
     arrayConfig.maxLayersPerTier = 256;
-    arrayConfig.generateMipmaps = true;
+    arrayConfig.generateMipmaps = TextureArrayMipmapsEnabled();
     
     arrayManager_ = std::make_unique<TextureArrayManager>(arrayConfig);
     if (!arrayManager_->Initialize()) {

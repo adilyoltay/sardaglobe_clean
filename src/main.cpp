@@ -11,9 +11,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iomanip>
 #include <string>
+#include <string_view>
 #include <limits>
 #include <cerrno>
 #include <cstdint>
+#include <cctype>
 
 #if defined(__APPLE__)
 #include <sys/types.h>
@@ -96,6 +98,43 @@ bool ParseNumeric(const char* str, T& out, const char* name) {
         out = static_cast<T>(val);
     }
     return true;
+}
+
+bool ParseBoolValue(const char* value, bool& out) {
+    if (!value || value[0] == '\0') {
+        return false;
+    }
+    std::string lower;
+    lower.reserve(std::strlen(value));
+    for (const unsigned char c : std::string_view(value)) {
+        lower.push_back(static_cast<char>(std::tolower(c)));
+    }
+    if (lower == "1" || lower == "true" || lower == "yes" || lower == "on") {
+        out = true;
+        return true;
+    }
+    if (lower == "0" || lower == "false" || lower == "no" || lower == "off") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool ParseBoolEnv(const char* envName, bool defaultValue, bool& out) {
+    const char* env = std::getenv(envName);
+    if (!env) {
+        out = defaultValue;
+        return false;
+    }
+    bool parsed = false;
+    if (ParseBoolValue(env, parsed)) {
+        out = parsed;
+        return true;
+    }
+    std::cerr << "Warning: " << envName << " has invalid value '" << env
+              << "' (expected 1/0, true/false, yes/no, on/off). Ignoring.\n";
+    out = defaultValue;
+    return false;
 }
 
 std::string RedactSensitiveUrlParams(const std::string& input) {
@@ -311,6 +350,40 @@ int main(int argc, char** argv) {
     }
     if (const char* env = std::getenv(config.demApiKeyEnv.c_str())) {
         config.demApiKey = env;
+    }
+    if (const char* env = std::getenv("NATIVE_GLOBE_RENDER_STATS")) {
+        ParseBoolEnv("NATIVE_GLOBE_RENDER_STATS", false, config.renderStatsLogging);
+    }
+    if (const char* env = std::getenv("NATIVE_GLOBE_VIEW_DEBUG")) {
+        ParseBoolEnv("NATIVE_GLOBE_VIEW_DEBUG", false, config.viewDebugLogging);
+    }
+    if (const char* env = std::getenv("NATIVE_GLOBE_NO_DEBUG_PANEL")) {
+        bool hidePanel = false;
+        ParseBoolEnv("NATIVE_GLOBE_NO_DEBUG_PANEL", false, hidePanel);
+        config.showDebugPanelEnabled = !hidePanel;
+    }
+    if (const char* env = std::getenv("NATIVE_GLOBE_RENDER_STATS_INTERVAL")) {
+        float value = 0.0f;
+        if (ParseNumeric(env, value, "NATIVE_GLOBE_RENDER_STATS_INTERVAL")) {
+            if (value > 0.0f) {
+                config.renderStatsLogIntervalSec = value;
+            } else {
+                std::cerr << "Warning: NATIVE_GLOBE_RENDER_STATS_INTERVAL must be > 0. Ignoring.\n";
+            }
+        }
+    }
+    if (const char* env = std::getenv("NATIVE_GLOBE_VIEW_DEBUG_INTERVAL")) {
+        float value = 0.0f;
+        if (ParseNumeric(env, value, "NATIVE_GLOBE_VIEW_DEBUG_INTERVAL")) {
+            if (value > 0.0f) {
+                config.viewDebugLogIntervalSec = value;
+            } else {
+                std::cerr << "Warning: NATIVE_GLOBE_VIEW_DEBUG_INTERVAL must be > 0. Ignoring.\n";
+            }
+        }
+    }
+    if (const char* env = std::getenv("NATIVE_GLOBE_TEXTURE_ARRAY")) {
+        ParseBoolEnv("NATIVE_GLOBE_TEXTURE_ARRAY", false, config.useTexture2DArray);
     }
     
     // Parse command line arguments
@@ -688,6 +761,32 @@ int main(int argc, char** argv) {
             config.terrainMorphDistanceRangeKm = static_cast<float>(range);
         } else if (std::strcmp(argv[i], "--no-morph-fallback") == 0) {
             config.enableTerrainMorphTimeFallback = false;  // P2: Disable time fallback
+        } else if (std::strcmp(argv[i], "--texture-array") == 0) {
+            config.useTexture2DArray = true;
+        } else if (std::strcmp(argv[i], "--no-texture-array") == 0) {
+            config.useTexture2DArray = false;
+        } else if (std::strcmp(argv[i], "--render-stats") == 0) {
+            config.renderStatsLogging = true;
+        } else if (std::strcmp(argv[i], "--render-stats-interval") == 0 && i + 1 < argc) {
+            float interval = 0.0f;
+            if (!ParseNumeric(argv[++i], interval, "--render-stats-interval") || interval <= 0.0f) {
+                std::cerr << "ERROR: --render-stats-interval requires a positive value in seconds.\n";
+                return 1;
+            }
+            config.renderStatsLogging = true;
+            config.renderStatsLogIntervalSec = interval;
+        } else if (std::strcmp(argv[i], "--view-debug") == 0) {
+            config.viewDebugLogging = true;
+        } else if (std::strcmp(argv[i], "--view-debug-interval") == 0 && i + 1 < argc) {
+            float interval = 0.0f;
+            if (!ParseNumeric(argv[++i], interval, "--view-debug-interval") || interval <= 0.0f) {
+                std::cerr << "ERROR: --view-debug-interval requires a positive value in seconds.\n";
+                return 1;
+            }
+            config.viewDebugLogging = true;
+            config.viewDebugLogIntervalSec = interval;
+        } else if (std::strcmp(argv[i], "--no-debug-panel") == 0) {
+            config.showDebugPanelEnabled = false;
         } else if (std::strcmp(argv[i], "--min-zoom") == 0 && i + 1 < argc) {
             config.minZoom = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--max-zoom") == 0 && i + 1 < argc) {
@@ -767,6 +866,9 @@ int main(int argc, char** argv) {
                       << "  --atmosphere                 Enable atmosphere rendering (default)\n"
                       << "  --atmosphere-turbidity VAL   Atmospheric turbidity (0-10, default: 2.0)\n"
                       << "  --atmosphere-intensity VAL   Sky intensity multiplier (0-5, default: 1.0)\n"
+                      << "\nTexture Sampling Options:\n"
+                      << "  --texture-array              Force GL_TEXTURE_2D_ARRAY path\n"
+                      << "  --no-texture-array           Force Atlas/2D texture path (default)\n"
                       << "\nPredictive Prefetch Options (P1-6):\n"
                       << "  --no-predictive-prefetch         Disable predictive view prefetch\n"
                       << "  --predictive-prefetch            Enable predictive prefetch (default)\n"
@@ -790,6 +892,11 @@ int main(int argc, char** argv) {
                       << "  --no-distance-morph   Disable distance-based terrain morph (use time-based)\n"
                       << "  --morph-range KM      Terrain morph distance range in km (default: 0.2)\n"
                       << "  --no-morph-fallback   Disable time-based fallback for invalid distance\n"
+                      << "  --render-stats             Enable periodic render telemetry logs\n"
+                      << "  --render-stats-interval SEC  Set render telemetry interval in seconds\n"
+                      << "  --view-debug               Enable periodic view debug logs\n"
+                      << "  --view-debug-interval SEC  Set view debug interval in seconds\n"
+                      << "  --no-debug-panel           Hide runtime debug panel entirely\n"
                       << "  --weighted-scheduler / --no-weighted-scheduler  Enable/disable weighted tile scheduling (default: enabled)\n"
                       << "  --scheduler-use-aging / --no-scheduler-aging    Enable/disable scheduler aging (default: enabled)\n"
                       << "  --scheduler-aging-half-life MS  Aging half-life in milliseconds (default: 5000)\n"
@@ -822,6 +929,12 @@ int main(int argc, char** argv) {
                       << "  NATIVE_GLOBE_DEM_AUTH   DEM HTTP basic auth (user:password)\n"
                       << "  NATIVE_GLOBE_DEM_TOKEN  Terrain-RGB API key\n"
                       << "  NATIVE_GLOBE_GE_TOKEN   Google Earth auth token (for --dem-provider google-earth)\n"
+                      << "  NATIVE_GLOBE_TEXTURE_ARRAY            Enable texture array startup intent\n"
+                      << "  NATIVE_GLOBE_RENDER_STATS             Enable render stats log stream\n"
+                      << "  NATIVE_GLOBE_RENDER_STATS_INTERVAL     Override render stats interval in seconds\n"
+                      << "  NATIVE_GLOBE_VIEW_DEBUG               Enable view debug log stream\n"
+                      << "  NATIVE_GLOBE_VIEW_DEBUG_INTERVAL       Override view debug interval in seconds\n"
+                      << "  NATIVE_GLOBE_NO_DEBUG_PANEL            Hide debug panel\n"
                       ;
             return 0;
         }

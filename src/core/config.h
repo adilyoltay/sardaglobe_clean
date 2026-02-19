@@ -304,6 +304,11 @@ struct Config {
 
     // Debug
     bool showDebugInfo = true;
+    bool renderStatsLogging = false;
+    float renderStatsLogIntervalSec = 1.0f;
+    bool viewDebugLogging = false;
+    float viewDebugLogIntervalSec = 1.0f;
+    bool showDebugPanelEnabled = true;
     bool logNetwork = false;
     std::string smokeScene = "default";  // Smoke scene preset (default | aegean)
 

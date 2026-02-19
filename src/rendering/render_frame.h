@@ -64,7 +64,8 @@ private:
     Tile* FindRenderableAncestor(const TileKey& key,
                                  std::unordered_map<TileKey, Tile>& tiles,
                                  uint32_t loadingTexture,
-                                 bool allowPlaceholder);
+                                 bool allowPlaceholder,
+                                 bool useTextureArray);
 
     TileRenderer& tileRenderer_;
     ShaderManager& shaderManager_;

@@ -12,6 +12,39 @@ namespace {
 bool HasRenderableSurface(const Tile& tile) {
     return tile.hasMesh && tile.surfaceVertexCount > 0;
 }
+
+bool HasValidArrayTexture(const Tile& tile) {
+    return tile.usesTextureArray &&
+           tile.textureLayerHandle != -1 &&
+           tile.textureArrayLayer >= 0 &&
+           tile.textureArrayTier >= 0 &&
+           tile.textureId != 0;
+}
+
+bool HasRenderableRasterTexture(const Tile& tile,
+                               uint32_t loadingTexture,
+                               bool allowPlaceholder,
+                               bool useTextureArray) {
+    if (tile.textureId == 0 || tile.mostlyBlackOpaqueRaster) {
+        return false;
+    }
+    if (!allowPlaceholder && tile.textureId == loadingTexture) {
+        return false;
+    }
+    if (useTextureArray) {
+        if (tile.usesTextureArray) {
+            return HasValidArrayTexture(tile);
+        }
+
+        // Back-compat fallback: when array upload is disabled/failed but a valid
+        // 2D texture is available, allow rendering in 2D sampler mode.
+        // This prevents a full black screen when array path is partially
+        // unavailable at runtime.
+        return true;
+    }
+    return true;
+}
+
 std::size_t gInvalidUnpopTargetFallbacks = 0;
 
 } // namespace
@@ -28,7 +61,8 @@ RenderFrame::RenderFrame(TileRenderer& tileRenderer, ShaderManager& shaderManage
 Tile* RenderFrame::FindRenderableAncestor(const TileKey& key,
                                           std::unordered_map<TileKey, Tile>& tiles,
                                           uint32_t loadingTexture,
-                                          bool allowPlaceholder) {
+                                          bool allowPlaceholder,
+                                          bool useTextureArray) {
     TileKey parentKey = key.Parent();
     
     while (parentKey.level >= 0) {
@@ -36,8 +70,7 @@ Tile* RenderFrame::FindRenderableAncestor(const TileKey& key,
         if (it != tiles.end()) {
             Tile& tile = it->second;
             const bool hasSurfaceGeometry = HasRenderableSurface(tile);
-            const bool hasTexture = tile.textureId != 0 &&
-                                    (allowPlaceholder || tile.textureId != loadingTexture);
+            const bool hasTexture = HasRenderableRasterTexture(tile, loadingTexture, allowPlaceholder, useTextureArray);
             if (hasSurfaceGeometry && hasTexture) {
                 return &tile;
             }
@@ -112,9 +145,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             if (it != tiles.end()) {
                 Tile& tile = it->second;
                 const bool hasSurfaceGeometry = HasRenderableSurface(tile);
-                const bool hasTexture = tile.textureId != 0 &&
-                                        (allowPlaceholder || tile.textureId != loadingTexture) &&
-                                        !tile.mostlyBlackOpaqueRaster;
+                const bool hasTexture = HasRenderableRasterTexture(tile, loadingTexture, allowPlaceholder, useTextureArray);
                 if (hasSurfaceGeometry && hasTexture) {
                     bool hasTerrain = tile.demUsed;
                     if (!hasTerrain) {
@@ -153,11 +184,11 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             ancestor = findTerrainAncestor(key, /*allowPlaceholder=*/true);
         }
         if (!ancestor) {
-            ancestor = FindRenderableAncestor(key, tiles, loadingTexture, false);
+            ancestor = FindRenderableAncestor(key, tiles, loadingTexture, false, useTextureArray);
             if (!ancestor) {
                 // Keep coverage continuous while streaming: allow placeholder ancestors
                 // only when no real raster ancestor exists.
-                ancestor = FindRenderableAncestor(key, tiles, loadingTexture, true);
+                ancestor = FindRenderableAncestor(key, tiles, loadingTexture, true, useTextureArray);
             }
         }
         if (ancestor && fallbackSet.find(ancestor->key) == fallbackSet.end()) {
@@ -181,9 +212,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         
         // Treat loading texture as placeholder-only content.
         // It should not participate in normal leaf rendering or ancestor fallback.
-        const bool hasRealTexture = tile.textureId != 0 &&
-                                    tile.textureId != loadingTexture &&
-                                    !tile.mostlyBlackOpaqueRaster;
+        const bool hasRealTexture = HasRenderableRasterTexture(tile, loadingTexture, false, useTextureArray);
         bool hasRequiredTerrain = true;
         if (requireTerrainForLeaves) {
             hasRequiredTerrain = tile.demUsed;
@@ -226,7 +255,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             }
 
             if (alpha < kFadeCompleteEpsilon) {
-                Tile* ancestor = FindRenderableAncestor(key, tiles, loadingTexture, false);
+                Tile* ancestor = FindRenderableAncestor(key, tiles, loadingTexture, false, useTextureArray);
                 if (ancestor) {
                     ++stats.crossfadingLeaves;
 
@@ -238,9 +267,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
                     leaf.unpopUvTransform = ComposeUvTransform(ancestor->texScaleOffset, relativeUnpopUv);
                     leaf.unpopTextureLayer = ancestor->textureArrayLayer;
                     const bool useUnpopArray = useTextureArray &&
-                                              ancestor->usesTextureArray &&
-                                              ancestor->textureArrayLayer >= 0 &&
-                                              ancestor->textureArrayTier >= 0 &&
+                                              HasValidArrayTexture(*ancestor) &&
                                               ancestor->textureId != 0;
                     leaf.unpopTarget = useUnpopArray
                         ? TileRenderer::TextureTarget::kArray

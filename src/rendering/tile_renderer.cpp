@@ -52,6 +52,14 @@ inline void ResetCrossfadeState(ShaderManager& shaderManager, bool useTextureArr
 
 std::size_t gUnpopArrayTo2DFallbacks = 0;
 
+inline bool HasValidArrayTile(const Tile& tile) {
+    return tile.usesTextureArray &&
+           tile.textureLayerHandle != -1 &&
+           tile.textureArrayLayer >= 0 &&
+           tile.textureArrayTier >= 0 &&
+           tile.textureId != 0;
+}
+
 struct DrawCallBreakdown {
     int drawCalls = 0;
     int triangles = 0;
@@ -583,8 +591,13 @@ void TileRenderer::RenderTile(const Tile& tile, float terrainMorph) {
     // Faz 2B: Bind texture (array or 2D)
     glActiveTexture(GL_TEXTURE0);
     const bool useArrayTexture =
-        useTextureArrayBatch_ && tile.usesTextureArray && tile.textureArrayLayer >= 0;
+        useTextureArrayBatch_ && tile.usesTextureArray;
     if (useArrayTexture) {
+        if (!HasValidArrayTile(tile)) {
+            ++stats_.arrayMetadataInvalidSkips;
+            ++stats_.arraySinglePathFallbacks;
+            return;
+        }
         // Texture array path - bind array and set layer
         glBindTexture(GL_TEXTURE_2D_ARRAY, tile.textureId);
         LogTextureBindTelemetry("RenderTile.mainArray", GL_TEXTURE_2D_ARRAY, tile.textureId, tile.textureArrayLayer);
@@ -666,6 +679,7 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
         unpopTextureLayer < 0) {
         assert(false && "RenderTileWithCrossfade received array target without valid array layer");
         ++gUnpopArrayTo2DFallbacks;
+        ++stats_.arrayCrossfadeTo2dFallbacks;
         unpopTarget = TextureTarget::k2D;
     }
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) {
@@ -700,8 +714,13 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
 
     // Faz 2B: Bind child texture (array or 2D)
     glActiveTexture(GL_TEXTURE0);
-    const bool useMainTextureArray =
-        useTextureArrayBatch_ && tile.usesTextureArray && tile.textureArrayLayer >= 0;
+    const bool useMainTextureArray = useTextureArrayBatch_ && tile.usesTextureArray;
+    if (useMainTextureArray && !HasValidArrayTile(tile)) {
+        ++stats_.arrayMetadataInvalidSkips;
+        ++stats_.arraySinglePathFallbacks;
+        ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
+        return;
+    }
     if (useMainTextureArray) {
         glBindTexture(GL_TEXTURE_2D_ARRAY, tile.textureId);
         LogTextureBindTelemetry("RenderTileWithCrossfade.mainArray", GL_TEXTURE_2D_ARRAY,
@@ -781,6 +800,14 @@ void TileRenderer::RenderFlatTilesInstanced(uint32_t textureId,
     int renderedTiles = 0;
     for (const FlatTileInstance& instance : instances) {
         if (instance.tile == nullptr || !instance.tile->hasMesh || instance.tile->textureId == 0) {
+            ++stats_.arraySinglePathFallbacks;
+            continue;
+        }
+        if (instance.tile->usesTextureArray) {
+            if (useTextureArrayBatch_) {
+                ++stats_.instancedArraySkipsNotArray;
+            }
+            ++stats_.arraySinglePathFallbacks;
             continue;
         }
         Extent extent = instance.tile->extent;
@@ -869,7 +896,17 @@ void TileRenderer::RenderFlatTilesInstancedArray(uint32_t textureArrayId,
             continue;
         }
         // Only array-backed tiles can be rendered with this path
-        if (!instance.tile->usesTextureArray || instance.tile->textureArrayLayer < 0) {
+        if (!instance.tile->usesTextureArray ||
+            instance.tile->textureArrayLayer < 0 ||
+            instance.tile->textureLayerHandle < 0 ||
+            instance.tile->textureArrayTier < 0 ||
+            instance.tile->textureId != textureArrayId) {
+            ++stats_.arraySinglePathFallbacks;
+            if (!instance.tile->usesTextureArray) {
+                ++stats_.instancedArraySkipsNotArray;
+            } else {
+                ++stats_.instancedArraySkipsMissingLayer;
+            }
             continue;
         }
         Extent extent = instance.tile->extent;
