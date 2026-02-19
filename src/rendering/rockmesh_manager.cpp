@@ -1208,10 +1208,10 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
     bool hasInvalidVertex = false;
     
     for (int i = 0; i < V; ++i) {
-        // Local position (int16 / 32768)
-        double lx = parsed.positions[i * 3 + 0] / 32768.0;
-        double ly = parsed.positions[i * 3 + 1] / 32768.0;
-        double lz = parsed.positions[i * 3 + 2] / 32768.0;
+        // Local position (uint8 / 255, delta-decoded from GE vertex stream)
+        double lx = parsed.positions[i * 3 + 0] / 255.0;
+        double ly = parsed.positions[i * 3 + 1] / 255.0;
+        double lz = parsed.positions[i * 3 + 2] / 255.0;
         
         // Transform to world (km)
         glm::dvec4 local(lx, ly, lz, 1.0);
@@ -1292,13 +1292,13 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         cpu.vertices[i * 9 + 2] = relativePos.z;
     }
     
-    // Build UVs
-    if (parsed.hasUvQuant && !parsed.uv.empty()) {
+    // Build UVs from decoded texture coordinates (field 7 or field 2)
+    if (parsed.hasTexCoords && !parsed.texCoords.empty()) {
         for (int i = 0; i < V; ++i) {
-            uint16_t u16 = parsed.uv[i * 2 + 0];
-            uint16_t v16 = parsed.uv[i * 2 + 1];
+            uint16_t u16 = parsed.texCoords[i * 2 + 0];
+            uint16_t v16 = parsed.texCoords[i * 2 + 1];
             float u, v;
-            parsed.uvQuant.Decode(u16, v16, u, v, config_.geMeshFlipV);
+            parsed.uvQuant.Decode(u16, v16, u, v);
             cpu.vertices[i * 9 + 6] = u;
             cpu.vertices[i * 9 + 7] = v;
         }
@@ -1310,60 +1310,70 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         }
     }
     
-    // Build normals (from triangle list)
-    std::vector<glm::vec3> normals(V, glm::vec3(0.0f));
-    std::vector<int> normalCounts(V, 0);
-    
-    for (int t = 0; t < T; ++t) {
-        uint32_t i0 = parsed.indices[t * 3 + 0];
-        uint32_t i1 = parsed.indices[t * 3 + 1];
-        uint32_t i2 = parsed.indices[t * 3 + 2];
+    // Build normals: prefer GE pre-computed normals, fallback to cross-product
+    if (parsed.hasNormals && static_cast<int>(parsed.normals.size()) >= V * 3) {
+        // GE octahedral-decoded normals: uint8 [0-255], 128 = zero
+        for (int i = 0; i < V; ++i) {
+            float nx = (parsed.normals[i * 3 + 0] - 127.0f) / 127.0f;
+            float ny = (parsed.normals[i * 3 + 1] - 127.0f) / 127.0f;
+            float nz = (parsed.normals[i * 3 + 2] - 127.0f) / 127.0f;
+            float len = std::sqrt(nx*nx + ny*ny + nz*nz);
+            if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
+            else { nx = 0.0f; ny = 0.0f; nz = 1.0f; }
+            cpu.vertices[i * 9 + 3] = nx;
+            cpu.vertices[i * 9 + 4] = ny;
+            cpu.vertices[i * 9 + 5] = nz;
+        }
+    } else {
+        // Fallback: compute normals from triangle list cross products
+        std::vector<glm::vec3> normals(V, glm::vec3(0.0f));
+        std::vector<int> normalCounts(V, 0);
         
-        if (i0 >= V || i1 >= V || i2 >= V) continue;  // Safety
-        
-        glm::vec3 p0(cpu.vertices[i0 * 9 + 0], cpu.vertices[i0 * 9 + 1], cpu.vertices[i0 * 9 + 2]);
-        glm::vec3 p1(cpu.vertices[i1 * 9 + 0], cpu.vertices[i1 * 9 + 1], cpu.vertices[i1 * 9 + 2]);
-        glm::vec3 p2(cpu.vertices[i2 * 9 + 0], cpu.vertices[i2 * 9 + 1], cpu.vertices[i2 * 9 + 2]);
-        
-        glm::vec3 e0 = p1 - p0;
-        glm::vec3 e1 = p2 - p0;
-        glm::vec3 cross = glm::cross(e0, e1);
-        float crossLen2 = glm::dot(cross, cross);
-        
-        // Skip degenerate triangles
-        if (crossLen2 < 1e-10f) continue;
-        
-        glm::vec3 n = glm::normalize(cross);
-        
-        // Outward enforce: use world-space triangle center as radial reference.
-        // In RTE space p0/p1/p2 are small offsets near origin, so the old
-        // dot(n, centerPos) test was nearly random. World-space positions
-        // (worldPositions[]) have magnitude ~6371 km and point radially
-        // outward from Earth center, giving a reliable outward direction.
-        glm::dvec3 centerWorld = (worldPositions[i0] + worldPositions[i1] + worldPositions[i2]) / 3.0;
-        glm::vec3 outwardDir = glm::normalize(glm::vec3(centerWorld));
-        if (glm::dot(n, outwardDir) < 0.0f) {
-            n = -n;
+        for (int t = 0; t < T; ++t) {
+            uint32_t i0 = parsed.indices[t * 3 + 0];
+            uint32_t i1 = parsed.indices[t * 3 + 1];
+            uint32_t i2 = parsed.indices[t * 3 + 2];
+            
+            if (i0 >= static_cast<uint32_t>(V) || i1 >= static_cast<uint32_t>(V) || i2 >= static_cast<uint32_t>(V)) continue;
+            
+            glm::vec3 p0(cpu.vertices[i0 * 9 + 0], cpu.vertices[i0 * 9 + 1], cpu.vertices[i0 * 9 + 2]);
+            glm::vec3 p1(cpu.vertices[i1 * 9 + 0], cpu.vertices[i1 * 9 + 1], cpu.vertices[i1 * 9 + 2]);
+            glm::vec3 p2(cpu.vertices[i2 * 9 + 0], cpu.vertices[i2 * 9 + 1], cpu.vertices[i2 * 9 + 2]);
+            
+            glm::vec3 e0 = p1 - p0;
+            glm::vec3 e1 = p2 - p0;
+            glm::vec3 cross = glm::cross(e0, e1);
+            float crossLen2 = glm::dot(cross, cross);
+            if (crossLen2 < 1e-10f) continue;
+            
+            glm::vec3 n = glm::normalize(cross);
+            
+            // Outward enforce: use world-space triangle center as radial reference
+            glm::dvec3 centerWorld = (worldPositions[i0] + worldPositions[i1] + worldPositions[i2]) / 3.0;
+            glm::vec3 outwardDir = glm::normalize(glm::vec3(centerWorld));
+            if (glm::dot(n, outwardDir) < 0.0f) {
+                n = -n;
+            }
+            
+            normals[i0] += n;
+            normals[i1] += n;
+            normals[i2] += n;
+            normalCounts[i0]++;
+            normalCounts[i1]++;
+            normalCounts[i2]++;
         }
         
-        normals[i0] += n;
-        normals[i1] += n;
-        normals[i2] += n;
-        normalCounts[i0]++;
-        normalCounts[i1]++;
-        normalCounts[i2]++;
-    }
-    
-    for (int i = 0; i < V; ++i) {
-        if (normalCounts[i] > 0) {
-            glm::vec3 n = glm::normalize(normals[i] / static_cast<float>(normalCounts[i]));
-            cpu.vertices[i * 9 + 3] = n.x;
-            cpu.vertices[i * 9 + 4] = n.y;
-            cpu.vertices[i * 9 + 5] = n.z;
-        } else {
-            cpu.vertices[i * 9 + 3] = 0.0f;
-            cpu.vertices[i * 9 + 4] = 0.0f;
-            cpu.vertices[i * 9 + 5] = 1.0f;
+        for (int i = 0; i < V; ++i) {
+            if (normalCounts[i] > 0) {
+                glm::vec3 n = glm::normalize(normals[i] / static_cast<float>(normalCounts[i]));
+                cpu.vertices[i * 9 + 3] = n.x;
+                cpu.vertices[i * 9 + 4] = n.y;
+                cpu.vertices[i * 9 + 5] = n.z;
+            } else {
+                cpu.vertices[i * 9 + 3] = 0.0f;
+                cpu.vertices[i * 9 + 4] = 0.0f;
+                cpu.vertices[i * 9 + 5] = 1.0f;
+            }
         }
     }
     

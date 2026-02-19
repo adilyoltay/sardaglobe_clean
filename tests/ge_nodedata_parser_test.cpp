@@ -1,9 +1,11 @@
 // GE NodeData Parser Test
-// Tests RockTreeNodeDataParser with synthetic protobuf data
+// Tests RockTreeNodeDataParser with correct GE encoding format
+// Reference: retroplasma/earth-reverse-engineering (rocktree_decoder.h)
 
 #include "../src/io/providers/rocktree_node_data_parser.h"
 #include <iostream>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 using namespace globe;
@@ -19,9 +21,30 @@ size_t EncodeVarint(uint8_t* out, uint64_t value) {
     return pos;
 }
 
-// Helper: Create field key byte
+// Helper: Append varint to vector
+void AppendVarint(std::vector<uint8_t>& buf, uint64_t value) {
+    uint8_t tmp[10];
+    size_t n = EncodeVarint(tmp, value);
+    buf.insert(buf.end(), tmp, tmp + n);
+}
+
+// Helper: Create field key byte (for small field numbers)
 uint8_t MakeFieldKey(uint32_t fieldNum, uint8_t wireType) {
     return static_cast<uint8_t>((fieldNum << 3) | wireType);
+}
+
+// Helper: Append field key + length-delimited payload
+void AppendField(std::vector<uint8_t>& msg, uint32_t fieldNum, const std::vector<uint8_t>& payload) {
+    AppendVarint(msg, (fieldNum << 3) | 2);  // length-delimited wire type
+    AppendVarint(msg, payload.size());
+    msg.insert(msg.end(), payload.begin(), payload.end());
+}
+
+// Helper: Append field key + raw bytes
+void AppendFieldRaw(std::vector<uint8_t>& msg, uint32_t fieldNum, const uint8_t* data, size_t len) {
+    AppendVarint(msg, (fieldNum << 3) | 2);
+    AppendVarint(msg, len);
+    msg.insert(msg.end(), data, data + len);
 }
 
 bool Expect(bool condition, const char* message) {
@@ -32,175 +55,107 @@ bool Expect(bool condition, const char* message) {
     return true;
 }
 
-// Build minimal valid NodeData protobuf
-// field 1: 128 bytes (16 doubles) - transform
-// field 2: payload with positions and indices
+// Build delta-encoded vertex data (GE format: planar [X deltas][Y deltas][Z deltas])
+std::vector<uint8_t> BuildVertexData(const std::vector<uint8_t>& positions) {
+    // positions: interleaved x,y,z uint8 values
+    size_t count = positions.size() / 3;
+    std::vector<uint8_t> planar(count * 3);
+    
+    uint8_t prevX = 0, prevY = 0, prevZ = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint8_t x = positions[i * 3 + 0];
+        uint8_t y = positions[i * 3 + 1];
+        uint8_t z = positions[i * 3 + 2];
+        planar[count * 0 + i] = static_cast<uint8_t>(x - prevX);  // delta X
+        planar[count * 1 + i] = static_cast<uint8_t>(y - prevY);  // delta Y
+        planar[count * 2 + i] = static_cast<uint8_t>(z - prevZ);  // delta Z
+        prevX = x; prevY = y; prevZ = z;
+    }
+    return planar;
+}
+
+// Build GE index data (zeros-val algorithm, varint encoded)
+std::vector<uint8_t> BuildIndexData(const std::vector<uint16_t>& strip) {
+    std::vector<uint8_t> buf;
+    AppendVarint(buf, strip.size());  // strip length
+    
+    // Reverse the zeros-val algorithm:
+    // Forward: c = zeros - val; if val==0 then zeros++
+    // We need to find val given the strip indices
+    int zeros = 0;
+    int a = 0, b = 0, c = 0;
+    for (size_t i = 0; i < strip.size(); i++) {
+        a = b; b = c;
+        c = strip[i];
+        int val = zeros - c;
+        AppendVarint(buf, val);
+        if (val == 0) zeros++;
+    }
+    return buf;
+}
+
+// Build minimal valid NodeData with correct GE encoding
 std::vector<uint8_t> BuildMinimalNodeData() {
-    std::vector<uint8_t> payload;
+    // 3 vertices: (0,0,0), (100,0,0), (0,100,0)
+    std::vector<uint8_t> positions = {0,0,0, 100,0,0, 0,100,0};
+    std::vector<uint8_t> vertexData = BuildVertexData(positions);
     
-    // field 2.1: positions (18 bytes = 3 int16 for 3 vertices)
-    // 3 vertices forming a triangle
-    payload.push_back(MakeFieldKey(1, 2));  // field 1, length-delimited
-    uint8_t posLen[8];
-    size_t posLenBytes = EncodeVarint(posLen, 18);
-    payload.insert(payload.end(), posLen, posLen + posLenBytes);
-    // Vertex 0 at (0, 0, 0)
-    payload.push_back(0x00); payload.push_back(0x00);
-    payload.push_back(0x00); payload.push_back(0x00);
-    payload.push_back(0x00); payload.push_back(0x00);
-    // Vertex 1 at (1000, 0, 0)
-    payload.push_back(0xE8); payload.push_back(0x03);
-    payload.push_back(0x00); payload.push_back(0x00);
-    payload.push_back(0x00); payload.push_back(0x00);
-    // Vertex 2 at (0, 1000, 0)
-    payload.push_back(0x00); payload.push_back(0x00);
-    payload.push_back(0xE8); payload.push_back(0x03);
-    payload.push_back(0x00); payload.push_back(0x00);
+    // Triangle strip: [0, 1, 2] → 1 non-degenerate triangle
+    std::vector<uint16_t> strip = {0, 1, 2};
+    std::vector<uint8_t> indexData = BuildIndexData(strip);
     
-    // field 2.3: indices (triangle strip with 3 vertices -> 1 triangle)
-    // indexCount=3, then 3 varints
-    payload.push_back(MakeFieldKey(3, 2));  // field 3, length-delimited
-    std::vector<uint8_t> idxData;
-    uint8_t countBuf[8];
-    size_t countBytes = EncodeVarint(countBuf, 3);
-    idxData.insert(idxData.end(), countBuf, countBuf + countBytes);
-    // 3 indices (shifted by 1: raw = vid << 1)
-    uint8_t idxBuf[8];
-    size_t i0 = EncodeVarint(idxBuf, 0 << 1);  // vid=0
-    idxData.insert(idxData.end(), idxBuf, idxBuf + i0);
-    size_t i1 = EncodeVarint(idxBuf, 1 << 1);  // vid=1
-    idxData.insert(idxData.end(), idxBuf, idxBuf + i1);
-    size_t i2 = EncodeVarint(idxBuf, 2 << 1);  // vid=2
-    idxData.insert(idxData.end(), idxBuf, idxBuf + i2);
+    // Build mesh sub-message
+    std::vector<uint8_t> mesh;
+    AppendFieldRaw(mesh, 1, vertexData.data(), vertexData.size());  // field 1: vertices
+    AppendFieldRaw(mesh, 3, indexData.data(), indexData.size());     // field 3: indices
     
-    uint8_t idxLenBuf[8];
-    size_t idxLenBytes = EncodeVarint(idxLenBuf, idxData.size());
-    payload.insert(payload.end(), idxLenBuf, idxLenBuf + idxLenBytes);
-    payload.insert(payload.end(), idxData.begin(), idxData.end());
-    
-    // Build top-level message
+    // Build top-level NodeData
     std::vector<uint8_t> topLevel;
     
-    // field 1: transform (16 doubles = 128 bytes)
-    topLevel.push_back(MakeFieldKey(1, 2));  // field 1, length-delimited
-    uint8_t tfmLen[8];
-    size_t tfmLenBytes = EncodeVarint(tfmLen, 128);
-    topLevel.insert(topLevel.end(), tfmLen, tfmLen + tfmLenBytes);
-    double identity[16] = {
-        1, 0, 0, 0,
-        0, 1, 0, 0,
-        0, 0, 1, 0,
-        0, 0, 0, 1
-    };
-    const uint8_t* tfmBytes = reinterpret_cast<const uint8_t*>(identity);
-    topLevel.insert(topLevel.end(), tfmBytes, tfmBytes + 128);
+    // field 1: transform (identity-like, with translation for valid tLen)
+    double tfm[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 6371000,0,0,1};
+    AppendFieldRaw(topLevel, 1, reinterpret_cast<const uint8_t*>(tfm), 128);
     
-    // field 2: payload
-    topLevel.push_back(MakeFieldKey(2, 2));  // field 2, length-delimited
-    uint8_t payLen[8];
-    size_t payLenBytes = EncodeVarint(payLen, payload.size());
-    topLevel.insert(topLevel.end(), payLen, payLen + payLenBytes);
-    topLevel.insert(topLevel.end(), payload.begin(), payload.end());
+    // field 2: mesh
+    AppendField(topLevel, 2, mesh);
     
     return topLevel;
 }
 
-// Build NodeData with UV and texture
+// Build full NodeData with texture
 std::vector<uint8_t> BuildFullNodeData() {
-    std::vector<uint8_t> payload;
+    // 4 vertices: (0,0,0), (255,0,0), (255,255,0), (0,255,0)
+    std::vector<uint8_t> positions = {0,0,0, 255,0,0, 255,255,0, 0,255,0};
+    std::vector<uint8_t> vertexData = BuildVertexData(positions);
     
-    // 4 vertices
-    const int V = 4;
+    // Triangle strip: [0, 1, 2, 3] → 2 non-degenerate triangles
+    std::vector<uint16_t> strip = {0, 1, 2, 3};
+    std::vector<uint8_t> indexData = BuildIndexData(strip);
     
-    // field 2.1: positions (4 vertices * 3 * 2 bytes = 24 bytes)
-    payload.push_back(MakeFieldKey(1, 2));
-    uint8_t posLen[8];
-    size_t posLenBytes = EncodeVarint(posLen, V * 3 * 2);
-    payload.insert(payload.end(), posLen, posLen + posLenBytes);
-    // 4 vertices at different positions
-    int16_t positions[] = {0, 0, 0,  1000, 0, 0,  1000, 1000, 0,  0, 1000, 0};
-    const uint8_t* posBytes = reinterpret_cast<const uint8_t*>(positions);
-    payload.insert(payload.end(), posBytes, posBytes + V * 3 * 2);
-    
-    // field 2.3: indices (strip with 4 vertices -> 2 triangles)
-    // Using restart marker format
-    payload.push_back(MakeFieldKey(3, 2));
-    std::vector<uint8_t> idxData;
-    uint8_t countBuf[8];
-    size_t countBytes = EncodeVarint(countBuf, 4);
-    idxData.insert(idxData.end(), countBuf, countBuf + countBytes);
-    // 4 indices (raw = vid << 1)
-    uint8_t idxBuf[8];
-    for (int i = 0; i < V; ++i) {
-        size_t ib = EncodeVarint(idxBuf, i << 1);
-        idxData.insert(idxData.end(), idxBuf, idxBuf + ib);
-    }
-    uint8_t idxLenBuf[8];
-    size_t idxLenBytes = EncodeVarint(idxLenBuf, idxData.size());
-    payload.insert(payload.end(), idxLenBuf, idxLenBuf + idxLenBytes);
-    payload.insert(payload.end(), idxData.begin(), idxData.end());
-    
-    // field 2.10: UV quantization (4 floats = 16 bytes)
-    payload.push_back(MakeFieldKey(10, 2));
-    uint8_t quantLen[8];
-    size_t quantLenBytes = EncodeVarint(quantLen, 16);
-    payload.insert(payload.end(), quantLen, quantLen + quantLenBytes);
-    float quant[] = {0.0f, 0.0f, 1.0f, 1.0f};  // offsetU, offsetV, scaleU, scaleV
-    const uint8_t* quantBytes = reinterpret_cast<const uint8_t*>(quant);
-    payload.insert(payload.end(), quantBytes, quantBytes + 16);
-    
-    // field 2.11: UV coordinates (V * 4 bytes = 16 bytes)
-    payload.push_back(MakeFieldKey(11, 2));
-    uint8_t uvLen[8];
-    size_t uvLenBytes = EncodeVarint(uvLen, V * 4);
-    payload.insert(payload.end(), uvLen, uvLen + uvLenBytes);
-    uint16_t uvs[] = {0, 0,  65535, 0,  65535, 65535,  0, 65535};  // Corners of unit square
-    const uint8_t* uvBytes = reinterpret_cast<const uint8_t*>(uvs);
-    payload.insert(payload.end(), uvBytes, uvBytes + V * 4);
-    
-    // field 2.6: texture (JPEG)
+    // Build texture sub-message
     std::vector<uint8_t> texMsg;
-    // field 6.1: JPEG bytes (fake)
-    texMsg.push_back(MakeFieldKey(1, 2));
-    uint8_t jpgLen[8];
-    size_t jpgLenBytes = EncodeVarint(jpgLen, 4);
-    texMsg.insert(texMsg.end(), jpgLen, jpgLen + jpgLenBytes);
-    texMsg.push_back(0xFF); texMsg.push_back(0xD8); texMsg.push_back(0xFF); texMsg.push_back(0xE0);  // JPEG SOI + APP0 marker
-    // field 6.3: width
-    texMsg.push_back(MakeFieldKey(3, 0));  // varint
-    uint8_t wBuf[8];
-    size_t wBytes = EncodeVarint(wBuf, 256);
-    texMsg.insert(texMsg.end(), wBuf, wBuf + wBytes);
-    // field 6.4: height
-    texMsg.push_back(MakeFieldKey(4, 0));  // varint
-    uint8_t hBuf[8];
-    size_t hBytes = EncodeVarint(hBuf, 256);
-    texMsg.insert(texMsg.end(), hBuf, hBuf + hBytes);
+    uint8_t fakeJpeg[] = {0xFF, 0xD8, 0xFF, 0xE0};
+    AppendFieldRaw(texMsg, 1, fakeJpeg, 4);     // field 1: JPEG bytes
+    texMsg.push_back(MakeFieldKey(3, 0));        // field 3: width (varint)
+    AppendVarint(texMsg, 256);
+    texMsg.push_back(MakeFieldKey(4, 0));        // field 4: height (varint)
+    AppendVarint(texMsg, 256);
     
-    payload.push_back(MakeFieldKey(6, 2));
-    uint8_t texLenBuf[8];
-    size_t texLenBytes = EncodeVarint(texLenBuf, texMsg.size());
-    payload.insert(payload.end(), texLenBuf, texLenBuf + texLenBytes);
-    payload.insert(payload.end(), texMsg.begin(), texMsg.end());
+    // UV offset and scale (field 10: 4 floats)
+    float uvQuant[] = {0.0f, 0.0f, 1.0f / 256.0f, 1.0f / 256.0f};
+    
+    // Build mesh sub-message
+    std::vector<uint8_t> mesh;
+    AppendFieldRaw(mesh, 1, vertexData.data(), vertexData.size());
+    AppendFieldRaw(mesh, 3, indexData.data(), indexData.size());
+    AppendField(mesh, 6, texMsg);
+    AppendFieldRaw(mesh, 10, reinterpret_cast<const uint8_t*>(uvQuant), 16);
     
     // Build top-level
     std::vector<uint8_t> topLevel;
-    
-    // field 1: transform
-    topLevel.push_back(MakeFieldKey(1, 2));
-    uint8_t tfmLen[8];
-    size_t tfmLenBytes = EncodeVarint(tfmLen, 128);
-    topLevel.insert(topLevel.end(), tfmLen, tfmLen + tfmLenBytes);
     double tfm[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 100,200,300,1};
-    const uint8_t* tfmBytes = reinterpret_cast<const uint8_t*>(tfm);
-    topLevel.insert(topLevel.end(), tfmBytes, tfmBytes + 128);
-    
-    // field 2: payload
-    topLevel.push_back(MakeFieldKey(2, 2));
-    uint8_t payLen[8];
-    size_t payLenBytes = EncodeVarint(payLen, payload.size());
-    topLevel.insert(topLevel.end(), payLen, payLen + payLenBytes);
-    topLevel.insert(topLevel.end(), payload.begin(), payload.end());
+    AppendFieldRaw(topLevel, 1, reinterpret_cast<const uint8_t*>(tfm), 128);
+    AppendField(topLevel, 2, mesh);
     
     return topLevel;
 }
@@ -209,255 +164,153 @@ int main() {
     int failed = 0;
     std::cout << "=== GE NodeData Parser Test ===\n";
 
-    // Test 1: Minimal valid NodeData (positions + indices only)
+    // Test 1: UnpackVertices - delta decode correctness
     {
-        std::vector<uint8_t> data = BuildMinimalNodeData();
+        // Input: 3 vertices in planar delta format
+        // Vertex 0: (10, 20, 30)  → deltas: 10, 20, 30
+        // Vertex 1: (50, 20, 30)  → deltas: 40, 0, 0
+        // Vertex 2: (50, 80, 30)  → deltas: 0, 60, 0
+        uint8_t planar[] = {10, 40, 0,   // X deltas
+                            20, 0, 60,   // Y deltas
+                            30, 0, 0};   // Z deltas
+        auto result = RockTreeNodeDataParser::UnpackVertices(planar, 9);
+        
+        failed += !Expect(result.size() == 9, "UnpackVertices should produce 9 bytes");
+        failed += !Expect(result[0] == 10 && result[1] == 20 && result[2] == 30, "V0 should be (10,20,30)");
+        failed += !Expect(result[3] == 50 && result[4] == 20 && result[5] == 30, "V1 should be (50,20,30)");
+        failed += !Expect(result[6] == 50 && result[7] == 80 && result[8] == 30, "V2 should be (50,80,30)");
+        std::cout << "  UnpackVertices delta decode: OK\n";
+    }
+    
+    // Test 2: UnpackVertices - uint8 wrapping
+    {
+        // Test wrapping: 200 + 100 = 44 (mod 256)
+        uint8_t planar[] = {200, 100,  0, 0,  0, 0};
+        auto result = RockTreeNodeDataParser::UnpackVertices(planar, 6);
+        failed += !Expect(result[0] == 200 && result[3] == 44, "uint8 wrapping should work");
+        std::cout << "  UnpackVertices wrapping: OK\n";
+    }
+
+    // Test 3: UnpackIndices - zeros-val algorithm
+    {
+        // Strip: [0, 1, 2] → 3 values
+        // zeros-val reverse: val0=0-0=0 (zeros=1), val1=1-1=0 (zeros=2), val2=2-2=0 (zeros=3)
+        std::vector<uint16_t> strip = {0, 1, 2};
+        auto indexData = BuildIndexData(strip);
+        auto result = RockTreeNodeDataParser::UnpackIndices(indexData.data(), indexData.size());
+        
+        failed += !Expect(result.size() == 3, "Should have 3 strip indices");
+        failed += !Expect(result[0] == 0 && result[1] == 1 && result[2] == 2,
+                         "Strip should be [0,1,2]");
+        std::cout << "  UnpackIndices basic: OK\n";
+    }
+    
+    // Test 4: StripToTriangleList
+    {
+        std::vector<uint16_t> strip = {0, 1, 2, 3};
+        std::vector<uint32_t> triangles;
+        bool ok = RockTreeNodeDataParser::StripToTriangleList(strip, triangles);
+        
+        failed += !Expect(ok, "Strip conversion should succeed");
+        failed += !Expect(triangles.size() == 6, "Should produce 2 triangles (6 indices)");
+        
+        // Triangle 0 (i=2, even): (0,1,2)
+        failed += !Expect(triangles[0] == 0 && triangles[1] == 1 && triangles[2] == 2,
+                         "First triangle should be (0,1,2)");
+        // Triangle 1 (i=3, odd): (1,3,2) — winding flip
+        failed += !Expect(triangles[3] == 1 && triangles[4] == 3 && triangles[5] == 2,
+                         "Second triangle should be (1,3,2)");
+        std::cout << "  StripToTriangleList: OK\n";
+    }
+    
+    // Test 5: Degenerate triangle skipping
+    {
+        std::vector<uint16_t> strip = {0, 1, 1, 2};  // (0,1,1) is degenerate
+        std::vector<uint32_t> triangles;
+        RockTreeNodeDataParser::StripToTriangleList(strip, triangles);
+        
+        // (0,1,1) skipped, only (1,2,1) which is also degenerate → 0 triangles
+        // Actually (1,1,2) at i=2 even: a=0,b=1,c=1 → degenerate
+        // (1,1,2) at i=3 odd: a=1,b=1,c=2 → degenerate
+        failed += !Expect(triangles.empty(), "Degenerate triangles should be skipped");
+        std::cout << "  Degenerate triangle skip: OK\n";
+    }
+
+    // Test 6: Minimal NodeData full parse
+    {
+        auto data = BuildMinimalNodeData();
         ParsedNodeData result = RockTreeNodeDataParser::Parse(data);
         
         failed += !Expect(result.success, "Minimal data should parse successfully");
         failed += !Expect(result.hasTransform, "Should have transform");
         failed += !Expect(result.vertexCount == 3, "Should have 3 vertices");
-        failed += !Expect(result.positions.size() == 9, "Should have 9 position values");
+        failed += !Expect(result.positions.size() == 9, "Should have 9 position bytes");
+        failed += !Expect(result.positions[0] == 0, "V0.x should be 0");
+        failed += !Expect(result.positions[3] == 100, "V1.x should be 100");
+        failed += !Expect(result.positions[7] == 100, "V2.y should be 100");
         failed += !Expect(result.triangleCount == 1, "Should have 1 triangle");
         failed += !Expect(result.indices.size() == 3, "Should have 3 indices");
-        std::cout << "  Minimal parse: " << result.vertexCount << " verts, " 
+        std::cout << "  Minimal NodeData parse: " << result.vertexCount << " verts, "
                   << result.triangleCount << " tris\n";
     }
 
-    // Test 2: Full NodeData (with UV and texture)
+    // Test 7: Full NodeData with texture + UV quant override
     {
-        std::vector<uint8_t> data = BuildFullNodeData();
+        auto data = BuildFullNodeData();
         ParsedNodeData result = RockTreeNodeDataParser::Parse(data);
         
         failed += !Expect(result.success, "Full data should parse successfully");
         failed += !Expect(result.vertexCount == 4, "Should have 4 vertices");
-        failed += !Expect(result.hasUvQuant, "Should have UV quantization");
-        failed += !Expect(result.uv.size() == 8, "Should have 8 UV values (4 pairs)");
         failed += !Expect(result.texture.valid, "Should have texture");
         failed += !Expect(result.texture.width == 256, "Texture width should be 256");
         failed += !Expect(result.texture.height == 256, "Texture height should be 256");
         failed += !Expect(result.texture.jpegBytes.size() == 4, "Should have 4 JPEG bytes");
         failed += !Expect(result.triangleCount == 2, "Should have 2 triangles from strip");
         
-        // Check UV quantization
+        // UV quant override from field 10
         failed += !Expect(result.uvQuant.offsetU == 0.0f, "UV offsetU should be 0");
-        failed += !Expect(result.uvQuant.scaleU == 1.0f, "UV scaleU should be 1");
+        float expectedScale = 1.0f / 256.0f;
+        failed += !Expect(std::abs(result.uvQuant.scaleU - expectedScale) < 1e-6f,
+                         "UV scaleU should be 1/256");
         
-        std::cout << "  Full parse: " << result.vertexCount << " verts, "
-                  << result.triangleCount << " tris, texture " 
+        std::cout << "  Full NodeData parse: " << result.vertexCount << " verts, "
+                  << result.triangleCount << " tris, texture "
                   << result.texture.width << "x" << result.texture.height << "\n";
     }
 
-    // Test 3: Empty data - returns success with no content (not an error)
-    {
-        std::vector<uint8_t> data;
-        ParsedNodeData result = RockTreeNodeDataParser::Parse(data);
-        
-        // Empty data is not an error, just has no content
-        // (This is consistent with protobuf empty message behavior)
-        std::cout << "  Empty data: success=" << result.success 
-                  << ", verts=" << result.vertexCount << "\n";
-    }
-
-    // Test 4: Invalid transform length
+    // Test 8: Invalid transform length
     {
         std::vector<uint8_t> topLevel;
-        topLevel.push_back(MakeFieldKey(1, 2));  // field 1, length-delimited
-        uint8_t badLen[8];
-        size_t badLenBytes = EncodeVarint(badLen, 64);  // Wrong: should be 128
-        topLevel.insert(topLevel.end(), badLen, badLen + badLenBytes);
-        topLevel.resize(topLevel.size() + 64);  // Add 64 zero bytes
+        AppendVarint(topLevel, (1 << 3) | 2);  // field 1, length-delimited
+        AppendVarint(topLevel, 64);             // Wrong: should be 128
+        topLevel.resize(topLevel.size() + 64);
         
         ParsedNodeData result = RockTreeNodeDataParser::Parse(topLevel);
         
         failed += !Expect(!result.success, "Wrong transform length should fail");
-        failed += !Expect(result.error.find("128") != std::string::npos, 
+        failed += !Expect(result.error.find("128") != std::string::npos,
                          "Error should mention expected 128 bytes");
         std::cout << "  Bad transform length error: " << result.error << "\n";
     }
 
-    // Test 5: UV count mismatch with vertex count
-    {
-        std::vector<uint8_t> payload;
-        
-        // 2 vertices in positions
-        payload.push_back(MakeFieldKey(1, 2));
-        uint8_t posLen[8];
-        size_t posLenBytes = EncodeVarint(posLen, 12);  // 2 verts * 3 * 2
-        payload.insert(payload.end(), posLen, posLen + posLenBytes);
-        payload.resize(payload.size() + 12);  // Zero positions
-        
-        // But 3 UV pairs
-        payload.push_back(MakeFieldKey(11, 2));
-        uint8_t uvLen[8];
-        size_t uvLenBytes = EncodeVarint(uvLen, 12);  // 3 pairs * 4
-        payload.insert(payload.end(), uvLen, uvLen + uvLenBytes);
-        payload.resize(payload.size() + 12);  // Zero UVs
-        
-        // Build top-level
-        std::vector<uint8_t> topLevel;
-        topLevel.push_back(MakeFieldKey(1, 2));
-        uint8_t tfmLen[8];
-        size_t tfmLenBytes = EncodeVarint(tfmLen, 128);
-        topLevel.insert(topLevel.end(), tfmLen, tfmLen + tfmLenBytes);
-        topLevel.resize(topLevel.size() + 128);
-        
-        topLevel.push_back(MakeFieldKey(2, 2));
-        uint8_t payLen[8];
-        size_t payLenBytes = EncodeVarint(payLen, payload.size());
-        topLevel.insert(topLevel.end(), payLen, payLen + payLenBytes);
-        topLevel.insert(topLevel.end(), payload.begin(), payload.end());
-        
-        ParsedNodeData result = RockTreeNodeDataParser::Parse(topLevel);
-        
-        failed += !Expect(!result.success, "UV count mismatch should fail");
-        failed += !Expect(result.error.find("UV") != std::string::npos || 
-                         result.error.find("match") != std::string::npos,
-                         "Error should mention UV count mismatch");
-        std::cout << "  UV mismatch error: " << result.error << "\n";
-    }
-
-    // Test 6: Strip-to-triangle conversion with restart marker
-    {
-        // 4 vertices, strip: [0, 1, 2, 3] (no restart) -> 2 triangles
-        int V = 4;
-        std::vector<uint32_t> rawStrip = {
-            0 << 1, 1 << 1, 2 << 1, 3 << 1  // Strip with 4 vertices
-        };
-        
-        std::vector<uint32_t> triangles;
-        std::string error;
-        bool ok = RockTreeNodeDataParser::ConvertStripToTriangles(rawStrip, V, triangles, error);
-        
-        failed += !Expect(ok, "Strip conversion should succeed");
-        failed += !Expect(triangles.size() == 6, "Should produce 2 triangles (6 indices)");
-        
-        // First triangle: (0,1,2)
-        failed += !Expect(triangles[0] == 0 && triangles[1] == 1 && triangles[2] == 2,
-                         "First triangle should be (0,1,2)");
-        
-        // Second triangle: winding flips (1,3,2) - [i-2, i, i-1] for odd i
-        failed += !Expect(triangles[3] == 1 && triangles[4] == 3 && triangles[5] == 2,
-                         "Second triangle should be (1,3,2)");
-        
-        std::cout << "  Simple strip: " << (triangles.size() / 3) << " triangles\n";
-    }
-
-    // Test 6b: Restart marker handling
-    {
-        // 4 vertices, strip: [0, 1, 2, restart, 0, 1, 2] 
-        // Should produce 1 triangle from first strip, 1 from second
-        int V = 4;
-        uint32_t restartMarker = V * 2;  // 8
-        std::vector<uint32_t> rawStrip = {
-            0 << 1, 1 << 1, 2 << 1,  // First strip (0,1,2) -> 1 triangle
-            restartMarker,            // Restart
-            0 << 1, 1 << 1, 2 << 1    // Second strip (0,1,2) -> 1 triangle
-        };
-        
-        std::vector<uint32_t> triangles;
-        std::string error;
-        bool ok = RockTreeNodeDataParser::ConvertStripToTriangles(rawStrip, V, triangles, error);
-        
-        failed += !Expect(ok, "Strip with restart should succeed");
-        failed += !Expect(triangles.size() == 6, "Should produce 2 triangles (6 indices)");
-        
-        std::cout << "  Restart marker: " << (triangles.size() / 3) << " triangles\n";
-    }
-
-    // Test 7: Out of bounds strip index
-    // restartMarker = 2*V. For valid indices: raw = vid << 1 where vid < V
-    // So max valid raw = (V-1) << 1 = 2V - 2
-    // restartMarker = 2V, so any raw >= 2V is restart
-    // valid range: [0, 2V-2] (even numbers only)
-    // out of bounds: vid >= V, so raw >= 2V which equals restartMarker
-    // Parser checks restart first, so we can't test out of bounds this way
-    // Instead we verify parser correctly rejects when it encounters vid >= V
-    // by checking the logic in ParsePayload
-    {
-        std::cout << "  Out of bounds: Parser correctly treats raw >= 2*V as restart\n";
-    }
-
-    // Test 8: Index count mismatch (more claimed than available in buffer)
-    {
-        std::vector<uint8_t> payload;
-        
-        // 3 vertices
-        payload.push_back(MakeFieldKey(1, 2));
-        uint8_t posLen[8];
-        size_t posLenBytes = EncodeVarint(posLen, 18);
-        payload.insert(payload.end(), posLen, posLen + posLenBytes);
-        payload.resize(payload.size() + 18);
-        
-        // Indices: claim 10 indices but only provide 3
-        payload.push_back(MakeFieldKey(3, 2));
-        uint8_t countBuf[8];
-        size_t countBytes = EncodeVarint(countBuf, 10);  // Claim 10
-        uint8_t idxBuf[8];
-        size_t i0 = EncodeVarint(idxBuf, 0 << 1);
-        size_t i1 = EncodeVarint(idxBuf + i0, 1 << 1);
-        size_t i2 = EncodeVarint(idxBuf + i0 + i1, 2 << 1);
-        
-        uint8_t idxLenBuf[8];
-        size_t idxLen = countBytes + i0 + i1 + i2;  // Only 3 actual indices
-        size_t idxLenBytes = EncodeVarint(idxLenBuf, idxLen);
-        payload.insert(payload.end(), idxLenBuf, idxLenBuf + idxLenBytes);
-        payload.insert(payload.end(), countBuf, countBuf + countBytes);
-        payload.insert(payload.end(), idxBuf, idxBuf + i0 + i1 + i2);
-        
-        // Build top-level
-        std::vector<uint8_t> topLevel;
-        topLevel.push_back(MakeFieldKey(1, 2));
-        uint8_t tfmLen[8];
-        size_t tfmLenBytes = EncodeVarint(tfmLen, 128);
-        topLevel.insert(topLevel.end(), tfmLen, tfmLen + tfmLenBytes);
-        topLevel.resize(topLevel.size() + 128);
-        
-        topLevel.push_back(MakeFieldKey(2, 2));
-        uint8_t payLen[8];
-        size_t payLenBytes = EncodeVarint(payLen, payload.size());
-        topLevel.insert(topLevel.end(), payLen, payLen + payLenBytes);
-        topLevel.insert(topLevel.end(), payload.begin(), payload.end());
-        
-        ParsedNodeData result = RockTreeNodeDataParser::Parse(topLevel);
-        
-        failed += !Expect(!result.success, "Index count mismatch should fail");
-        // Error could be "count mismatch" or "exceeds buffer"
-        std::cout << "  Index count mismatch error: " << result.error << "\n";
-    }
-
-    // Test 9: Unknown field tolerance - top-level varint should be skipped
+    // Test 9: Unknown field tolerance
     {
         std::vector<uint8_t> topLevel;
         
         // field 3: unknown varint at top level
-        topLevel.push_back(MakeFieldKey(3, 0));  // field 3, varint
-        uint8_t valBuf[8];
-        size_t valBytes = EncodeVarint(valBuf, 42);
-        topLevel.insert(topLevel.end(), valBuf, valBuf + valBytes);
+        topLevel.push_back(MakeFieldKey(3, 0));
+        AppendVarint(topLevel, 42);
         
         // field 1: transform
-        topLevel.push_back(MakeFieldKey(1, 2));
-        uint8_t tfmLen[8];
-        size_t tfmLenBytes = EncodeVarint(tfmLen, 128);
-        topLevel.insert(topLevel.end(), tfmLen, tfmLen + tfmLenBytes);
-        double identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-        const uint8_t* tfmBytes = reinterpret_cast<const uint8_t*>(identity);
-        topLevel.insert(topLevel.end(), tfmBytes, tfmBytes + 128);
+        double identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 6371000,0,0,1};
+        AppendFieldRaw(topLevel, 1, reinterpret_cast<const uint8_t*>(identity), 128);
         
-        // field 2: minimal payload
-        std::vector<uint8_t> payload;
-        payload.push_back(MakeFieldKey(1, 2));
-        uint8_t posLen[8];
-        size_t posLenBytes = EncodeVarint(posLen, 6);
-        payload.insert(payload.end(), posLen, posLen + posLenBytes);
-        payload.resize(payload.size() + 6);
-        
-        topLevel.push_back(MakeFieldKey(2, 2));
-        uint8_t payLen[8];
-        size_t payLenBytes = EncodeVarint(payLen, payload.size());
-        topLevel.insert(topLevel.end(), payLen, payLen + payLenBytes);
-        topLevel.insert(topLevel.end(), payload.begin(), payload.end());
+        // field 2: minimal mesh
+        std::vector<uint8_t> positions = {0,0,0, 10,0,0};
+        auto vertData = BuildVertexData(positions);
+        std::vector<uint8_t> mesh;
+        AppendFieldRaw(mesh, 1, vertData.data(), vertData.size());
+        AppendField(topLevel, 2, mesh);
         
         ParsedNodeData result = RockTreeNodeDataParser::Parse(topLevel);
         
@@ -466,76 +319,96 @@ int main() {
         std::cout << "  Unknown field tolerance: OK\n";
     }
 
-    // Test 9b: Multi-byte field key (fieldNum >= 16 requires varint key)
-    // Field 16 = (16 << 3) | 2 = 130, which requires 2 bytes as varint
+    // Test 10: Multi-byte field key (fieldNum >= 16)
     {
         std::vector<uint8_t> topLevel;
         
         // field 1: transform
-        topLevel.push_back(MakeFieldKey(1, 2));
-        uint8_t tfmLen[8];
-        size_t tfmLenBytes = EncodeVarint(tfmLen, 128);
-        topLevel.insert(topLevel.end(), tfmLen, tfmLen + tfmLenBytes);
-        double identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-        const uint8_t* tfmBytes = reinterpret_cast<const uint8_t*>(identity);
-        topLevel.insert(topLevel.end(), tfmBytes, tfmBytes + 128);
+        double identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 6371000,0,0,1};
+        AppendFieldRaw(topLevel, 1, reinterpret_cast<const uint8_t*>(identity), 128);
         
-        // field 16: unknown length-delimited (multi-byte key: 130 = 0x82 0x01)
-        // 130 = (16 << 3) | 2 = 128 + 2
-        uint8_t keyBuf[8];
-        size_t keyBytes = EncodeVarint(keyBuf, (16u << 3) | 2);  // field 16, length-delimited
-        topLevel.insert(topLevel.end(), keyBuf, keyBuf + keyBytes);
-        uint8_t lenBuf[8];
-        size_t lenBytes = EncodeVarint(lenBuf, 4);  // 4 bytes of unknown data
-        topLevel.insert(topLevel.end(), lenBuf, lenBuf + lenBytes);
-        topLevel.resize(topLevel.size() + 4);  // Add 4 bytes of padding
+        // field 16: unknown length-delimited (multi-byte varint key)
+        std::vector<uint8_t> dummy(4, 0);
+        AppendField(topLevel, 16, dummy);
         
-        // field 2: minimal payload
-        std::vector<uint8_t> payload;
-        payload.push_back(MakeFieldKey(1, 2));
-        uint8_t posLen[8];
-        size_t posLenBytes = EncodeVarint(posLen, 6);
-        payload.insert(payload.end(), posLen, posLen + posLenBytes);
-        payload.resize(payload.size() + 6);
-        
-        topLevel.push_back(MakeFieldKey(2, 2));
-        uint8_t payLen[8];
-        size_t payLenBytes = EncodeVarint(payLen, payload.size());
-        topLevel.insert(topLevel.end(), payLen, payLen + payLenBytes);
-        topLevel.insert(topLevel.end(), payload.begin(), payload.end());
+        // field 2: minimal mesh
+        std::vector<uint8_t> positions = {0,0,0, 10,0,0};
+        auto vertData = BuildVertexData(positions);
+        std::vector<uint8_t> mesh;
+        AppendFieldRaw(mesh, 1, vertData.data(), vertData.size());
+        AppendField(topLevel, 2, mesh);
         
         ParsedNodeData result = RockTreeNodeDataParser::Parse(topLevel);
         
-        failed += !Expect(result.success, "Should parse with multi-byte field key (field 16)");
+        failed += !Expect(result.success, "Should parse with multi-byte field key");
         failed += !Expect(result.hasTransform, "Should have transform");
         std::cout << "  Multi-byte field key: OK\n";
     }
 
-    // Test 10: UV quant decode formula (RockTree format)
+    // Test 11: UvQuantization decode formula
     {
         UvQuantization quant;
-        quant.offsetU = -16384.0f;
-        quant.offsetV = -16384.0f;
-        quant.scaleU = 1.0f / 32768.0f;
-        quant.scaleV = 1.0f / 32768.0f;
+        quant.offsetU = 0.5f;
+        quant.offsetV = 0.5f;
+        quant.scaleU = 1.0f / 256.0f;
+        quant.scaleV = 1.0f / 256.0f;
         
         float u, v;
         
-        // u16 = 16384 => (16384 - 16384) / 32768 = 0.0
-        quant.Decode(16384, 16384, u, v, false);  // No flipV
-        failed += !Expect(std::abs(u - 0.0f) < 0.001f, "UV decode center should be 0.0");
-        failed += !Expect(std::abs(v - 0.0f) < 0.001f, "UV decode center should be 0.0");
+        // u16 = 0 => (0 * 1/256) + 0.5 = 0.5
+        quant.Decode(0, 0, u, v);
+        failed += !Expect(std::abs(u - 0.5f) < 0.001f, "UV decode at 0 should be 0.5 (offset)");
         
-        // u16 = 49152 => (49152 - 16384) / 32768 = 1.0
-        quant.Decode(49152, 49152, u, v, false);
-        failed += !Expect(std::abs(u - 1.0f) < 0.001f, "UV decode max should be 1.0");
-        failed += !Expect(std::abs(v - 1.0f) < 0.001f, "UV decode max should be 1.0");
-        
-        // Test flipV
-        quant.Decode(49152, 49152, u, v, true);  // flipV = true
-        failed += !Expect(std::abs(v - 0.0f) < 0.001f, "UV decode with flipV should invert");
+        // u16 = 128 => (128 * 1/256) + 0.5 = 1.0
+        quant.Decode(128, 128, u, v);
+        failed += !Expect(std::abs(u - 1.0f) < 0.001f, "UV decode at 128 should be 1.0");
         
         std::cout << "  UV quant decode: OK\n";
+    }
+    
+    // Test 12: UnpackForNormals + UnpackNormals
+    {
+        // Build a tiny for_normals palette: 2 normals
+        // Format: uint16 count=2, uint8 scale=0, then 2+2 bytes of encoded normal data
+        std::vector<uint8_t> forNormalsData;
+        uint16_t count = 2;
+        forNormalsData.push_back(count & 0xFF);
+        forNormalsData.push_back((count >> 8) & 0xFF);
+        forNormalsData.push_back(0);  // scale = 0
+        // With scale=0, f1(v,0) = v (since 4>=0, result = (v<<0) + (v & 0) = v)
+        // So a = data[0+i]/255, f = data[count+i]/255
+        // For normal pointing in +X: a≈0.75, f≈0.5 gives approximately (1,0,0)
+        forNormalsData.push_back(191);  // a for normal 0
+        forNormalsData.push_back(128);  // a for normal 1
+        forNormalsData.push_back(128);  // f for normal 0
+        forNormalsData.push_back(128);  // f for normal 1
+        
+        std::vector<uint8_t> palette;
+        int paletteCount = 0;
+        bool ok = RockTreeNodeDataParser::UnpackForNormals(
+            forNormalsData.data(), forNormalsData.size(), palette, paletteCount);
+        
+        failed += !Expect(ok, "UnpackForNormals should succeed");
+        failed += !Expect(paletteCount == 2, "Palette should have 2 entries");
+        failed += !Expect(palette.size() == 6, "Palette should be 6 bytes");
+        
+        // Now test UnpackNormals: 2 vertices pointing to palette entries 0 and 1
+        // Format: split layout [low bytes][high bytes]
+        uint8_t normData[] = {0, 1,   // low bytes: idx[0]=0, idx[1]=1
+                              0, 0};  // high bytes: both 0
+        std::vector<uint8_t> outNormals;
+        ok = RockTreeNodeDataParser::UnpackNormals(normData, 4, 2, palette, paletteCount, outNormals);
+        
+        failed += !Expect(ok, "UnpackNormals should succeed");
+        failed += !Expect(outNormals.size() == 6, "Should have 6 normal bytes (2 verts * 3)");
+        // Vertex 0 should match palette entry 0
+        failed += !Expect(outNormals[0] == palette[0] && outNormals[1] == palette[1] && outNormals[2] == palette[2],
+                         "V0 normal should match palette[0]");
+        // Vertex 1 should match palette entry 1
+        failed += !Expect(outNormals[3] == palette[3] && outNormals[4] == palette[4] && outNormals[5] == palette[5],
+                         "V1 normal should match palette[1]");
+        
+        std::cout << "  UnpackForNormals + UnpackNormals: OK\n";
     }
 
     if (failed == 0) {

@@ -1,8 +1,11 @@
 // RockTree NodeData Protobuf Parser Implementation
+// Reference: retroplasma/earth-reverse-engineering (rocktree_decoder.h, rocktree_ex.h)
 
 #include "rocktree_node_data_parser.h"
 #include <cstring>
+#include <cmath>
 #include <algorithm>
+#include <cassert>
 
 namespace globe {
 
@@ -16,27 +19,14 @@ enum class WireType : uint8_t {
     Fixed32 = 5
 };
 
-// Parse field key from varint, returns bytes consumed or 0 on error
 static size_t ParseFieldKeyVarint(const uint8_t* data, size_t len, uint32_t& outFieldNum, WireType& outType) {
     uint64_t key;
     size_t bytes = RockTreeNodeDataParser::ReadVarint(data, len, key);
     if (bytes == 0) return 0;
     outFieldNum = static_cast<uint32_t>(key >> 3);
     outType = static_cast<WireType>(key & 0x07);
-    if (outFieldNum == 0) return 0;  // Invalid field number
+    if (outFieldNum == 0) return 0;
     return bytes;
-}
-
-ParsedNodeData RockTreeNodeDataParser::Parse(const std::vector<uint8_t>& data) {
-    ParsedNodeData result;
-    if (!ParseTopLevel(result, data.data(), data.size())) {
-        if (result.error.empty()) {
-            result.error = "Failed to parse NodeData";
-        }
-        return result;
-    }
-    result.success = true;
-    return result;
 }
 
 namespace {
@@ -72,10 +62,280 @@ namespace {
                 return false;
         }
     }
+    
+    // Read a varint from raw bytes at offset, returns bytes consumed
+    int ReadVarIntRaw(const uint8_t* data, size_t len, int offset) {
+        int c = 0, d = 1;
+        int pos = offset;
+        int e;
+        do {
+            if (pos >= static_cast<int>(len)) return -1;
+            e = data[pos++];
+            c += (e & 0x7F) * d;
+            d <<= 7;
+        } while (e & 0x80);
+        return c;
+    }
+    
+    // Read varint and advance offset, returns the value. Sets offset to -1 on error.
+    int ReadVarIntAdv(const uint8_t* data, size_t len, int& offset) {
+        if (offset < 0 || offset >= static_cast<int>(len)) { offset = -1; return 0; }
+        int c = 0, d = 1;
+        int e;
+        do {
+            if (offset >= static_cast<int>(len)) { offset = -1; return 0; }
+            e = data[offset++];
+            c += (e & 0x7F) * d;
+            d <<= 7;
+        } while (e & 0x80);
+        return c;
+    }
 }
+
+// ============================================================================
+// Public decode helpers (matching retroplasma/earth-reverse-engineering)
+// ============================================================================
+
+std::vector<uint8_t> RockTreeNodeDataParser::UnpackVertices(const uint8_t* data, size_t len) {
+    // Vertex data is planar delta-encoded uint8: [X deltas][Y deltas][Z deltas]
+    // Each component stream has count bytes; total = count * 3
+    if (len < 3 || len % 3 != 0) return {};
+    
+    size_t count = len / 3;
+    std::vector<uint8_t> out(count * 3);  // interleaved x,y,z
+    
+    uint8_t x = 0, y = 0, z = 0;
+    for (size_t i = 0; i < count; i++) {
+        x += data[count * 0 + i];  // delta decode X
+        y += data[count * 1 + i];  // delta decode Y
+        z += data[count * 2 + i];  // delta decode Z
+        out[i * 3 + 0] = x;
+        out[i * 3 + 1] = y;
+        out[i * 3 + 2] = z;
+    }
+    
+    return out;
+}
+
+bool RockTreeNodeDataParser::UnpackTexCoords(const uint8_t* data, size_t len, int vertexCount,
+                                              std::vector<uint16_t>& outUV, UvQuantization& outQuant) {
+    // Format: 4-byte header (uint16 u_mod-1, uint16 v_mod-1) + count*4 planar data
+    // Data layout: [u_lo bytes][v_lo bytes][u_hi bytes][v_hi bytes]
+    if (vertexCount <= 0) return false;
+    size_t count = static_cast<size_t>(vertexCount);
+    if (len < 4 + count * 4) return false;
+    
+    uint16_t u_mod = 1 + *reinterpret_cast<const uint16_t*>(data + 0);
+    uint16_t v_mod = 1 + *reinterpret_cast<const uint16_t*>(data + 2);
+    const uint8_t* d = data + 4;
+    
+    outUV.resize(count * 2);
+    int u = 0, v = 0;
+    for (size_t i = 0; i < count; i++) {
+        u = (u + d[count * 0 + i] + (d[count * 2 + i] << 8)) % u_mod;
+        v = (v + d[count * 1 + i] + (d[count * 3 + i] << 8)) % v_mod;
+        outUV[i * 2 + 0] = static_cast<uint16_t>(u);
+        outUV[i * 2 + 1] = static_cast<uint16_t>(v);
+    }
+    
+    // Default UV quant from modular decode
+    outQuant.offsetU = 0.5f;
+    outQuant.offsetV = 0.5f;
+    outQuant.scaleU = 1.0f / static_cast<float>(u_mod);
+    outQuant.scaleV = 1.0f / static_cast<float>(v_mod);
+    
+    return true;
+}
+
+std::vector<uint16_t> RockTreeNodeDataParser::UnpackIndices(const uint8_t* data, size_t len) {
+    // retroplasma zeros-val algorithm:
+    // First varint = strip length
+    // Then strip_length varints: triangle_strip[i] = (a=b, b=c, c=zeros-val)
+    // if val == 0 then zeros++
+    int offset = 0;
+    int stripLen = ReadVarIntAdv(data, len, offset);
+    if (offset < 0 || stripLen <= 0) return {};
+    
+    std::vector<uint16_t> strip(stripLen);
+    int zeros = 0;
+    int a = 0, b = 0, c = 0;
+    
+    for (int i = 0; i < stripLen; i++) {
+        int val = ReadVarIntAdv(data, len, offset);
+        if (offset < 0) { strip.resize(i); break; }
+        a = b;
+        b = c;
+        c = zeros - val;
+        strip[i] = static_cast<uint16_t>(c);
+        if (val == 0) zeros++;
+    }
+    
+    return strip;
+}
+
+bool RockTreeNodeDataParser::StripToTriangleList(const std::vector<uint16_t>& strip,
+                                                  std::vector<uint32_t>& outTriangles) {
+    outTriangles.clear();
+    if (strip.size() < 3) return true;
+    
+    // Standard triangle strip to triangle list conversion
+    // Skip degenerate triangles (where any two indices are equal)
+    for (size_t i = 2; i < strip.size(); i++) {
+        uint16_t a = strip[i - 2];
+        uint16_t b = strip[i - 1];
+        uint16_t c = strip[i];
+        
+        // Skip degenerate triangles
+        if (a == b || a == c || b == c) continue;
+        
+        if (i % 2 == 0) {
+            outTriangles.push_back(a);
+            outTriangles.push_back(b);
+            outTriangles.push_back(c);
+        } else {
+            // Flip winding for odd triangles
+            outTriangles.push_back(a);
+            outTriangles.push_back(c);
+            outTriangles.push_back(b);
+        }
+    }
+    
+    return true;
+}
+
+bool RockTreeNodeDataParser::UnpackForNormals(const uint8_t* data, size_t len,
+                                               std::vector<uint8_t>& outPalette, int& outCount) {
+    // Format: uint16 count + uint8 scale + count*2 octahedral-encoded normal pairs
+    if (len < 3) return false;
+    
+    uint16_t count = *reinterpret_cast<const uint16_t*>(data);
+    if (count * 2 != static_cast<int>(len) - 3) return false;
+    int s = data[2];
+    const uint8_t* d = data + 3;
+    
+    outCount = count;
+    outPalette.resize(3 * count);
+    
+    // f1: expand low-bit value to 8-bit range
+    auto f1 = [](int v, int l) -> int {
+        if (4 >= l)
+            return (v << l) + (v & ((1 << l) - 1));
+        if (6 >= l) {
+            int r = 8 - l;
+            return (v << l) + ((v << l) >> r) + ((v << l) >> r >> r) + ((v << l) >> r >> r >> r);
+        }
+        return -(v & 1);
+    };
+    
+    // f2: clamp to [0, 255]
+    auto f2 = [](double c) -> int {
+        int cr = static_cast<int>(std::round(c));
+        if (cr < 0) return 0;
+        if (cr > 255) return 255;
+        return cr;
+    };
+    
+    for (int i = 0; i < count; i++) {
+        double aa = f1(d[0 + i], s) / 255.0;
+        double ff = f1(d[count + i], s) / 255.0;
+        
+        double bb = aa, cc = ff;
+        double g = bb + cc, h = bb - cc;
+        int sign = 1;
+        
+        if (!(.5 <= g && 1.5 >= g && -.5 <= h && .5 >= h)) {
+            sign = -1;
+            if (.5 >= g) {
+                bb = .5 - ff;
+                cc = .5 - aa;
+            } else if (1.5 <= g) {
+                bb = 1.5 - ff;
+                cc = 1.5 - aa;
+            } else if (-.5 >= h) {
+                bb = ff - .5;
+                cc = aa + .5;
+            } else {
+                bb = ff + .5;
+                cc = aa - .5;
+            }
+            g = bb + cc;
+            h = bb - cc;
+        }
+        
+        double na = std::fmin(std::fmin(2*g - 1, 3 - 2*g), std::fmin(2*h + 1, 1 - 2*h)) * sign;
+        double nb = 2 * bb - 1;
+        double nc = 2 * cc - 1;
+        double m = 127.0 / std::sqrt(na*na + nb*nb + nc*nc);
+        
+        outPalette[3*i + 0] = static_cast<uint8_t>(f2(m * na + 127));
+        outPalette[3*i + 1] = static_cast<uint8_t>(f2(m * nb + 127));
+        outPalette[3*i + 2] = static_cast<uint8_t>(f2(m * nc + 127));
+    }
+    
+    return true;
+}
+
+bool RockTreeNodeDataParser::UnpackNormals(const uint8_t* data, size_t len, int vertexCount,
+                                            const std::vector<uint8_t>& palette, int paletteCount,
+                                            std::vector<uint8_t>& outNormals) {
+    // Mesh normals field: uint16 indices (low byte + high byte, split)
+    // Format: count = len/2, for each vertex: index = data[i] + (data[count+i] << 8)
+    if (len == 0 || palette.empty()) {
+        // No normals data — fill with default (127,127,127)
+        outNormals.resize(vertexCount * 3, 127);
+        return true;
+    }
+    
+    int count = static_cast<int>(len / 2);
+    outNormals.resize(vertexCount * 3);
+    
+    const uint8_t* input = data;
+    for (int i = 0; i < count && i < vertexCount; ++i) {
+        int j = input[i] + (input[count + i] << 8);
+        if (j >= 0 && 3*j + 2 < static_cast<int>(palette.size())) {
+            outNormals[3*i + 0] = palette[3*j + 0];
+            outNormals[3*i + 1] = palette[3*j + 1];
+            outNormals[3*i + 2] = palette[3*j + 2];
+        } else {
+            outNormals[3*i + 0] = 127;
+            outNormals[3*i + 1] = 127;
+            outNormals[3*i + 2] = 127;
+        }
+    }
+    
+    // Fill remaining vertices with default if count < vertexCount
+    for (int i = count; i < vertexCount; ++i) {
+        outNormals[3*i + 0] = 127;
+        outNormals[3*i + 1] = 127;
+        outNormals[3*i + 2] = 127;
+    }
+    
+    return true;
+}
+
+// ============================================================================
+// Main parse entry point
+// ============================================================================
+
+ParsedNodeData RockTreeNodeDataParser::Parse(const std::vector<uint8_t>& data) {
+    ParsedNodeData result;
+    if (!ParseTopLevel(result, data.data(), data.size())) {
+        if (result.error.empty()) {
+            result.error = "Failed to parse NodeData";
+        }
+        return result;
+    }
+    result.success = true;
+    return result;
+}
+
+// ============================================================================
+// Top-level NodeData parsing
+// ============================================================================
 
 bool RockTreeNodeDataParser::ParseTopLevel(ParsedNodeData& out, const uint8_t* data, size_t len) {
     size_t pos = 0;
+    bool firstMeshParsed = false;
     
     while (pos < len) {
         uint32_t fieldNum;
@@ -104,6 +364,7 @@ bool RockTreeNodeDataParser::ParseTopLevel(ParsedNodeData& out, const uint8_t* d
             }
             
             if (fieldNum == 1) {
+                // NodeData field 1: matrix_globe_from_mesh (16 doubles = 128 bytes)
                 if (length != 128) {
                     out.error = "Transform matrix must be 128 bytes, got " + std::to_string(length);
                     return false;
@@ -113,15 +374,19 @@ bool RockTreeNodeDataParser::ParseTopLevel(ParsedNodeData& out, const uint8_t* d
                     return false;
                 }
                 out.hasTransform = true;
-            } else if (fieldNum == 2) {
-                if (!ParsePayload(out, data + pos, length)) {
+            } else if (fieldNum == 2 && !firstMeshParsed) {
+                // NodeData field 2: meshes (repeated Mesh) — parse first mesh only
+                if (!ParseMesh(out, data + pos, length)) {
                     return false;
                 }
+                firstMeshParsed = true;
+            } else if (fieldNum == 8) {
+                // NodeData field 8: for_normals (shared normal palette)
+                UnpackForNormals(data + pos, length, out.forNormalsDecoded, out.forNormalsCount);
             }
             
             pos += length;
         } else {
-            // Skip unknown wire types instead of failing
             if (!SkipUnknownField(data, pos, len, wireType)) {
                 out.error = "Failed to skip field at position " + std::to_string(fieldStart);
                 return false;
@@ -129,24 +394,48 @@ bool RockTreeNodeDataParser::ParseTopLevel(ParsedNodeData& out, const uint8_t* d
         }
     }
     
-    // B1: Parser hardening - require transform matrix
     if (!out.hasTransform) {
         out.error = "Missing required transform matrix";
         return false;
     }
     
+    // Post-processing: decode raw fields that depend on vertex count
+    
+    // Decode texture coordinates from raw field 7 data
+    if (!out.rawTexCoords.empty() && out.vertexCount > 0) {
+        if (UnpackTexCoords(out.rawTexCoords.data(), out.rawTexCoords.size(),
+                            out.vertexCount, out.texCoords, out.uvQuant)) {
+            out.hasTexCoords = true;
+        }
+    }
+    
+    // Decode normals from raw field 11 using for_normals palette
+    if (!out.rawNormals.empty() && out.vertexCount > 0) {
+        if (UnpackNormals(out.rawNormals.data(), out.rawNormals.size(),
+                          out.vertexCount, out.forNormalsDecoded, out.forNormalsCount,
+                          out.normals)) {
+            out.hasNormals = true;
+        }
+    }
+    
     return true;
 }
 
-bool RockTreeNodeDataParser::ParsePayload(ParsedNodeData& out, const uint8_t* data, size_t len) {
+// ============================================================================
+// Mesh sub-message parsing (handles first mesh in repeated field 2)
+// ============================================================================
+
+bool RockTreeNodeDataParser::ParseMesh(ParsedNodeData& out, const uint8_t* data, size_t len) {
     size_t pos = 0;
+    bool hasUvOffsetAndScale = false;
+    float uvOffsetAndScale[4] = {};
     
     while (pos < len) {
         uint32_t fieldNum;
         WireType wireType;
         size_t keyBytes = ParseFieldKeyVarint(data + pos, len - pos, fieldNum, wireType);
         if (keyBytes == 0) {
-            out.error = "Invalid field key in payload at " + std::to_string(pos);
+            out.error = "Invalid field key in mesh at " + std::to_string(pos);
             return false;
         }
         pos += keyBytes;
@@ -157,138 +446,94 @@ bool RockTreeNodeDataParser::ParsePayload(ParsedNodeData& out, const uint8_t* da
             uint64_t length;
             size_t varintBytes = ReadVarint(data + pos, len - pos, length);
             if (varintBytes == 0) {
-                out.error = "Failed to read length in payload";
+                out.error = "Failed to read length in mesh";
                 return false;
             }
             pos += varintBytes;
             
             if (pos + length > len) {
-                out.error = "Payload field length exceeds buffer";
+                out.error = "Mesh field length exceeds buffer";
                 return false;
             }
             
             if (fieldNum == 1) {
-                // Positions: int16 triplets
-                if (length % 6 != 0) {
-                    out.error = "Positions length not multiple of 6 (got " + std::to_string(length) + ")";
+                // Mesh field 1: vertices (uint8 delta-encoded, planar)
+                const size_t MAX_VERTEX_BYTES = 30'000'000;
+                if (length > MAX_VERTEX_BYTES) {
+                    out.error = "Vertex data too large: " + std::to_string(length) + " bytes";
                     return false;
                 }
-                // P0: DoS fix - check limit BEFORE allocation
-                const size_t MAX_POSITION_BYTES = 60'000'000;  // 60MB (10M vertices * 6 bytes)
-                if (length > MAX_POSITION_BYTES) {
-                    out.error = "Positions data too large: " + std::to_string(length) + " bytes";
-                    return false;
-                }
-                out.positions.resize(length / 2);  // int16 count
-                memcpy(out.positions.data(), data + pos, length);
+                out.positions = UnpackVertices(data + pos, length);
                 out.vertexCount = static_cast<int>(out.positions.size()) / 3;
             } else if (fieldNum == 3) {
-                // Indices: varint stream
-                size_t idxPos = 0;
-                uint64_t indexCount;
-                size_t countBytes = ReadVarint(data + pos, length, indexCount);
-                if (countBytes == 0) {
-                    out.error = "Failed to read index count";
-                    return false;
-                }
-                // P1: Index count cap (DoS prevention)
-                const uint64_t MAX_INDEX_COUNT = 50'000'000;  // 50M indices ~ 200MB
-                if (indexCount > MAX_INDEX_COUNT) {
-                    out.error = "Index count exceeds limit: " + std::to_string(indexCount);
-                    return false;
-                }
-                idxPos += countBytes;
+                // Mesh field 3: indices (varint-encoded triangle strip)
+                out.stripIndices = UnpackIndices(data + pos, length);
                 
-                std::vector<uint32_t> rawStrip;
-                rawStrip.reserve(static_cast<size_t>(indexCount));
-                
-                while (rawStrip.size() < indexCount && idxPos < length) {
-                    uint64_t value;
-                    size_t vb = ReadVarint(data + pos + idxPos, length - idxPos, value);
-                    if (vb == 0) break;
-                    idxPos += vb;
-                    // P1: Varint overflow check - reject values that don't fit in uint32_t
-                    if (value > 0xFFFFFFFFULL) {
-                        out.error = "Index value exceeds uint32_t range";
-                        return false;
-                    }
-                    rawStrip.push_back(static_cast<uint32_t>(value));
-                }
-                
-                if (rawStrip.size() != indexCount) {
-                    out.error = "Index count mismatch: expected " + std::to_string(indexCount) + 
-                               ", got " + std::to_string(rawStrip.size());
-                    return false;
-                }
-                
-                if (!ConvertStripToTriangles(rawStrip, out.vertexCount, out.indices, out.error)) {
+                // Convert to triangle list for backward compatibility
+                if (!StripToTriangleList(out.stripIndices, out.indices)) {
+                    out.error = "Failed to convert triangle strip to list";
                     return false;
                 }
                 out.triangleCount = static_cast<int>(out.indices.size()) / 3;
-            } else if (fieldNum == 10) {
-                // UV quantization: 4 floats = 16 bytes
-                if (length != 16) {
-                    out.error = "UV quant length must be 16, got " + std::to_string(length);
-                    return false;
-                }
-                float floats[4];
-                if (!ReadFloatArray(data + pos, length, floats, 4)) {
-                    out.error = "Failed to read UV quant";
-                    return false;
-                }
-                out.uvQuant.offsetU = floats[0];
-                out.uvQuant.offsetV = floats[1];
-                out.uvQuant.scaleU = floats[2];
-                out.uvQuant.scaleV = floats[3];
-                out.hasUvQuant = true;
-            } else if (fieldNum == 11) {
-                // UV coordinates: uint16 pairs
-                if (length % 4 != 0) {
-                    out.error = "UV length not multiple of 4 (got " + std::to_string(length) + ")";
-                    return false;
-                }
-                size_t uvCount = length / 4;  // number of UV pairs
-                out.uv.resize(uvCount * 2);
-                memcpy(out.uv.data(), data + pos, length);
             } else if (fieldNum == 6) {
-                // Texture message
+                // Mesh field 6: texture
                 if (!ParseTexture(out.texture, data + pos, length)) {
                     out.texture.valid = false;
                 }
+            } else if (fieldNum == 7) {
+                // Mesh field 7: texture_coordinates (primary UV source)
+                // Store raw bytes — decoded in post-processing after vertex count is known
+                out.rawTexCoords.assign(data + pos, data + pos + length);
+            } else if (fieldNum == 8) {
+                // Mesh field 8: layer_and_octant_counts
+                out.rawLayerAndOctant.assign(data + pos, data + pos + length);
+            } else if (fieldNum == 10) {
+                // Mesh field 10: uv_offset_and_scale (4 floats, packed repeated)
+                // This is a packed repeated float field
+                if (length >= 16) {
+                    if (ReadFloatArray(data + pos, length, uvOffsetAndScale, 4)) {
+                        hasUvOffsetAndScale = true;
+                    }
+                }
+            } else if (fieldNum == 11) {
+                // Mesh field 11: normals (uint16 indices into for_normals palette)
+                out.rawNormals.assign(data + pos, data + pos + length);
             }
-            // Unknown fields are silently skipped
             
             pos += length;
         } else {
-            // Skip unknown wire types instead of failing
             if (!SkipUnknownField(data, pos, len, wireType)) {
-                out.error = "Failed to skip field in payload at " + std::to_string(fieldStart);
+                out.error = "Failed to skip field in mesh at " + std::to_string(fieldStart);
                 return false;
             }
         }
     }
     
-    // Validate UV count matches vertex count
-    if (!out.uv.empty() && out.uv.size() / 2 != static_cast<size_t>(out.vertexCount)) {
-        out.error = "UV count (" + std::to_string(out.uv.size() / 2) + 
-                   ") doesn't match vertex count (" + std::to_string(out.vertexCount) + ")";
-        return false;
+    // Apply UV offset/scale override from field 10 if present
+    // (retroplasma: if uv_offset_and_scale_size() == 4, override the computed values)
+    if (hasUvOffsetAndScale) {
+        out.uvQuant.offsetU = uvOffsetAndScale[0];
+        out.uvQuant.offsetV = uvOffsetAndScale[1];
+        out.uvQuant.scaleU = uvOffsetAndScale[2];
+        out.uvQuant.scaleV = uvOffsetAndScale[3];
+    } else if (out.hasTexCoords) {
+        // retroplasma fallback: uv_offset[1] -= 1/uv_scale[1]; uv_scale[1] *= -1
+        out.uvQuant.offsetV -= 1.0f / out.uvQuant.scaleV;
+        out.uvQuant.scaleV *= -1.0f;
     }
     
-    // B1: Parser hardening - vertex count limits (prevent memory DoS)
-    const int MAX_VERTEX_COUNT = 10'000'000;  // 10M vertices ~ 60MB position data
+    // Vertex count DoS limit
+    const int MAX_VERTEX_COUNT = 10'000'000;
     if (out.vertexCount > MAX_VERTEX_COUNT) {
         out.error = "Vertex count exceeds limit: " + std::to_string(out.vertexCount);
         return false;
     }
     
-    // B1: Parser hardening - indices consistency check
-    if (!out.indices.empty()) {
+    // Index consistency check
+    if (!out.indices.empty() && out.vertexCount > 0) {
         uint32_t maxIndex = 0;
         for (uint32_t idx : out.indices) {
-            if (idx != 0xFFFFFFFFU) {  // Skip strip restart markers
-                maxIndex = std::max(maxIndex, idx);
-            }
+            maxIndex = std::max(maxIndex, idx);
         }
         if (maxIndex >= static_cast<uint32_t>(out.vertexCount)) {
             out.error = "Index value out of range: max=" + std::to_string(maxIndex) + 
@@ -299,6 +544,10 @@ bool RockTreeNodeDataParser::ParsePayload(ParsedNodeData& out, const uint8_t* da
     
     return true;
 }
+
+// ============================================================================
+// Texture sub-message parsing (unchanged)
+// ============================================================================
 
 bool RockTreeNodeDataParser::ParseTexture(NodeDataTexture& out, const uint8_t* data, size_t len) {
     size_t pos = 0;
@@ -322,12 +571,10 @@ bool RockTreeNodeDataParser::ParseTexture(NodeDataTexture& out, const uint8_t* d
             if (pos + length > len) break;
             
             if (fieldNum == 1) {
-                // JPEG bytes
                 out.jpegBytes.resize(length);
                 memcpy(out.jpegBytes.data(), data + pos, length);
                 out.valid = true;
             }
-            // Unknown fields are skipped
             pos += length;
         } else if (wireType == WireType::Varint) {
             uint64_t value;
@@ -341,30 +588,34 @@ bool RockTreeNodeDataParser::ParseTexture(NodeDataTexture& out, const uint8_t* d
                 out.height = static_cast<int>(value);
             }
         } else {
-            break;
+            if (!SkipUnknownField(data, pos, len, wireType)) break;
         }
     }
     
     return out.valid;
 }
 
+// ============================================================================
+// Low-level helpers
+// ============================================================================
+
 size_t RockTreeNodeDataParser::ReadVarint(const uint8_t* data, size_t len, uint64_t& outValue) {
     outValue = 0;
     size_t shift = 0;
     size_t pos = 0;
     
-    while (pos < len && pos < 10) {  // Max 10 bytes for 64-bit varint
+    while (pos < len && pos < 10) {
         uint8_t byte = data[pos];
         outValue |= static_cast<uint64_t>(byte & 0x7F) << shift;
         pos++;
         if ((byte & 0x80) == 0) {
-            return pos;  // Success
+            return pos;
         }
         shift += 7;
-        if (shift >= 64) break;  // Overflow
+        if (shift >= 64) break;
     }
     
-    return 0;  // Error
+    return 0;
 }
 
 bool RockTreeNodeDataParser::ReadDoubleArray(const uint8_t* data, size_t len, double* out, size_t count) {
@@ -376,70 +627,6 @@ bool RockTreeNodeDataParser::ReadDoubleArray(const uint8_t* data, size_t len, do
 bool RockTreeNodeDataParser::ReadFloatArray(const uint8_t* data, size_t len, float* out, size_t count) {
     if (len < count * sizeof(float)) return false;
     memcpy(out, data, count * sizeof(float));
-    return true;
-}
-
-bool RockTreeNodeDataParser::ConvertStripToTriangles(
-    const std::vector<uint32_t>& rawStrip,
-    int vertexCount,
-    std::vector<uint32_t>& outTriangles,
-    std::string& outError) {
-    
-    outTriangles.clear();
-    
-    if (rawStrip.empty()) {
-        return true;  // Empty is valid
-    }
-    
-    uint32_t restartMarker = static_cast<uint32_t>(vertexCount) * 2;
-    
-    std::vector<uint32_t> currentStrip;
-    
-    for (uint32_t raw : rawStrip) {
-        if (raw >= restartMarker) {
-            // Restart marker - finish current strip and start new one
-            if (currentStrip.size() >= 3) {
-                // Convert current strip to triangles
-                for (size_t i = 2; i < currentStrip.size(); ++i) {
-                    if (i % 2 == 0) {
-                        outTriangles.push_back(currentStrip[i - 2]);
-                        outTriangles.push_back(currentStrip[i - 1]);
-                        outTriangles.push_back(currentStrip[i]);
-                    } else {
-                        outTriangles.push_back(currentStrip[i - 2]);
-                        outTriangles.push_back(currentStrip[i]);
-                        outTriangles.push_back(currentStrip[i - 1]);
-                    }
-                }
-            }
-            currentStrip.clear();
-        } else {
-            // Regular index - extract vertex id
-            uint32_t vid = raw >> 1;
-            if (vid >= static_cast<uint32_t>(vertexCount)) {
-                outError = "Strip index " + std::to_string(vid) + " >= vertexCount " + 
-                          std::to_string(vertexCount);
-                return false;
-            }
-            currentStrip.push_back(vid);
-        }
-    }
-    
-    // Don't forget the last strip
-    if (currentStrip.size() >= 3) {
-        for (size_t i = 2; i < currentStrip.size(); ++i) {
-            if (i % 2 == 0) {
-                outTriangles.push_back(currentStrip[i - 2]);
-                outTriangles.push_back(currentStrip[i - 1]);
-                outTriangles.push_back(currentStrip[i]);
-            } else {
-                outTriangles.push_back(currentStrip[i - 2]);
-                outTriangles.push_back(currentStrip[i]);
-                outTriangles.push_back(currentStrip[i - 1]);
-            }
-        }
-    }
-    
     return true;
 }
 
