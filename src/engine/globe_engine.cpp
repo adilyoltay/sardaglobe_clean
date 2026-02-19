@@ -259,53 +259,11 @@ bool GlobeEngine::Init() {
                   << ", backoff=" << config_.demBatchBackoffMs << "ms"
                   << std::endl;
 
-        // Resolve GE epoch from RockMesh octree when requested.
-        std::string resolvedGeEpoch = config_.geEpoch;
-        const bool wantGeEpochAutoDetect = (selectedProvider == DemProviderType::GoogleEarth) &&
-                                          config_.geEpochAutoDetect &&
-                                          config_.geMeshEnabled() &&
-                                          config_.rockMeshRenderEnabled &&  // P0: Kill-switch check
-                                          resolvedGeEpoch.empty();
-
-        if (wantGeEpochAutoDetect) {
-            if (!rockMeshManager_ && config_.rockMeshRenderEnabled) {  // P0: Kill-switch guard
-                rockMeshManager_ = std::make_unique<RockMeshManager>(config_);
-                if (!rockMeshManager_->Init()) {
-                    std::cerr << "[DEM] Warning: RockMesh manager init failed while resolving GE epoch\n";
-                    rockMeshManager_.reset();
-                } else {
-                    for (const auto& qk : config_.geMeshQuadKeys) {
-                        rockMeshManager_->Request(qk);
-                    }
-                }
-            }
-
-            if (rockMeshManager_) {
-                constexpr int kEpochResolveAttempts = 2;
-                for (int attempt = 0; attempt < kEpochResolveAttempts && resolvedGeEpoch.empty(); ++attempt) {
-                    const int waitMs = (attempt == 0) ? 900 : 1400;
-                    const auto deadline =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
-                    while (std::chrono::steady_clock::now() < deadline) {
-                        resolvedGeEpoch = rockMeshManager_->GetResolvedEpoch();
-                        if (!resolvedGeEpoch.empty()) {
-                            break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-                    }
-                    if (resolvedGeEpoch.empty() && attempt + 1 < kEpochResolveAttempts) {
-                        std::cerr << "[DEM] GE epoch auto-detect retrying..." << std::endl;
-                    }
-                }
-            }
-
-            if (!resolvedGeEpoch.empty()) {
-                std::cout << "[DEM] Auto-resolved GE epoch from RockMesh: "
-                          << resolvedGeEpoch << "\n";
-            } else {
-                std::cerr << "[DEM] GE epoch auto-detect timed out; using default endpoint epoch token\n";
-            }
-        }
+        // Ge-startup resolver now provides GE epoch at startup.
+        // Runtime DEM init uses resolved configuration only and does not block on octree probing.
+        const std::string resolvedGeEpoch = config_.geEpoch.empty()
+                                                ? std::string("latest")
+                                                : config_.geEpoch;
 
         demConfig.providerType = selectedProvider;
         demConfig.meshN = config_.demMeshN;
@@ -3008,6 +2966,8 @@ void GlobeEngine::Render() {
     debugStats_.meshRevisionDoubleBumpTiles = meshRevisionDoubleBumpTilesFrame_;
     debugStats_.demCoEvictions = demCoEvictions_;
     debugStats_.tilesUsingAncestorDem = tilesUsingAncestorDem;
+    debugStats_.terrainMode = config_.resolvedTerrainMode;
+    debugStats_.terrainModeReason = config_.resolvedTerrainModeReason;
     debugStats_.seamGapP95M = seamGapP95M;
     debugStats_.seamGapMaxM = seamGapMaxM;
     debugStats_.cliffEdgeCount = cliffEdgeCount;
@@ -3092,6 +3052,8 @@ void GlobeEngine::Render() {
                   << " arrayInstSkips=" << debugStats_.instancedArraySkipsNotArray
                   << " arrayInstMissLayer=" << debugStats_.instancedArraySkipsMissingLayer
                   << " arraySinglePath=" << renderStats.arraySinglePathFallbacks
+                  << " terrainMode=" << (debugStats_.terrainMode.empty() ? "default" : debugStats_.terrainMode)
+                  << " modeReason=" << (debugStats_.terrainModeReason.empty() ? "n/a" : debugStats_.terrainModeReason)
                   << " fps=" << debugStats_.fps
                   << " frameMs=" << debugStats_.renderMs
                   << "\n";
@@ -3743,7 +3705,10 @@ void GlobeEngine::RenderDebugPanel() {
                 frameRequested_ = true;
             }
             
-            ImGui::Text("Terrain Mode: CPU Mesh Bake");
+            ImGui::Text("Terrain Mode: %s", debugStats_.terrainMode.empty() ? "unknown" : debugStats_.terrainMode.c_str());
+            if (!debugStats_.terrainModeReason.empty()) {
+                ImGui::Text("Terrain Mode Reason: %s", debugStats_.terrainModeReason.c_str());
+            }
             
             // P0-1: Atmosphere controls
             ImGui::Spacing();

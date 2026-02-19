@@ -29,6 +29,9 @@ public:
         int renderFallbackDivergenceLeaves = 0;  // Render leaf set still needed fallback due missing terrain
         int demUsedButCoverageMismatchLeaves = 0;  // DEM coverage exists, tile.demUsed is false
         int missing = 0;            // True gaps (no ancestor, no mesh)
+        int arrayMetadataInvalidSkips = 0;      // Renderable checks rejected due invalid array metadata
+        int arraySinglePathFallbacks = 0;       // Single-tile array fallback reasons
+        int arrayCrossfadeTo2dFallbacks = 0;    // Crossfade fallback from array metadata issue
     };
     
     RenderFrame(TileRenderer& tileRenderer, ShaderManager& shaderManager);

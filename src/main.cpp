@@ -2,6 +2,7 @@
 #include "camera/earth_camera.h"
 #include "core/ellipsoid.h"
 #include "io/ge_mesh_url_template.h"
+#include "io/providers/ge_startup_probe.h"
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
@@ -135,6 +136,134 @@ bool ParseBoolEnv(const char* envName, bool defaultValue, bool& out) {
               << "' (expected 1/0, true/false, yes/no, on/off). Ignoring.\n";
     out = defaultValue;
     return false;
+}
+
+struct TerrainModeParseIntent {
+    bool terrainModeSet = false;
+    globe::TerrainPipelineMode terrainMode = globe::TerrainPipelineMode::Auto;
+    bool explicitRockmeshSet = false;
+    bool explicitRockmeshEnabled = true;
+    bool explicitNoDem = false;
+    bool explicitNoRockmesh = false;
+    bool explicitDemProviderSet = false;
+    bool explicitDemProviderFromGoogleEarth = false;
+    std::string explicitDemProvider;
+};
+
+bool ParseTerrainMode(const char* value, globe::TerrainPipelineMode& out) {
+    if (!value || value[0] == '\0') {
+        return false;
+    }
+    if (std::strcmp(value, "auto") == 0) {
+        out = globe::TerrainPipelineMode::Auto;
+        return true;
+    }
+    if (std::strcmp(value, "ge-rockmesh") == 0) {
+        out = globe::TerrainPipelineMode::GeRockMesh;
+        return true;
+    }
+    if (std::strcmp(value, "terrain-rgb") == 0) {
+        out = globe::TerrainPipelineMode::TerrainRgbDem;
+        return true;
+    }
+    return false;
+}
+
+void ApplyStartupTileAuthFallback(globe::Config& config) {
+    if (config.geMeshEnabled() && config.geHeaders.empty()) {
+        if (const char* token = std::getenv(config.geTokenEnv.c_str())) {
+            std::string bearer = std::string("Bearer ") + token;
+            config.geHeaders.emplace_back("Authorization", bearer);
+        }
+    }
+}
+
+void ResolveTerrainPipelineMode(globe::Config& config, const TerrainModeParseIntent& intent) {
+    const bool baselineWasAuto = !intent.terrainModeSet ||
+                                intent.terrainMode == globe::TerrainPipelineMode::Auto;
+    const auto baselineMode = intent.terrainModeSet
+                                  ? intent.terrainMode
+                                  : globe::TerrainPipelineMode::Auto;
+
+    globe::TerrainPipelineMode resolved = baselineMode;
+    std::string reason = "default";
+
+    if (baselineMode == globe::TerrainPipelineMode::Auto) {
+        if (!config.geStartupProbeStrict) {
+            resolved = globe::TerrainPipelineMode::TerrainRgbDem;
+            reason = "auto probe disabled";
+        } else if (config.geMeshEnabled()) {
+            const auto probeResult = globe::ProbeGeStartupTerrainMode(config);
+            if (probeResult.success) {
+                resolved = globe::TerrainPipelineMode::GeRockMesh;
+                reason = std::string("probe=ok node=") +
+                         probeResult.probeNode +
+                         " epoch=" + probeResult.epoch;
+                config.geEpoch = probeResult.epoch;
+            } else {
+                resolved = globe::TerrainPipelineMode::TerrainRgbDem;
+                config.geEpoch.clear();
+                reason = std::string("probe=fail reason=") + probeResult.reason;
+            }
+        } else {
+            resolved = globe::TerrainPipelineMode::TerrainRgbDem;
+            reason = "mesh_endpoint_missing";
+        }
+    } else {
+        resolved = baselineMode;
+        reason = std::string("explicit=") +
+                 globe::TerrainPipelineModeToString(resolved);
+    }
+
+    if (resolved == globe::TerrainPipelineMode::GeRockMesh) {
+        config.demEnabled = false;
+        config.rockMeshRenderEnabled = !intent.explicitNoRockmesh;
+        config.demProvider = "terrain-rgb";
+    } else {
+        config.demEnabled = !intent.explicitNoDem;
+        config.rockMeshRenderEnabled = false;
+    }
+
+    // Legacy explicit override pass.
+    if (intent.explicitRockmeshSet) {
+        config.rockMeshRenderEnabled = intent.explicitRockmeshEnabled;
+    }
+    if (intent.explicitNoRockmesh) {
+        config.rockMeshRenderEnabled = false;
+    }
+
+    if (intent.explicitNoDem) {
+        config.demEnabled = false;
+    }
+
+    if (intent.explicitDemProviderSet) {
+        if (intent.explicitDemProviderFromGoogleEarth) {
+            std::cerr << "[TerrainMode] --dem-provider google-earth deprecated/disabled, remapped to terrain-rgb\n";
+            config.demProvider = "terrain-rgb";
+            config.demEnabled = true;
+        } else {
+            config.demProvider = intent.explicitDemProvider;
+            config.demEnabled = true;
+        }
+    }
+
+    bool safetyForced = false;
+    if (!config.demEnabled && !config.rockMeshRenderEnabled) {
+        config.demEnabled = true;
+        config.demProvider = "terrain-rgb";
+        resolved = globe::TerrainPipelineMode::TerrainRgbDem;
+        reason = reason + (reason.empty() ? "" : ", ") + "safety=forced terrain-rgb";
+        safetyForced = true;
+    }
+
+    config.resolvedTerrainMode = globe::TerrainPipelineModeToString(resolved);
+    config.resolvedTerrainModeReason = reason;
+
+    std::cout << "[TerrainMode] "
+              << (baselineWasAuto ? "auto" : globe::TerrainPipelineModeToString(baselineMode))
+              << " -> " << config.resolvedTerrainMode
+              << " (" << reason << ")";
+    std::cout << "\n";
 }
 
 std::string RedactSensitiveUrlParams(const std::string& input) {
@@ -385,7 +514,9 @@ int main(int argc, char** argv) {
     if (const char* env = std::getenv("NATIVE_GLOBE_TEXTURE_ARRAY")) {
         ParseBoolEnv("NATIVE_GLOBE_TEXTURE_ARRAY", false, config.useTexture2DArray);
     }
-    
+
+    TerrainModeParseIntent terrainIntent;
+
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--tile-url") == 0 && i + 1 < argc) {
@@ -406,7 +537,50 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.demProvider = provider;
-            config.demEnabled = true;
+            terrainIntent.explicitDemProviderSet = true;
+            terrainIntent.explicitDemProvider = provider;
+            terrainIntent.explicitDemProviderFromGoogleEarth = (std::strcmp(provider, "google-earth") == 0);
+        } else if (std::strcmp(argv[i], "--terrain-mode") == 0 && i + 1 < argc) {
+            const char* mode = argv[++i];
+            if (!ParseTerrainMode(mode, terrainIntent.terrainMode)) {
+                std::cerr << "Error: Invalid --terrain-mode '" << mode << "'\n"
+                          << "Valid modes: auto | ge-rockmesh | terrain-rgb\n";
+                return 1;
+            }
+            terrainIntent.terrainModeSet = true;
+        } else if (std::strcmp(argv[i], "--ge-probe-nodekey") == 0 && i + 1 < argc) {
+            const char* nodeKey = argv[++i];
+            if (!nodeKey || nodeKey[0] == '\0') {
+                std::cerr << "Error: --ge-probe-nodekey expects a non-empty quadkey\n";
+                return 1;
+            }
+            bool valid = true;
+            for (const char* p = nodeKey; *p; ++p) {
+                if (*p < '0' || *p > '7') {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) {
+                std::cerr << "Error: Invalid --ge-probe-nodekey '" << nodeKey << "'\n"
+                          << "Quadkey must contain only digits 0-7\n";
+                return 1;
+            }
+            config.geStartupProbeNodeKey = nodeKey;
+        } else if (std::strcmp(argv[i], "--ge-probe-timeout-sec") == 0 && i + 1 < argc) {
+            int timeoutSec = 0;
+            if (!ParseNumeric(argv[++i], timeoutSec, "--ge-probe-timeout-sec")) {
+                return 1;
+            }
+            if (timeoutSec <= 0 || timeoutSec > 60) {
+                std::cerr << "ERROR: --ge-probe-timeout-sec must be in [1,60]\n";
+                return 1;
+            }
+            config.geStartupProbeTimeoutSec = timeoutSec;
+        } else if (std::strcmp(argv[i], "--ge-startup-probe-strict") == 0) {
+            config.geStartupProbeStrict = true;
+        } else if (std::strcmp(argv[i], "--no-ge-startup-probe-strict") == 0) {
+            config.geStartupProbeStrict = false;
         } else if (std::strcmp(argv[i], "--dem-encoding") == 0 && i + 1 < argc) {
             const char* encoding = argv[++i];
             if (std::strcmp(encoding, "auto") != 0 &&
@@ -555,8 +729,14 @@ int main(int argc, char** argv) {
             config.geMeshEndpoint = argv[++i];
         } else if (std::strcmp(argv[i], "--no-rockmesh") == 0) {
             config.rockMeshRenderEnabled = false;  // Kill-switch
+            terrainIntent.explicitNoRockmesh = true;
+            terrainIntent.explicitRockmeshSet = true;
+            terrainIntent.explicitRockmeshEnabled = false;
         } else if (std::strcmp(argv[i], "--rockmesh") == 0) {
             config.rockMeshRenderEnabled = true;
+            terrainIntent.explicitRockmeshSet = true;
+            terrainIntent.explicitRockmeshEnabled = true;
+            terrainIntent.explicitNoRockmesh = false;
         } else if (std::strcmp(argv[i], "--no-atmosphere") == 0) {
             config.atmosphere.enabled = false;  // P0-1: Disable atmosphere
         } else if (std::strcmp(argv[i], "--atmosphere") == 0) {
@@ -743,6 +923,7 @@ int main(int argc, char** argv) {
             config.useDiskCache = false;
         } else if (std::strcmp(argv[i], "--no-dem") == 0) {
             config.demEnabled = false;
+            terrainIntent.explicitNoDem = true;
         } else if (std::strcmp(argv[i], "--no-distance-morph") == 0) {
             config.useDistanceBasedTerrainMorph = false;  // P2: Disable distance-based morph
         } else if (std::strcmp(argv[i], "--morph-range") == 0) {
@@ -845,6 +1026,11 @@ int main(int argc, char** argv) {
                       << "  --dem-mesh-n N    DEM mesh grid size per tile (>=2)\n"
                       << "  --dem-batch-size N    DEM parallel fetch batch size (default: 8, 1=sequential)\n"
                       << "  --dem-batch-backoff MS  Rate limit between batches in ms (default: 0=disabled)\n"
+                      << "  --terrain-mode MODE             auto | ge-rockmesh | terrain-rgb\n"
+                      << "  --ge-probe-nodekey QK           GE startup probe seed quadkey\n"
+                      << "  --ge-probe-timeout-sec SEC       GE startup probe timeout seconds\n"
+                      << "  --ge-startup-probe-strict        Require strict startup probe for GE mode (default: enabled)\n"
+                      << "  --no-ge-startup-probe-strict     Skip GE startup probe (fallback terrain-rgb)\n"
                       << "  --ge-elevation-endpoint URL  Google Earth elevation endpoint\n"
                       << "  --ge-elevation-path PATH     Override {path} in elevation URL (default: Elevation)\n"
                       << "  --ge-epoch EPOCH             Manual GE dataset epoch override\n"
@@ -958,7 +1144,10 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    
+
+    ApplyStartupTileAuthFallback(config);
+    ResolveTerrainPipelineMode(config, terrainIntent);
+
     AutoTuneMemoryCaches(config);
 
     std::cout << "Native Globe - Clean Architecture\n";
@@ -972,6 +1161,7 @@ int main(int argc, char** argv) {
         std::cout << "DEM URL: " << demDisplayUrl << "\n";
     }
     std::cout << "DEM Provider: " << config.demProvider << "\n";
+    std::cout << "Terrain Mode: " << config.resolvedTerrainMode << " (" << config.resolvedTerrainModeReason << ")\n";
     std::cout << "DEM Encoding: " << config.demEncoding << "\n";
     std::cout << "DEM API Key: " << (config.demApiKey.empty() ? "env/none" : "configured") << "\n";
     std::cout << "Tile Auth: " << (config.tileAuth.empty() ? "none" : "basic") << "\n";

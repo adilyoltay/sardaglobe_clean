@@ -62,6 +62,29 @@ inline int AdaptiveMeshSegments(int level, int meshSegments, int demMeshN, bool 
 }
 
 // Globe engine configuration
+// Terrain pipeline mode for startup decision.
+// Auto: run strict GE/NodeData probe and select GeRockMesh on success.
+// GeRockMesh: force GE 3D mesh mode (DEM disabled unless explicitly enabled).
+// TerrainRgbDem: force DEM terrain path.
+enum class TerrainPipelineMode {
+    Auto = 0,
+    GeRockMesh,
+    TerrainRgbDem
+};
+
+inline const char* TerrainPipelineModeToString(TerrainPipelineMode mode) {
+    switch (mode) {
+        case TerrainPipelineMode::Auto:
+            return "auto";
+        case TerrainPipelineMode::GeRockMesh:
+            return "ge-rockmesh";
+        case TerrainPipelineMode::TerrainRgbDem:
+            return "terrain-rgb";
+        default:
+            return "unknown";
+    }
+}
+
 struct Config {
     // Tile sources
     std::string tileUrl;              // Base tile URL template ({z}/{x}/{y})
@@ -187,6 +210,17 @@ struct Config {
     bool adaptiveResourceLimits = false;
     
     // Features
+    // Startup terrain pipeline policy (legacy compatibility preserved by startup resolver).
+    // Auto: probe GE NodeData availability -> ge-rockmesh on success, otherwise terrain-rgb.
+    TerrainPipelineMode terrainMode = TerrainPipelineMode::Auto;
+    // Probe policy and tuning.
+    bool geStartupProbeStrict = true;
+    std::string geStartupProbeNodeKey = "0213";
+    int geStartupProbeTimeoutSec = 5;
+    // Resolved startup mode and reason for telemetry/debug.
+    std::string resolvedTerrainMode = "";
+    std::string resolvedTerrainModeReason = "";
+
     bool demEnabled = true;           // Enable terrain by default (uses GE elevation API)
     bool vectorEnabled = false;
     bool wireframeMode = false;
@@ -274,10 +308,10 @@ struct Config {
     int demVisiblePinBudget = 1024;   // Max visible/neighbor DEM keys pinned against eviction
     // Height scale architecture: separated base scale and exaggeration for GE parity
     double demHeightScaleBase = 1.0;       // Base scale: Terrain-RGB → meters (true elevation)
-    double demExaggerationFactor = 2.5;    // Visual exaggeration for rendering (2.5x)
+    double demExaggerationFactor = 1.0;    // Visual exaggeration for rendering (1.0 = true scale)
     
     // DEPRECATED: Use demHeightScaleBase * demExaggerationFactor instead
-    double demHeightScale = 2.5;           // Legacy combined value for backward compatibility
+    double demHeightScale = 1.0;           // Legacy combined value for backward compatibility
     bool demRasterCoEviction = true;  // Evict DEM cache entries when matching raster tile is evicted
     int demEdgeBlendSegments = 2;     // Edge coherence blend band (in vertex rings). 0 disables blending.
     bool demDebug = false;            // Enable DEM debug logging

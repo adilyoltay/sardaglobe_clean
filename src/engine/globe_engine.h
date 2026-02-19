@@ -318,6 +318,8 @@ private:
         int meshRevisionBumpsFrame = 0;            // Tiles bumped once in single-commit stage
         int meshRevisionDoubleBumpTiles = 0;       // Tiles with >1 revision reason bit in a frame
         int tilesUsingAncestorDem = 0;
+        std::string terrainMode;                   // Resolved startup terrain mode
+        std::string terrainModeReason;             // Why that terrain mode was chosen
         size_t demCoEvictions = 0;
         double seamGapP95M = 0.0;
         double seamGapMaxM = 0.0;

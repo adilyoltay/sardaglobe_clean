@@ -24,7 +24,8 @@ bool HasValidArrayTexture(const Tile& tile) {
 bool HasRenderableRasterTexture(const Tile& tile,
                                uint32_t loadingTexture,
                                bool allowPlaceholder,
-                               bool useTextureArray) {
+                               bool useTextureArray,
+                               RenderFrame::TileDrawStats* stats) {
     if (tile.textureId == 0 || tile.mostlyBlackOpaqueRaster) {
         return false;
     }
@@ -33,13 +34,15 @@ bool HasRenderableRasterTexture(const Tile& tile,
     }
     if (useTextureArray) {
         if (tile.usesTextureArray) {
-            return HasValidArrayTexture(tile);
+            if (!HasValidArrayTexture(tile)) {
+                if (stats) {
+                    ++stats->arrayMetadataInvalidSkips;
+                    ++stats->arraySinglePathFallbacks;
+                }
+                return false;
+            }
+            return true;
         }
-
-        // Back-compat fallback: when array upload is disabled/failed but a valid
-        // 2D texture is available, allow rendering in 2D sampler mode.
-        // This prevents a full black screen when array path is partially
-        // unavailable at runtime.
         return true;
     }
     return true;
@@ -70,7 +73,7 @@ Tile* RenderFrame::FindRenderableAncestor(const TileKey& key,
         if (it != tiles.end()) {
             Tile& tile = it->second;
             const bool hasSurfaceGeometry = HasRenderableSurface(tile);
-            const bool hasTexture = HasRenderableRasterTexture(tile, loadingTexture, allowPlaceholder, useTextureArray);
+            const bool hasTexture = HasRenderableRasterTexture(tile, loadingTexture, allowPlaceholder, useTextureArray, nullptr);
             if (hasSurfaceGeometry && hasTexture) {
                 return &tile;
             }
@@ -145,7 +148,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
             if (it != tiles.end()) {
                 Tile& tile = it->second;
                 const bool hasSurfaceGeometry = HasRenderableSurface(tile);
-                const bool hasTexture = HasRenderableRasterTexture(tile, loadingTexture, allowPlaceholder, useTextureArray);
+                const bool hasTexture = HasRenderableRasterTexture(tile, loadingTexture, allowPlaceholder, useTextureArray, nullptr);
                 if (hasSurfaceGeometry && hasTexture) {
                     bool hasTerrain = tile.demUsed;
                     if (!hasTerrain) {
@@ -212,7 +215,7 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         
         // Treat loading texture as placeholder-only content.
         // It should not participate in normal leaf rendering or ancestor fallback.
-        const bool hasRealTexture = HasRenderableRasterTexture(tile, loadingTexture, false, useTextureArray);
+        const bool hasRealTexture = HasRenderableRasterTexture(tile, loadingTexture, false, useTextureArray, &stats);
         bool hasRequiredTerrain = true;
         if (requireTerrainForLeaves) {
             hasRequiredTerrain = tile.demUsed;
@@ -394,6 +397,21 @@ RenderFrame::TileDrawStats RenderFrame::DrawTiles(
         // Transparent or mostly-black tiles need ancestor underlay, which the
         // instanced path does not support (no per-tile crossfade/fallback).
         if (tile.hasTransparentPixels || tile.mostlyBlackOpaqueRaster) return false;
+        if (useTextureArray) {
+            if (!tile.usesTextureArray) {
+                ++stats.arrayMetadataInvalidSkips;
+                ++stats.arraySinglePathFallbacks;
+                return false;
+            }
+            if (tile.textureArrayLayer < 0 ||
+                tile.textureLayerHandle < 0 ||
+                tile.textureArrayTier < 0 ||
+                tile.textureId == 0) {
+                ++stats.arrayMetadataInvalidSkips;
+                ++stats.arraySinglePathFallbacks;
+                return false;
+            }
+        }
         if (!tile.atlasAllocated) return false;
         if (tile.textureId == 0) return false;
         if (tile.builtSegments <= 1) return false;

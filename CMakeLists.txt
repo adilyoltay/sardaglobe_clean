@@ -101,6 +101,7 @@ add_executable(native_globe
   src/io/providers/google_earth_elevation_provider.cpp
   src/io/providers/google_earth_dem_provider.cpp
   src/io/providers/google_earth_nodedata_client.cpp
+  src/io/providers/ge_startup_probe.cpp
   src/io/providers/rocktree_node_data_parser.cpp
   src/io/providers/planetoid_metadata_parser.cpp
   src/io/providers/bulk_metadata_parser.cpp

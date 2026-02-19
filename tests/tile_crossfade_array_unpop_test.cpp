@@ -21,7 +21,7 @@ bool Expect(bool condition, const char* message) {
 int main() {
     int failures = 0;
 
-    // Test 1: API must include unpop array layer + mode parameters.
+    // Test 1: API must include explicit unpop mode and layer parameters.
     using CrossfadeSig = void (globe::TileRenderer::*)(
         const globe::Tile&,
         uint32_t,
@@ -29,13 +29,9 @@ int main() {
         globe::TileRenderer::TextureTarget,
         const glm::vec4&,
         float,
-        uint32_t,
-        float,
-        float,
-        const glm::vec4&,
         float);
     if (!Expect(std::is_same_v<decltype(&globe::TileRenderer::RenderTileWithCrossfade), CrossfadeSig>,
-                "RenderTileWithCrossfade must accept explicit unpop target enum")) {
+                "RenderTileWithCrossfade must accept explicit unpop target enum and metadata")) {
         failures++;
     } else {
         std::cerr << "PASSED: TileRendererCrossfadeSignature\n";
