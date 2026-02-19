@@ -2834,20 +2834,54 @@ void GlobeEngine::Render() {
         bool cullWasEnabled = glIsEnabled(GL_CULL_FACE);
         glDisable(GL_CULL_FACE);
         
-        // Bind tile shader with neutral uniforms
-        // Faz 1C: RockMeshManager now handles per-mesh RTE uniforms internally
+        // Bind tile shader with deterministic uniform state for RockMesh pass.
+        // The tile shader carries many uniforms from the previous tile batch —
+        // every one must be explicitly reset to safe defaults to prevent stale
+        // state from leaking into the RockMesh draw calls.
         GLuint tileProgram = shaderManager_->GetTileProgram();
         if (tileProgram != 0) {
             glUseProgram(tileProgram);
             
-            // Set global uniforms for rockmesh rendering
-            // uTerrainMorph = 1.0 (fully morphed)
+            // --- Global uniforms (set once per RockMesh pass) ---
+            GLint mvpLoc = glGetUniformLocation(tileProgram, "uMVP");
+            if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+            
+            // Terrain morph: 1.0 = fully morphed (no displacement reduction)
             GLint morphLoc = glGetUniformLocation(tileProgram, "uTerrainMorph");
             if (morphLoc >= 0) glUniform1f(morphLoc, 1.0f);
             
-            // MVP matrix (per-mesh uniforms like uFade, uTexScaleOffsetMain, RTE are set by RockMeshManager)
-            GLint mvpLoc = glGetUniformLocation(tileProgram, "uMVP");
-            if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+            // Log-depth: must match tile pass to share depth buffer correctly
+            bool useLogDepth = config_.logDepthEnabled && !config_.reversedZEnabled;
+            GLint logDepthLoc = glGetUniformLocation(tileProgram, "uUseLogDepth");
+            if (logDepthLoc >= 0) glUniform1i(logDepthLoc, useLogDepth ? 1 : 0);
+            GLint logDepthFarLoc = glGetUniformLocation(tileProgram, "uLogDepthFar");
+            if (logDepthFarLoc >= 0) glUniform1f(logDepthFarLoc, currentFarPlaneKm_);
+            
+            // Crossfade/unpop: disabled for RockMesh (no tile ancestor blending)
+            GLint crossfadeLoc = glGetUniformLocation(tileProgram, "uRasterCrossfade");
+            if (crossfadeLoc >= 0) glUniform1i(crossfadeLoc, 0);
+            GLint unpopBlendLoc = glGetUniformLocation(tileProgram, "uUnpopBlend");
+            if (unpopBlendLoc >= 0) glUniform1f(unpopBlendLoc, 0.0f);
+            
+            // Corner LODs: no bilinear LOD interpolation for RockMesh
+            GLint cornerLodsLoc = glGetUniformLocation(tileProgram, "uCornerLods");
+            if (cornerLodsLoc >= 0) glUniform4f(cornerLodsLoc, 0.0f, 0.0f, 0.0f, 0.0f);
+            
+            // Distance-based morph: disabled (use uTerrainMorph directly)
+            GLint distMorphLoc = glGetUniformLocation(tileProgram, "uUseDistanceBasedMorph");
+            if (distMorphLoc >= 0) glUniform1i(distMorphLoc, 0);
+            
+            // Texture2D mode: RockMesh uses its own GL_TEXTURE_2D on unit 0
+            // Force 2D path to avoid sampler2DArray mismatch from tile batch
+            GLint useTexture2DLoc = glGetUniformLocation(tileProgram, "uUseTexture2D");
+            if (useTexture2DLoc >= 0) glUniform1i(useTexture2DLoc, 1);
+            
+            // Sampler binding: uTexture → unit 0 (RockMesh binds its texture there)
+            GLint textureLoc = glGetUniformLocation(tileProgram, "uTexture");
+            if (textureLoc >= 0) glUniform1i(textureLoc, 0);
+            
+            // Per-mesh uniforms (uFade, uTexScaleOffsetMain, RTE origin) are
+            // set by RockMeshManager::Render() for each draw call.
         }
         
         // Draw all rockmeshes

@@ -1279,9 +1279,14 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         
         glm::vec3 n = glm::normalize(cross);
         
-        // Outward enforce
-        glm::vec3 centerPos = (p0 + p1 + p2) / 3.0f;
-        if (glm::dot(n, centerPos) < 0.0f) {
+        // Outward enforce: use world-space triangle center as radial reference.
+        // In RTE space p0/p1/p2 are small offsets near origin, so the old
+        // dot(n, centerPos) test was nearly random. World-space positions
+        // (worldPositions[]) have magnitude ~6371 km and point radially
+        // outward from Earth center, giving a reliable outward direction.
+        glm::dvec3 centerWorld = (worldPositions[i0] + worldPositions[i1] + worldPositions[i2]) / 3.0;
+        glm::vec3 outwardDir = glm::normalize(glm::vec3(centerWorld));
+        if (glm::dot(n, outwardDir) < 0.0f) {
             n = -n;
         }
         
