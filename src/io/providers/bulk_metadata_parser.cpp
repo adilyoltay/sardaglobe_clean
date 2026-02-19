@@ -27,13 +27,14 @@ OctreeNodeMeta ParseNodeEntry(const std::vector<uint8_t>& entryData) {
             case 1:
                 if (wireType == protobuf::WireType::Varint) {
                     meta.flags = static_cast<uint32_t>(decoder.DecodeVarint());
-                    // Flags encoding (from GE WASM RE):
+                    // Flags encoding (verified via GE server testing):
                     // Bit 0: hasNodeData (mesh available)
-                    // Bits 1-8: child availability bitmask (children 0-7)
-                    // Bit 9+: hasBulkMetadata (deeper hierarchy available)
+                    // Bit 1: hasBulkMetadata (deeper hierarchy available)
+                    // Bits 2+: texture format availability (not used for tree structure)
+                    // Tree is a DENSE QUADTREE (4 children per node, digits 0-3).
                     meta.hasNodeData = (meta.flags & 0x01) != 0;
-                    meta.availableChildren = static_cast<uint8_t>((meta.flags >> 1) & 0xFF);
-                    meta.hasBulkMetadata = (meta.flags & (1 << 9)) != 0;
+                    meta.hasBulkMetadata = (meta.flags & 0x02) != 0;
+                    meta.availableChildren = 0x0F;  // Dense quadtree: all 4 children implicit
                 } else {
                     decoder.SkipField(wireType);
                 }

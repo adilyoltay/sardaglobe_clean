@@ -48,7 +48,8 @@ GoogleEarthNodeDataClient::BuildHeaders() const {
     return result;
 }
 
-NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeKey) {
+NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeKey,
+                                                         const std::string& epochOverride) {
     NodeDataResult result;
     
     if (endpointTemplate_.empty()) {
@@ -57,11 +58,13 @@ NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeK
     }
     
     // Resolve {epoch} placeholder in template before building URL
+    // Use epochOverride (per-node epoch from BulkMetadata) if provided
+    const std::string& effectiveEpoch = epochOverride.empty() ? epoch_ : epochOverride;
     std::string tmpl = endpointTemplate_;
-    if (!epoch_.empty()) {
+    if (!effectiveEpoch.empty()) {
         size_t epochPos = tmpl.find("{epoch}");
         if (epochPos != std::string::npos) {
-            tmpl.replace(epochPos, 7, epoch_);
+            tmpl.replace(epochPos, 7, effectiveEpoch);
         }
     }
 

@@ -1017,6 +1017,24 @@ target_compile_definitions(rocktree_octree_mapping_test PRIVATE NATIVE_GLOBE_TES
 target_link_libraries(rocktree_octree_mapping_test PRIVATE glm::glm CURL::libcurl)
 add_test(NAME RockTreeOctreeMappingTest COMMAND rocktree_octree_mapping_test)
 
+# Quadtree epoch ancestor chain and MSB alternation rule test
+add_executable(quadtree_epoch_msb_test
+  tests/quadtree_epoch_msb_test.cpp
+  src/io/providers/rocktree_octree_index.cpp
+  src/io/providers/planetoid_metadata_parser.cpp
+  src/io/providers/bulk_metadata_parser.cpp
+  src/io/providers/ge_rate_limiter.cpp
+  src/io/providers/http_transport.cpp
+  src/io/providers/protobuf_wire.cpp
+  src/io/providers/dem_fetch_result.cpp
+)
+target_include_directories(quadtree_epoch_msb_test PRIVATE
+  src
+)
+target_compile_definitions(quadtree_epoch_msb_test PRIVATE NATIVE_GLOBE_TESTING)
+target_link_libraries(quadtree_epoch_msb_test PRIVATE glm::glm CURL::libcurl)
+add_test(NAME QuadtreeEpochMsbTest COMMAND quadtree_epoch_msb_test)
+
 # Tile crossfade + array-unpop compatibility test
 add_executable(tile_crossfade_array_unpop_test
   tests/tile_crossfade_array_unpop_test.cpp

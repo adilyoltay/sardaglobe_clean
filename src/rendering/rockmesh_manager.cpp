@@ -191,12 +191,11 @@ void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleL
                     visibleKeys.insert(path);
                 }
 
-                // Request BulkMetadata for deeper exploration if not yet fetched
+                // Request BulkMetadata for deeper exploration if node has it available
                 if (!octreeIndex_->IsBulkMetadataFetched(path) &&
-                    path.length() >= 2) {
-                    // Request BulkMetadata for the parent prefix that covers this depth
-                    std::string prefix = path.substr(0, std::min(path.length(), size_t(4)));
-                    octreeIndex_->RequestBulkMetadata(prefix);
+                    path.length() >= 2 &&
+                    octreeIndex_->HasBulkMetadataAvailable(path)) {
+                    octreeIndex_->RequestBulkMetadata(path);
                 }
 
                 // Get children with data for close tiles
@@ -1014,12 +1013,19 @@ void RockMeshManager::WorkerLoop() {
         
         // Fetch from network if cache miss (with rate limiting)
         if (!cacheHit) {
+            // Look up per-node epoch from BulkMetadata (fixes HTTP 400)
+            std::string nodeEpoch;
+            if (octreeIndex_ && octreeIndex_->IsInitialized()) {
+                uint32_t ep = octreeIndex_->GetNodeEpoch(nodeKey);
+                nodeEpoch = std::to_string(ep);
+            }
             if (config_.rockMeshRuntimeDebug) {
-                std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey << "\n";
+                std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey
+                          << " epoch=" << (nodeEpoch.empty() ? lastEpoch : nodeEpoch) << "\n";
                 std::cout.flush();
             }
             if (rateLimiter_) rateLimiter_->WaitForSlot();
-            fetchResult = client.FetchNodeData(nodeKey);
+            fetchResult = client.FetchNodeData(nodeKey, nodeEpoch);
         }
         if (!fetchResult.success) {
             // Classify HTTP error

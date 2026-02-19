@@ -1,7 +1,8 @@
-// RockTree Octree Index
-// Lazy octree discovery for Google Earth RockTree mesh data
-// Fetches PlanetoidMetadata (epoch) + BulkMetadata (child availability)
-// and provides octree path lookups for mesh loading.
+// RockTree Quadtree Index
+// Lazy quadtree discovery for Google Earth RockTree mesh data.
+// GE RockTree uses a dense 4-ary quadtree (digits 0-3), NOT an 8-ary octree.
+// Fetches PlanetoidMetadata (epoch) + BulkMetadata (node metadata)
+// and provides quadtree path lookups for mesh loading.
 
 #pragma once
 
@@ -20,16 +21,16 @@
 
 namespace globe {
 
-// Octree node info cached in the index
+// Quadtree node info cached in the index
 struct OctreeNodeInfo {
     bool hasNodeData = false;         // This node has mesh data
     bool hasBulkMetadata = false;     // Deeper hierarchy available
-    uint8_t availableChildren = 0;    // Bitmask: which children (0-7) have data
-    uint32_t epoch = 0;               // Node's epoch
+    uint8_t availableChildren = 0;    // Bitmask: which children (0-3) exist (0x0F = all 4)
+    uint32_t epoch = 0;               // Node's epoch (0 = inherit from ancestor)
     bool bulkMetadataFetched = false; // BulkMetadata already fetched for this subtree
 };
 
-// RockTree Octree Index — lazy discovery of Google Earth mesh hierarchy
+// RockTree Quadtree Index — lazy discovery of Google Earth mesh hierarchy
 class RockTreeOctreeIndex {
 public:
     explicit RockTreeOctreeIndex(const Config& config,
@@ -48,14 +49,20 @@ public:
     // Get earth radius in meters
     double GetEarthRadiusM() const { return earthRadiusM_; }
 
-    // Check if a specific octree path has mesh data
+    // Check if a specific quadtree path has mesh data
     bool HasNodeData(const std::string& path) const;
 
-    // Get available children for a path (bitmask 0-7)
+    // Get available children for a path (bitmask 0-3, dense quadtree = 0x0F)
     uint8_t GetAvailableChildren(const std::string& path) const;
 
     // Get all children paths that have data for a given parent
     std::vector<std::string> GetChildrenWithData(const std::string& parentPath) const;
+
+    // Get epoch for a specific node path (walks ancestor chain; falls back to global epoch)
+    uint32_t GetNodeEpoch(const std::string& path) const;
+
+    // Check if a node has deeper BulkMetadata available (hasBulkMetadata flag)
+    bool HasBulkMetadataAvailable(const std::string& path) const;
 
     // Get renderable node paths within a depth range.
     // Returns paths with mesh data in [minDepth, maxDepth], ordered
@@ -111,7 +118,7 @@ private:
     double earthRadiusM_ = 0.0;
     std::atomic<bool> initialized_{false};
 
-    // Octree node index: path -> node info
+    // Quadtree node index: path -> node info
     mutable std::mutex nodesMutex_;
     std::unordered_map<std::string, OctreeNodeInfo> nodes_;
 
@@ -136,11 +143,6 @@ private:
 
     // Populate nodes_ from parsed BulkMetadata
     void PopulateNodes(const BulkMetadataResult& bulk);
-
-    // Build octree path from BulkMetadata index.
-    // Root BulkMetadata path entries are materialized into deterministic BFS-decoded
-    // descendant paths before runtime lookup.
-    static std::string BuildOctreePath(const std::string& basePath, int nodeIndex, int level);
 
     // Shared helper: collect nodes with mesh data filtered by inclusive depth range and
     // optional fixed prefix. Result is deterministically sorted by depth then lexicographic
