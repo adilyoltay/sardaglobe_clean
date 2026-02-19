@@ -158,6 +158,9 @@ struct Config {
                geMeshEndpoint.find("{quadkey}") != std::string::npos;
     }
     
+    // RockMesh runtime debug (per-mesh fetch/parse/build/upload logs)
+    bool rockMeshRuntimeDebug = false;              // Gate verbose [RockMesh:Worker/Upload] logs
+    
     // RockMesh (NodeData) vertex explosion mitigation (P0-P2)
     bool rockMeshRenderEnabled = true;              // Master kill-switch for RockMesh
     bool rockMeshSanityEnabled = true;              // Enable validation gates

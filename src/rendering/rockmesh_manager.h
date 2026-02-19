@@ -165,6 +165,13 @@ public:
         // P0: Stale upload tracking
         int staleUploadSkips = 0;             // Uploads skipped due to stale token
         int staleUploadBytes = 0;             // Bytes of stale uploads skipped
+        
+        // HTTP error classification
+        int failedHttp400Count = 0;           // Bad request (invalid node key format)
+        int failedHttp404Count = 0;           // Not found (node has no mesh data)
+        int failedHttpOtherCount = 0;         // Other HTTP errors
+        int failedNetworkCount = 0;           // Network/timeout errors
+        int blacklistSkipCount = 0;           // Skipped due to terminal error blacklist
     };
     Stats GetStats() const;
     
@@ -225,6 +232,14 @@ private:
     
     // Sprint 2.3: Final visible mesh keys after hierarchy processing
     std::unordered_set<std::string> visibleMeshKeys_;
+    
+    // Terminal error blacklist: keys that returned 400/404 get a cooldown
+    // to avoid wasting bandwidth on permanently failing paths
+    mutable std::mutex blacklistMutex_;
+    std::unordered_map<std::string, double> blacklistedKeys_;  // nodeKey → expiry time (glfwGetTime)
+    static constexpr double BLACKLIST_COOLDOWN_SEC = 300.0;    // 5 min cooldown for 400/404
+    bool IsBlacklisted(const std::string& key) const;
+    void BlacklistKey(const std::string& key);
     
     // Worker main loop
     void WorkerLoop();

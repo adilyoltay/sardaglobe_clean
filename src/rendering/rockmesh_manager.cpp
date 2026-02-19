@@ -543,14 +543,18 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
         }
         
         // Create GPU mesh
-        std::cout << "[RockMesh:Upload] GPU CREATE: " << cpu.id
-                  << " verts=" << cpu.vertices.size() / 9
-                  << " idx=" << cpu.indices.size()
-                  << " tex=" << (cpu.hasTexture ? "yes" : "no")
-                  << " rgba=" << cpu.rgba.size() << "B\n";
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Upload] GPU CREATE: " << cpu.id
+                      << " verts=" << cpu.vertices.size() / 9
+                      << " idx=" << cpu.indices.size()
+                      << " tex=" << (cpu.hasTexture ? "yes" : "no")
+                      << " rgba=" << cpu.rgba.size() << "B\n";
+        }
         RockMeshGpu gpu;
         if (gpu.Create(cpu, fallbackTexture_)) {
-            std::cout << "[RockMesh:Upload] GPU OK: " << cpu.id << "\n";
+            if (config_.rockMeshRuntimeDebug) {
+                std::cout << "[RockMesh:Upload] GPU OK: " << cpu.id << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
             if (it != entries_.end()) {
@@ -566,6 +570,7 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             }
             guard.clear();  // Explicit clear for success path
         } else {
+            // GPU failures always log (rare, indicates real problem)
             std::cerr << "[RockMesh:Upload] GPU FAILED: " << cpu.id << "\n";
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
@@ -616,6 +621,19 @@ void RockMeshManager::UpdateFades(float deltaTime) {
             }
         }
     }
+}
+
+// Terminal error blacklist helpers
+bool RockMeshManager::IsBlacklisted(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(blacklistMutex_);
+    auto it = blacklistedKeys_.find(key);
+    if (it == blacklistedKeys_.end()) return false;
+    return glfwGetTime() < it->second;  // Still within cooldown
+}
+
+void RockMeshManager::BlacklistKey(const std::string& key) {
+    std::lock_guard<std::mutex> lock(blacklistMutex_);
+    blacklistedKeys_[key] = glfwGetTime() + BLACKLIST_COOLDOWN_SEC;
 }
 
 // Phase 6: Added shaderProgram parameter for per-mesh fade
@@ -975,29 +993,59 @@ void RockMeshManager::WorkerLoop() {
             }
         }
         
+        // Check blacklist before fetching (avoid wasting bandwidth on known-bad keys)
+        if (IsBlacklisted(nodeKey)) {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end()) {
+                it->second.state = RockMeshState::Failed;
+                it->second.error = "blacklisted (terminal HTTP error)";
+            }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.blacklistSkipCount++;
+            }
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
+            continue;
+        }
+        
         // Fetch from network if cache miss (with rate limiting)
         if (!cacheHit) {
-            std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey 
-                      << " (rate-limit wait...)\n";
-            std::cout.flush();
+            if (config_.rockMeshRuntimeDebug) {
+                std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey << "\n";
+                std::cout.flush();
+            }
             if (rateLimiter_) rateLimiter_->WaitForSlot();
-            std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey 
-                      << " (HTTP GET...)\n";
-            std::cout.flush();
             fetchResult = client.FetchNodeData(nodeKey);
         }
         if (!fetchResult.success) {
-            std::cerr << "[RockMesh:Worker] FETCH FAILED: " << nodeKey 
-                      << " err=" << fetchResult.errorMessage << "\n";
+            // Classify HTTP error
+            int httpCode = fetchResult.httpCode;
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.failureCount++;
+                if (httpCode == 400) stats_.failedHttp400Count++;
+                else if (httpCode == 404) stats_.failedHttp404Count++;
+                else if (httpCode > 0) stats_.failedHttpOtherCount++;
+                else stats_.failedNetworkCount++;
+            }
+            // Blacklist terminal errors (400/404 won't change on retry)
+            if (httpCode == 400 || httpCode == 404) {
+                BlacklistKey(nodeKey);
+            }
+            if (config_.rockMeshRuntimeDebug) {
+                std::cerr << "[RockMesh:Worker] FETCH FAILED: " << nodeKey 
+                          << " http=" << httpCode
+                          << " err=" << fetchResult.errorMessage << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = fetchResult.errorMessage;
-            }
-            {
-                std::lock_guard<std::mutex> statsLock(statsMutex_);
-                stats_.failureCount++;
             }
             // Remove from in-flight
             {
@@ -1037,13 +1085,17 @@ void RockMeshManager::WorkerLoop() {
         }
         
         // Parse
-        std::cout << "[RockMesh:Worker] FETCH OK: " << nodeKey 
-                  << " bytes=" << fetchResult.data.size()
-                  << (cacheHit ? " (cache)" : " (network)") << "\n";
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Worker] FETCH OK: " << nodeKey 
+                      << " bytes=" << fetchResult.data.size()
+                      << (cacheHit ? " (cache)" : " (network)") << "\n";
+        }
         ParsedNodeData parsed = RockTreeNodeDataParser::Parse(fetchResult.data);
         if (!parsed.success) {
-            std::cerr << "[RockMesh:Worker] PARSE FAILED: " << nodeKey
-                      << " err=" << parsed.error << "\n";
+            if (config_.rockMeshRuntimeDebug) {
+                std::cerr << "[RockMesh:Worker] PARSE FAILED: " << nodeKey
+                          << " err=" << parsed.error << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1061,13 +1113,15 @@ void RockMeshManager::WorkerLoop() {
             }
             continue;
         }
-        std::cout << "[RockMesh:Worker] PARSE OK: " << nodeKey
-                  << " V=" << parsed.vertexCount
-                  << " T=" << parsed.triangleCount
-                  << " tex=" << (parsed.texture.valid ? "yes" : "no")
-                  << " uv=" << (parsed.hasTexCoords ? "yes" : "no")
-                  << " normals=" << (parsed.hasNormals ? "yes" : "no")
-                  << "\n";
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Worker] PARSE OK: " << nodeKey
+                      << " V=" << parsed.vertexCount
+                      << " T=" << parsed.triangleCount
+                      << " tex=" << (parsed.texture.valid ? "yes" : "no")
+                      << " uv=" << (parsed.hasTexCoords ? "yes" : "no")
+                      << " normals=" << (parsed.hasNormals ? "yes" : "no")
+                      << "\n";
+        }
         
         // Build CPU mesh and carry upload epoch from entry
         RockMeshCpu cpu = BuildMesh(nodeKey, parsed);
@@ -1104,8 +1158,10 @@ void RockMeshManager::WorkerLoop() {
         }
         
         if (!cpu.valid) {
-            std::cerr << "[RockMesh:Worker] BUILD FAILED: " << nodeKey
-                      << " err=" << (cpu.error.empty() ? "unknown" : cpu.error) << "\n";
+            if (config_.rockMeshRuntimeDebug) {
+                std::cerr << "[RockMesh:Worker] BUILD FAILED: " << nodeKey
+                          << " err=" << (cpu.error.empty() ? "unknown" : cpu.error) << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1123,14 +1179,15 @@ void RockMeshManager::WorkerLoop() {
             }
             continue;
         }
-        std::cout << "[RockMesh:Worker] BUILD OK: " << nodeKey
-                  << " verts=" << cpu.vertices.size() / 9
-                  << " idx=" << cpu.indices.size()
-                  << " tex=" << (cpu.hasTexture ? "yes" : "no")
-                  << " rgba=" << cpu.rgba.size() << "B\n";
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Worker] BUILD OK: " << nodeKey
+                      << " verts=" << cpu.vertices.size() / 9
+                      << " idx=" << cpu.indices.size()
+                      << " tex=" << (cpu.hasTexture ? "yes" : "no")
+                      << " rgba=" << cpu.rgba.size() << "B\n";
+        }
         
         // Queue for upload
-        std::cout << "[RockMesh:Worker] QUEUING for upload: " << nodeKey << "\n";
         if (!uploadQueue_.Push(std::move(cpu))) {
             // Upload queue full or closed
             std::lock_guard<std::mutex> lock(stateMutex_);

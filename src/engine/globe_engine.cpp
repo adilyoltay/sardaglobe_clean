@@ -2170,31 +2170,32 @@ void GlobeEngine::Update(double dt, double currentTime) {
         // Phase 6: Update fade values for seamless transitions
         rockMeshManager_->UpdateFades(static_cast<float>(dt));
         
-        // Runtime debug: periodic state distribution dump (every ~5s, first 30s only)
+        // Runtime debug: periodic state distribution dump
+        // Always runs first 30s (6 dumps); afterwards only if rockMeshRuntimeDebug is on
         {
             static double lastDumpTime = 0.0;
             static int dumpCount = 0;
             double now = glfwGetTime();
-            if (dumpCount < 6 && now - lastDumpTime > 5.0) {
+            bool shouldDump = (dumpCount < 6 || config_.rockMeshRuntimeDebug) 
+                              && now - lastDumpTime > 5.0;
+            if (shouldDump) {
                 lastDumpTime = now;
                 dumpCount++;
                 auto rs = rockMeshManager_->GetStats();
                 size_t uploaded = rockMeshManager_->GetUploadedCount();
                 std::cout << "[RockMesh:Pipeline] t=" << static_cast<int>(now) << "s"
                           << " uploaded=" << uploaded
-                          << " requested=" << rs.requestedCount
-                          << " enqueued=" << rs.enqueuedCount
-                          << " dispatched=" << rs.priorityDispatchedCount
-                          << " inFlight=" << rs.inFlightCount
                           << " failed=" << rs.failureCount
+                          << " (400:" << rs.failedHttp400Count
+                          << " 404:" << rs.failedHttp404Count
+                          << " net:" << rs.failedNetworkCount
+                          << " other:" << rs.failedHttpOtherCount << ")"
+                          << " blacklisted=" << rs.blacklistSkipCount
+                          << " inFlight=" << rs.inFlightCount
                           << " staleDrops=" << rs.staleDropCount
                           << " genDrops=" << rs.generationDrops
-                          << " uploadQDrops=" << rs.uploadQueueDrops
-                          << " staleSkips=" << rs.staleUploadSkips
-                          << " diskHit=" << rs.diskCacheHits
-                          << " diskMiss=" << rs.diskCacheMisses
                           << "\n";
-                // Discard counters
+                // Discard counters (always show if nonzero)
                 int totalDiscards = rs.discardInvalidTransform + rs.discardInvalidScale +
                                     rs.discardInvalidBounds + rs.discardNonFiniteVertex +
                                     rs.discardAabbExceeded + rs.discardVertexDistanceExceeded;
@@ -3012,6 +3013,12 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshDiskCacheHits = rockStats.diskCacheHits;
         debugStats_.rockMeshDiskCacheMisses = rockStats.diskCacheMisses;
         debugStats_.rockMeshStaleDrops = rockStats.staleDropCount;
+        // HTTP error classification
+        debugStats_.rockMeshHttp400 = rockStats.failedHttp400Count;
+        debugStats_.rockMeshHttp404 = rockStats.failedHttp404Count;
+        debugStats_.rockMeshNetwork = rockStats.failedNetworkCount;
+        debugStats_.rockMeshHttpOther = rockStats.failedHttpOtherCount;
+        debugStats_.rockMeshBlacklisted = rockStats.blacklistSkipCount;
         // P0-P2: Vertex explosion mitigation counters
         debugStats_.rockMeshDiscardInvalidTransform = rockStats.discardInvalidTransform;
         debugStats_.rockMeshDiscardInvalidScale = rockStats.discardInvalidScale;
@@ -3548,6 +3555,14 @@ void GlobeEngine::RenderDebugPanel() {
                 ImGui::Text("Uploaded: %d", debugStats_.rockMeshUploaded);
                 ImGui::Text("Pending: %d | InFlight: %d", debugStats_.rockMeshPending, debugStats_.rockMeshInFlight);
                 ImGui::Text("Failed: %d | Stale Drops: %d", debugStats_.rockMeshFailed, debugStats_.rockMeshStaleDrops);
+                // HTTP error breakdown
+                if (debugStats_.rockMeshFailed > 0) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                                       "  HTTP 400:%d  404:%d  Net:%d  Other:%d  Blacklisted:%d",
+                                       debugStats_.rockMeshHttp400, debugStats_.rockMeshHttp404,
+                                       debugStats_.rockMeshNetwork, debugStats_.rockMeshHttpOther,
+                                       debugStats_.rockMeshBlacklisted);
+                }
                 ImGui::Text("Disk Cache Hit/Miss: %d / %d", 
                             debugStats_.rockMeshDiskCacheHits, debugStats_.rockMeshDiskCacheMisses);
                 // P0-P2: Vertex explosion mitigation telemetry
@@ -3948,6 +3963,19 @@ void GlobeEngine::RenderRockMeshes(const glm::mat4& mvp) {
     
     // Draw all rockmeshes
     rockMeshManager_->Render(tileProgram, config_.useRteRender);
+    
+    // GL error check after RockMesh draw (one-shot to avoid spam)
+    {
+        static bool glErrorChecked = false;
+        if (!glErrorChecked) {
+            GLenum err = glGetError();
+            if (err != GL_NO_ERROR) {
+                std::cerr << "[RockMesh:Render] GL error after draw: 0x" 
+                          << std::hex << err << std::dec << "\n";
+            }
+            glErrorChecked = true;
+        }
+    }
     
     // One-shot diagnostic log on first successful render
     if (!rockMeshFirstRenderLogged_) {

@@ -768,6 +768,8 @@ int main(int argc, char** argv) {
             config.atmosphere.turbidity = std::stof(argv[++i]);  // P0-1: Turbidity
         } else if (std::strcmp(argv[i], "--atmosphere-intensity") == 0 && i + 1 < argc) {
             config.atmosphere.intensity = std::stof(argv[++i]);  // P0-1: Intensity
+        } else if (std::strcmp(argv[i], "--rockmesh-debug") == 0) {
+            config.rockMeshRuntimeDebug = true;
         } else if (std::strcmp(argv[i], "--no-rockmesh-sanity") == 0) {
             config.rockMeshSanityEnabled = false;
         } else if (std::strcmp(argv[i], "--rockmesh-sanity") == 0) {
@@ -1041,6 +1043,7 @@ int main(int argc, char** argv) {
                       << "\nRockMesh (NodeData) Options:\n"
                       << "  --no-rockmesh                Disable RockMesh rendering (kill-switch)\n"
                       << "  --rockmesh                   Enable RockMesh rendering (default)\n"
+                      << "  --rockmesh-debug             Enable verbose per-mesh fetch/parse/build logs\n"
                       << "  --rockmesh-sanity            Enable mesh sanity checks (default)\n"
                       << "  --no-rockmesh-sanity         Disable mesh sanity checks\n"
                       << "  --rockmesh-max-bbox-km KM    Max bbox diagonal threshold (default: 100)\n"
