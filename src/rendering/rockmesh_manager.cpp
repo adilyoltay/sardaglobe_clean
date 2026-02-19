@@ -1052,8 +1052,10 @@ void RockMeshManager::WorkerLoop() {
             }
         }
         
-        // Check epoch freshness after build (may have gone stale during fetch+parse)
-        if (cpu.valid && !IsUploadEpochCurrent(nodeKey, cpu.uploadEpoch)) {
+        // Check epoch freshness after build (may have gone stale during fetch+parse).
+        // This runs regardless of cpu.valid — a stale build that also failed should
+        // still be counted as stale rather than as a build failure.
+        if (!IsUploadEpochCurrent(nodeKey, cpu.uploadEpoch)) {
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1062,7 +1064,10 @@ void RockMeshManager::WorkerLoop() {
             {
                 std::lock_guard<std::mutex> statsLock(statsMutex_);
                 stats_.staleUploadSkips++;
-                stats_.staleUploadBytes += static_cast<int>(cpu.vertices.size() * sizeof(float) + cpu.indices.size() * sizeof(uint32_t));
+                stats_.staleUploadBytes += static_cast<int>(
+                    cpu.vertices.size() * sizeof(float) +
+                    cpu.indices.size() * sizeof(uint32_t) +
+                    cpu.rgba.size());
             }
             {
                 std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
