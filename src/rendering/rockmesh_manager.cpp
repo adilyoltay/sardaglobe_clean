@@ -543,8 +543,14 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
         }
         
         // Create GPU mesh
+        std::cout << "[RockMesh:Upload] GPU CREATE: " << cpu.id
+                  << " verts=" << cpu.vertices.size() / 9
+                  << " idx=" << cpu.indices.size()
+                  << " tex=" << (cpu.hasTexture ? "yes" : "no")
+                  << " rgba=" << cpu.rgba.size() << "B\n";
         RockMeshGpu gpu;
         if (gpu.Create(cpu, fallbackTexture_)) {
+            std::cout << "[RockMesh:Upload] GPU OK: " << cpu.id << "\n";
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
             if (it != entries_.end()) {
@@ -560,6 +566,7 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             }
             guard.clear();  // Explicit clear for success path
         } else {
+            std::cerr << "[RockMesh:Upload] GPU FAILED: " << cpu.id << "\n";
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
             if (it != entries_.end()) {
@@ -970,10 +977,18 @@ void RockMeshManager::WorkerLoop() {
         
         // Fetch from network if cache miss (with rate limiting)
         if (!cacheHit) {
+            std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey 
+                      << " (rate-limit wait...)\n";
+            std::cout.flush();
             if (rateLimiter_) rateLimiter_->WaitForSlot();
+            std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey 
+                      << " (HTTP GET...)\n";
+            std::cout.flush();
             fetchResult = client.FetchNodeData(nodeKey);
         }
         if (!fetchResult.success) {
+            std::cerr << "[RockMesh:Worker] FETCH FAILED: " << nodeKey 
+                      << " err=" << fetchResult.errorMessage << "\n";
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1022,8 +1037,13 @@ void RockMeshManager::WorkerLoop() {
         }
         
         // Parse
+        std::cout << "[RockMesh:Worker] FETCH OK: " << nodeKey 
+                  << " bytes=" << fetchResult.data.size()
+                  << (cacheHit ? " (cache)" : " (network)") << "\n";
         ParsedNodeData parsed = RockTreeNodeDataParser::Parse(fetchResult.data);
         if (!parsed.success) {
+            std::cerr << "[RockMesh:Worker] PARSE FAILED: " << nodeKey
+                      << " err=" << parsed.error << "\n";
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1041,6 +1061,13 @@ void RockMeshManager::WorkerLoop() {
             }
             continue;
         }
+        std::cout << "[RockMesh:Worker] PARSE OK: " << nodeKey
+                  << " V=" << parsed.vertexCount
+                  << " T=" << parsed.triangleCount
+                  << " tex=" << (parsed.texture.valid ? "yes" : "no")
+                  << " uv=" << (parsed.hasTexCoords ? "yes" : "no")
+                  << " normals=" << (parsed.hasNormals ? "yes" : "no")
+                  << "\n";
         
         // Build CPU mesh and carry upload epoch from entry
         RockMeshCpu cpu = BuildMesh(nodeKey, parsed);
@@ -1077,6 +1104,8 @@ void RockMeshManager::WorkerLoop() {
         }
         
         if (!cpu.valid) {
+            std::cerr << "[RockMesh:Worker] BUILD FAILED: " << nodeKey
+                      << " err=" << (cpu.error.empty() ? "unknown" : cpu.error) << "\n";
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1094,8 +1123,14 @@ void RockMeshManager::WorkerLoop() {
             }
             continue;
         }
+        std::cout << "[RockMesh:Worker] BUILD OK: " << nodeKey
+                  << " verts=" << cpu.vertices.size() / 9
+                  << " idx=" << cpu.indices.size()
+                  << " tex=" << (cpu.hasTexture ? "yes" : "no")
+                  << " rgba=" << cpu.rgba.size() << "B\n";
         
         // Queue for upload
+        std::cout << "[RockMesh:Worker] QUEUING for upload: " << nodeKey << "\n";
         if (!uploadQueue_.Push(std::move(cpu))) {
             // Upload queue full or closed
             std::lock_guard<std::mutex> lock(stateMutex_);

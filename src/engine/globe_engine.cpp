@@ -2169,6 +2169,50 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
         // Phase 6: Update fade values for seamless transitions
         rockMeshManager_->UpdateFades(static_cast<float>(dt));
+        
+        // Runtime debug: periodic state distribution dump (every ~5s, first 30s only)
+        {
+            static double lastDumpTime = 0.0;
+            static int dumpCount = 0;
+            double now = glfwGetTime();
+            if (dumpCount < 6 && now - lastDumpTime > 5.0) {
+                lastDumpTime = now;
+                dumpCount++;
+                auto rs = rockMeshManager_->GetStats();
+                size_t uploaded = rockMeshManager_->GetUploadedCount();
+                std::cout << "[RockMesh:Pipeline] t=" << static_cast<int>(now) << "s"
+                          << " uploaded=" << uploaded
+                          << " requested=" << rs.requestedCount
+                          << " enqueued=" << rs.enqueuedCount
+                          << " dispatched=" << rs.priorityDispatchedCount
+                          << " inFlight=" << rs.inFlightCount
+                          << " failed=" << rs.failureCount
+                          << " staleDrops=" << rs.staleDropCount
+                          << " genDrops=" << rs.generationDrops
+                          << " uploadQDrops=" << rs.uploadQueueDrops
+                          << " staleSkips=" << rs.staleUploadSkips
+                          << " diskHit=" << rs.diskCacheHits
+                          << " diskMiss=" << rs.diskCacheMisses
+                          << "\n";
+                // Discard counters
+                int totalDiscards = rs.discardInvalidTransform + rs.discardInvalidScale +
+                                    rs.discardInvalidBounds + rs.discardNonFiniteVertex +
+                                    rs.discardAabbExceeded + rs.discardVertexDistanceExceeded;
+                if (totalDiscards > 0) {
+                    std::cout << "[RockMesh:Pipeline] DISCARDS=" << totalDiscards
+                              << " (tfm:" << rs.discardInvalidTransform
+                              << " scl:" << rs.discardInvalidScale
+                              << " bnd:" << rs.discardInvalidBounds
+                              << " vtx:" << rs.discardNonFiniteVertex
+                              << " aabb:" << rs.discardAabbExceeded
+                              << " dst:" << rs.discardVertexDistanceExceeded << ")\n";
+                }
+                if (uploaded == 0 && rs.failureCount > 0) {
+                    std::cerr << "[RockMesh:Pipeline] WARNING: " << rs.failureCount 
+                              << " failures, 0 uploads — check Worker/Upload logs above\n";
+                }
+            }
+        }
     }
     
     frameTimings_.meshBuildMs = (glfwGetTime() * 1000.0) - meshStartMs;
