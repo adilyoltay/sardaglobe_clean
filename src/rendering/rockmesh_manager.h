@@ -53,6 +53,9 @@ struct RockMeshEntry {
     double lastAccessTime = 0.0;     // For LRU cache eviction
     int priority = 0;                // Screen-space priority (higher = more important)
     
+    // Upload epoch for stale upload prevention
+    uint64_t uploadEpoch = 0;        // Monotonic epoch assigned at dispatch time
+    
     // Sprint 2.3: Seamless rendering fade
     float fade = 1.0f;               // Current fade value (0.0 = invisible, 1.0 = fully visible)
     float fadeRate = 3.0f;           // Fade speed (units per second)

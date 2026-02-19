@@ -102,6 +102,11 @@ void RockMeshManager::Shutdown() {
         std::lock_guard<std::mutex> queuedLock(queuedMutex_);
         queuedOrPendingKeys_.clear();
     }
+    // Clear upload epoch tracking
+    {
+        std::lock_guard<std::mutex> epochLock(uploadEpochMutex_);
+        uploadEpochByNode_.clear();
+    }
     
     // Destroy all GPU meshes
     std::lock_guard<std::mutex> lock(stateMutex_);
@@ -394,9 +399,10 @@ int RockMeshManager::ProcessPriorityQueue(double budgetMs) {
                 continue;
             }
             
-            // Update state to Fetching
+            // Update state to Fetching and allocate upload epoch
             it->second.state = RockMeshState::Fetching;
             it->second.generation = req.generation;
+            it->second.uploadEpoch = AllocateUploadEpoch(req.nodeKey);
         }
         
         // Try non-blocking push to requestQueue
@@ -515,6 +521,25 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
                 }
                 continue;  // guard destructor will clean in-flight
             }
+        }
+        
+        // Check upload epoch - drop if a newer request has been dispatched for this key
+        if (cpu.uploadEpoch != 0 && !IsUploadEpochCurrent(cpu.id, cpu.uploadEpoch)) {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(cpu.id);
+            if (it != entries_.end()) {
+                it->second.state = RockMeshState::Stale;
+            }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.staleUploadSkips++;
+                stats_.staleUploadBytes += static_cast<int>(
+                    cpu.vertices.size() * sizeof(float) +
+                    cpu.indices.size() * sizeof(uint32_t) +
+                    cpu.rgba.size());
+            }
+            didWork = true;
+            continue;  // guard destructor will clean in-flight
         }
         
         // Create GPU mesh
@@ -1017,8 +1042,34 @@ void RockMeshManager::WorkerLoop() {
             continue;
         }
         
-        // Build CPU mesh
+        // Build CPU mesh and carry upload epoch from entry
         RockMeshCpu cpu = BuildMesh(nodeKey, parsed);
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end()) {
+                cpu.uploadEpoch = it->second.uploadEpoch;
+            }
+        }
+        
+        // Check epoch freshness after build (may have gone stale during fetch+parse)
+        if (cpu.valid && !IsUploadEpochCurrent(nodeKey, cpu.uploadEpoch)) {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end()) {
+                it->second.state = RockMeshState::Stale;
+            }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.staleUploadSkips++;
+                stats_.staleUploadBytes += static_cast<int>(cpu.vertices.size() * sizeof(float) + cpu.indices.size() * sizeof(uint32_t));
+            }
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
+            continue;
+        }
         
         if (!cpu.valid) {
             std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1389,9 +1440,11 @@ void RockMeshManager::MarkStaleEntries(const std::unordered_set<std::string>& vi
             if (entry.state == RockMeshState::Uploaded) {
                 // Mark as stale for LRU eviction
                 entry.state = RockMeshState::Stale;
+                InvalidateUploadEpoch(nodeKey);
             } else if (entry.state == RockMeshState::Queued || 
                        entry.state == RockMeshState::Fetching) {
-                // Will be dropped by generation check in worker
+                // Invalidate epoch so in-flight work for this key is discarded
+                InvalidateUploadEpoch(nodeKey);
             }
         }
     }
@@ -1432,6 +1485,8 @@ void RockMeshManager::EvictIfNeeded() {
         if (entryIt != entries_.end() && entryIt->second.state == RockMeshState::Stale) {
             // Destroy GPU resources
             entryIt->second.gpu.Destroy();
+            // Cleanup epoch tracking
+            RemoveUploadEpoch(nodeKey);
             // Remove from maps
             lruMap_.erase(nodeKey);
             entries_.erase(entryIt);

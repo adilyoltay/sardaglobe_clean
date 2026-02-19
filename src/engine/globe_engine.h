@@ -391,6 +391,10 @@ private:
     void ShutdownImGui();
     void RenderDebugPanel();
     
+    // RockMesh render pass (isolated shader state + uniform setup)
+    void RenderRockMeshes(const glm::mat4& mvp);
+    bool rockMeshFirstRenderLogged_ = false;  // One-shot diagnostic log guard
+    
     // Pivot gizmo (Google Earth style target icon)
     void InitPivotGizmo();
     void RenderPivot(const glm::mat4& viewProj);
