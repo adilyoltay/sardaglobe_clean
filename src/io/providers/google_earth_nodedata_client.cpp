@@ -1,6 +1,7 @@
 // Google Earth NodeData Client Implementation
 
 #include "google_earth_nodedata_client.h"
+#include "ge_headers.h"
 #include "../ge_mesh_url_template.h"
 #include "../../debug/network_panel.h"
 #include <cstdlib>
@@ -41,49 +42,14 @@ GoogleEarthNodeDataClient::~GoogleEarthNodeDataClient() = default;
 
 std::vector<std::pair<std::string, std::string>> 
 GoogleEarthNodeDataClient::BuildHeaders() const {
-    std::vector<std::pair<std::string, std::string>> result;
-    
-    // Google Earth Web spoofing headers
-    // These headers mimic the official Google Earth web client to avoid CAPTCHA
-    result.push_back({"Accept", "application/x-protobuf"});
-    result.push_back({"Accept-Language", "en-US,en;q=0.9"});
-    result.push_back({"Accept-Encoding", "gzip, deflate, br"});
-    result.push_back({"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"});
-    result.push_back({"Referer", "https://earth.google.com/"});
-    result.push_back({"Origin", "https://earth.google.com"});
-    result.push_back({"Sec-Ch-Ua", "\"Not A(Brand)\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\""});
-    result.push_back({"Sec-Ch-Ua-Mobile", "?0"});
-    result.push_back({"Sec-Ch-Ua-Platform", "\"macOS\""});
-    result.push_back({"Sec-Fetch-Dest", "empty"});
-    result.push_back({"Sec-Fetch-Mode", "cors"});
-    result.push_back({"Sec-Fetch-Site", "cross-site"});
-    result.push_back({"X-Client-Data", "CI+2yQEIprbJAQipncoBCKDhygEIkqHLAQj6mM0B"});
-    
-    // Check if custom Authorization header is provided
-    bool hasCustomAuth = false;
-    for (const auto& [key, value] : headers_) {
-        if (key == "Authorization") {
-            hasCustomAuth = true;
-            break;
-        }
-    }
-    
-    // Add custom headers from config (allowlist already validated)
-    for (const auto& [key, value] : headers_) {
-        result.push_back({key, value});
-    }
-    
-    // Add Bearer token only if:
-    // 1. Token is available, AND
-    // 2. No custom Authorization header was provided
-    if (!authToken_.empty() && !hasCustomAuth) {
-        result.push_back({"Authorization", "Bearer " + authToken_});
-    }
-    
+    auto result = ge_headers::BuildStandardHeaders();
+    ge_headers::AppendCustomHeaders(result, headers_);
+    ge_headers::AppendBearerTokenIfNeeded(result, authToken_);
     return result;
 }
 
-NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeKey) {
+NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeKey,
+                                                         const std::string& epochOverride) {
     NodeDataResult result;
     
     if (endpointTemplate_.empty()) {
@@ -92,11 +58,13 @@ NodeDataResult GoogleEarthNodeDataClient::FetchNodeData(const std::string& nodeK
     }
     
     // Resolve {epoch} placeholder in template before building URL
+    // Use epochOverride (per-node epoch from BulkMetadata) if provided
+    const std::string& effectiveEpoch = epochOverride.empty() ? epoch_ : epochOverride;
     std::string tmpl = endpointTemplate_;
-    if (!epoch_.empty()) {
+    if (!effectiveEpoch.empty()) {
         size_t epochPos = tmpl.find("{epoch}");
         if (epochPos != std::string::npos) {
-            tmpl.replace(epochPos, 7, epoch_);
+            tmpl.replace(epochPos, 7, effectiveEpoch);
         }
     }
 

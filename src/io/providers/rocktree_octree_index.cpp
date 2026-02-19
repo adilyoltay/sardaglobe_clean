@@ -1,6 +1,7 @@
 // RockTree Octree Index Implementation
 
 #include "rocktree_octree_index.h"
+#include "ge_headers.h"
 #include <iostream>
 #include <algorithm>
 #include <cmath>
@@ -58,25 +59,7 @@ RockTreeOctreeIndex::~RockTreeOctreeIndex() = default;
 
 std::vector<std::pair<std::string, std::string>>
 RockTreeOctreeIndex::BuildHeaders() const {
-    // Google Earth Web spoofing headers
-    // These headers mimic the official Google Earth web client to avoid CAPTCHA
-    return {
-        {"Accept", "application/x-protobuf"},
-        {"Accept-Language", "en-US,en;q=0.9"},
-        {"Accept-Encoding", "gzip, deflate, br"},
-        {"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/121.0.0.0 Safari/537.36"},
-        {"Referer", "https://earth.google.com/"},
-        {"Origin", "https://earth.google.com"},
-        {"Sec-Ch-Ua", "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\""},
-        {"Sec-Ch-Ua-Mobile", "?0"},
-        {"Sec-Ch-Ua-Platform", "\"macOS\""},
-        {"Sec-Fetch-Dest", "empty"},
-        {"Sec-Fetch-Mode", "cors"},
-        {"Sec-Fetch-Site", "cross-site"},
-        {"X-Client-Data", "CI+2yQEIprbJAQipncoBCKDhygEIkqHLAQj6mM0B"}  // Base64 encoded client capabilities
-    };
+    return ge_headers::BuildStandardHeaders();
 }
 
 bool RockTreeOctreeIndex::Init() {
@@ -241,28 +224,20 @@ bool RockTreeOctreeIndex::FetchBulkMetadata(const std::string& prefix) {
 void RockTreeOctreeIndex::PopulateNodes(const BulkMetadataResult& bulk) {
     std::lock_guard<std::mutex> lock(nodesMutex_);
 
-    // BulkMetadata entries are indexed in a breadth-first traversal order
-    // within the subtree rooted at basePath.
-    //
-    // Index 0 = the node at basePath itself
-    // The children of node at index i are at indices 8*i+1 through 8*i+8
-    //
-    // We reconstruct the path for each entry by tracking parent relationships.
+    if (bulk.nodes.empty()) return;
 
-    // Build path mapping: index -> octree path string
-    std::vector<std::string> paths;
-    paths.resize(bulk.nodes.size());
+    // Google Earth BulkMetadata uses DENSE QUADTREE (4 children per node).
+    // Path digits are 0-3 (quadtree, NOT octree 0-7).
+    // Children of node at index i are at indices 4*i+1 through 4*i+4.
+    // Flags field 1: bit 0 = hasNodeData, bit 1 = hasBulkMetadata.
 
-    if (!bulk.nodes.empty()) {
-        // Index 0 is the root of this subtree
-        paths[0] = bulk.basePath;
-    }
+    // Build path mapping: index -> quadtree path string
+    std::vector<std::string> paths(bulk.nodes.size());
+    paths[0] = bulk.basePath;
 
-    // Compute paths for all entries in BFS order
-    for (size_t i = 0; i < bulk.nodes.size(); i++) {
-        // For each child of node i, compute its path
-        for (int child = 0; child < 8; child++) {
-            size_t childIdx = 8 * i + 1 + child;
+    for (size_t i = 0; i < bulk.nodes.size(); ++i) {
+        for (int child = 0; child < 4; ++child) {
+            size_t childIdx = 4 * i + 1 + child;
             if (childIdx < bulk.nodes.size()) {
                 paths[childIdx] = paths[i] + std::to_string(child);
             }
@@ -270,7 +245,7 @@ void RockTreeOctreeIndex::PopulateNodes(const BulkMetadataResult& bulk) {
     }
 
     // Store all entries
-    for (size_t i = 0; i < bulk.nodes.size(); i++) {
+    for (size_t i = 0; i < bulk.nodes.size(); ++i) {
         const auto& nodeMeta = bulk.nodes[i];
         const std::string& path = paths[i];
 
@@ -279,8 +254,47 @@ void RockTreeOctreeIndex::PopulateNodes(const BulkMetadataResult& bulk) {
         OctreeNodeInfo info;
         info.hasNodeData = nodeMeta.hasNodeData;
         info.hasBulkMetadata = nodeMeta.hasBulkMetadata;
-        info.availableChildren = nodeMeta.availableChildren;
+        info.availableChildren = 0x0F;  // Dense quadtree: all 4 children always present
         info.epoch = nodeMeta.epoch;
+        
+        // Epoch Inheritance: walk ancestor chain until a non-zero epoch is found.
+        // Parent may also have epoch 0, so keep climbing.
+        if (info.epoch == 0 && !path.empty()) {
+            std::string ancestor = path;
+            while (info.epoch == 0 && !ancestor.empty()) {
+                ancestor = ancestor.substr(0, ancestor.length() - 1);
+                auto ait = nodes_.find(ancestor);
+                if (ait != nodes_.end() && ait->second.epoch != 0) {
+                    info.epoch = ait->second.epoch;
+                }
+            }
+        }
+        
+        // MSB Alternation Rule:
+        // In GE Quadtree, consecutive path digits must have alternating MSBs (bit 1).
+        // 0(00), 1(01) -> MSB 0
+        // 2(10), 3(11) -> MSB 1
+        // If MSB(current) == MSB(prev) for ANY adjacent pair in the path, 
+        // the node is invalid (HTTP 400 prevention).
+        if (info.hasNodeData && path.length() >= 2) {
+            bool validPath = true;
+            for (size_t k = 1; k < path.length(); ++k) {
+                char curr = path[k];
+                char prev = path[k-1];
+                int msbCurr = (curr - '0') >> 1;
+                int msbPrev = (prev - '0') >> 1;
+                
+                if (msbCurr == msbPrev) {
+                    validPath = false;
+                    break;
+                }
+            }
+            
+            if (!validPath) {
+                info.hasNodeData = false; // Mark as no data to prevent 400
+            }
+        }
+
         info.bulkMetadataFetched = false;
 
         nodes_[path] = info;
@@ -307,13 +321,39 @@ uint8_t RockTreeOctreeIndex::GetAvailableChildren(const std::string& path) const
     return it->second.availableChildren;
 }
 
+uint32_t RockTreeOctreeIndex::GetNodeEpoch(const std::string& path) const {
+    std::lock_guard<std::mutex> lock(nodesMutex_);
+    // Walk ancestor chain: node → parent → grandparent → ... → global epoch
+    std::string p = path;
+    while (!p.empty()) {
+        auto it = nodes_.find(p);
+        if (it != nodes_.end() && it->second.epoch != 0) {
+            return it->second.epoch;
+        }
+        p = p.substr(0, p.length() - 1);
+    }
+    // Check root node (empty path)
+    auto rootIt = nodes_.find("");
+    if (rootIt != nodes_.end() && rootIt->second.epoch != 0) {
+        return rootIt->second.epoch;
+    }
+    return epoch_;  // Fallback to global epoch
+}
+
+bool RockTreeOctreeIndex::HasBulkMetadataAvailable(const std::string& path) const {
+    std::lock_guard<std::mutex> lock(nodesMutex_);
+    auto it = nodes_.find(path);
+    if (it == nodes_.end()) return false;
+    return it->second.hasBulkMetadata;
+}
+
 std::vector<std::string> RockTreeOctreeIndex::GetChildrenWithData(
     const std::string& parentPath) const {
 
     std::lock_guard<std::mutex> lock(nodesMutex_);
     std::vector<std::string> result;
 
-    for (int child = 0; child < 8; child++) {
+    for (int child = 0; child < 4; child++) {
         std::string childPath = parentPath + std::to_string(child);
         auto it = nodes_.find(childPath);
         if (it != nodes_.end() && it->second.hasNodeData) {
@@ -404,16 +444,17 @@ std::vector<std::string> RockTreeOctreeIndex::TileQuadKeyToOctreePaths(
         return {};
     }
 
-    const int minDepth = std::max(kMinTmsQuadKeyDepth, tileDepth - 1);
-    const int maxDepth = tileDepth + 1;
+    // GE RockTree uses a QUADTREE (digits 0-3), same coordinate space as TMS.
+    // Prefix matching works: TMS quadkey prefix maps to quadtree face.
     const std::string facePrefix = tileQuadKey.substr(0, kMinTmsQuadKeyDepth);
 
-    // For short keys, keep deterministic behavior constrained to exact depth candidates.
-    if (tileDepth <= 2) {
+    if (tileDepth <= kMinTmsQuadKeyDepth) {
+        // Short keys: exact depth match only
         return CollectRenderableNodesByDepthRange(tileDepth, tileDepth, facePrefix);
     }
 
-    // For deeper tiles, filter to matching face prefix and sort deterministically.
+    const int minDepth = std::max(kMinTmsQuadKeyDepth, tileDepth - 1);
+    const int maxDepth = tileDepth + 1;
     return CollectRenderableNodesByDepthRange(minDepth, maxDepth, facePrefix);
 }
 
@@ -455,22 +496,5 @@ std::vector<std::string> RockTreeOctreeIndex::CollectRenderableNodesByDepthRange
     return result;
 }
 
-// Static helper: build octree path from BulkMetadata index
-std::string RockTreeOctreeIndex::BuildOctreePath(const std::string& basePath,
-                                                  int nodeIndex, int level) {
-    if (nodeIndex == 0) return basePath;
-
-    // Reverse-compute path from BFS index
-    std::string suffix;
-    int idx = nodeIndex;
-    while (idx > 0) {
-        int parent = (idx - 1) / 8;
-        int childDigit = (idx - 1) % 8;
-        suffix = std::to_string(childDigit) + suffix;
-        idx = parent;
-    }
-
-    return basePath + suffix;
-}
 
 } // namespace globe

@@ -212,13 +212,21 @@ struct Tile {
         if (distanceModeValid) {
             // Initialize on first terrain data
             if (!hadTerrainData) {
+                // P2 FIX: Distance-based morph was effectively flat at orbital distances
+                // when distanceRangeKm was interpreted as a tiny fixed km band.
+                // Normalize range to a per-camera adaptive floor so displacement becomes
+                // visible at normal globe distances.
+                const float adaptiveRangeKm = std::max(
+                    distanceRangeKm,
+                    std::max(1.0f, static_cast<float>(cameraDistanceKm) * 0.05f)
+                );
                 hadTerrainData = true;
                 terrainMorphActive = true;
                 // P2 FIX: near=spawn (morph 0), far=spawn-range (morph 1)
                 // As camera approaches, distance decreases, morph increases
                 terrainMorphSpawnDistanceKm = cameraDistanceKm;
                 terrainMorphNearDistanceKm = cameraDistanceKm;  // Start: morph = 0
-                terrainMorphFarDistanceKm = std::max(0.0f, cameraDistanceKm - distanceRangeKm);  // End: morph = 1
+                terrainMorphFarDistanceKm = std::max(0.0f, cameraDistanceKm - adaptiveRangeKm);  // End: morph = 1
                 terrainMorph = 0.0f;
             }
             

@@ -102,6 +102,11 @@ void RockMeshManager::Shutdown() {
         std::lock_guard<std::mutex> queuedLock(queuedMutex_);
         queuedOrPendingKeys_.clear();
     }
+    // Clear upload epoch tracking
+    {
+        std::lock_guard<std::mutex> epochLock(uploadEpochMutex_);
+        uploadEpochByNode_.clear();
+    }
     
     // Destroy all GPU meshes
     std::lock_guard<std::mutex> lock(stateMutex_);
@@ -186,12 +191,11 @@ void RockMeshManager::UpdateVisibleQuadKeys(const std::vector<TileKey>& visibleL
                     visibleKeys.insert(path);
                 }
 
-                // Request BulkMetadata for deeper exploration if not yet fetched
+                // Request BulkMetadata for deeper exploration if node has it available
                 if (!octreeIndex_->IsBulkMetadataFetched(path) &&
-                    path.length() >= 2) {
-                    // Request BulkMetadata for the parent prefix that covers this depth
-                    std::string prefix = path.substr(0, std::min(path.length(), size_t(4)));
-                    octreeIndex_->RequestBulkMetadata(prefix);
+                    path.length() >= 2 &&
+                    octreeIndex_->HasBulkMetadataAvailable(path)) {
+                    octreeIndex_->RequestBulkMetadata(path);
                 }
 
                 // Get children with data for close tiles
@@ -394,9 +398,10 @@ int RockMeshManager::ProcessPriorityQueue(double budgetMs) {
                 continue;
             }
             
-            // Update state to Fetching
+            // Update state to Fetching and allocate upload epoch
             it->second.state = RockMeshState::Fetching;
             it->second.generation = req.generation;
+            it->second.uploadEpoch = AllocateUploadEpoch(req.nodeKey);
         }
         
         // Try non-blocking push to requestQueue
@@ -517,9 +522,38 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             }
         }
         
+        // Check upload epoch - drop if a newer request has been dispatched for this key
+        if (cpu.uploadEpoch != 0 && !IsUploadEpochCurrent(cpu.id, cpu.uploadEpoch)) {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(cpu.id);
+            if (it != entries_.end()) {
+                it->second.state = RockMeshState::Stale;
+            }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.staleUploadSkips++;
+                stats_.staleUploadBytes += static_cast<int>(
+                    cpu.vertices.size() * sizeof(float) +
+                    cpu.indices.size() * sizeof(uint32_t) +
+                    cpu.rgba.size());
+            }
+            didWork = true;
+            continue;  // guard destructor will clean in-flight
+        }
+        
         // Create GPU mesh
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Upload] GPU CREATE: " << cpu.id
+                      << " verts=" << cpu.vertices.size() / 9
+                      << " idx=" << cpu.indices.size()
+                      << " tex=" << (cpu.hasTexture ? "yes" : "no")
+                      << " rgba=" << cpu.rgba.size() << "B\n";
+        }
         RockMeshGpu gpu;
         if (gpu.Create(cpu, fallbackTexture_)) {
+            if (config_.rockMeshRuntimeDebug) {
+                std::cout << "[RockMesh:Upload] GPU OK: " << cpu.id << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
             if (it != entries_.end()) {
@@ -535,6 +569,8 @@ bool RockMeshManager::ProcessUploads(double budgetMs) {
             }
             guard.clear();  // Explicit clear for success path
         } else {
+            // GPU failures always log (rare, indicates real problem)
+            std::cerr << "[RockMesh:Upload] GPU FAILED: " << cpu.id << "\n";
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(cpu.id);
             if (it != entries_.end()) {
@@ -584,6 +620,19 @@ void RockMeshManager::UpdateFades(float deltaTime) {
             }
         }
     }
+}
+
+// Terminal error blacklist helpers
+bool RockMeshManager::IsBlacklisted(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(blacklistMutex_);
+    auto it = blacklistedKeys_.find(key);
+    if (it == blacklistedKeys_.end()) return false;
+    return glfwGetTime() < it->second;  // Still within cooldown
+}
+
+void RockMeshManager::BlacklistKey(const std::string& key) {
+    std::lock_guard<std::mutex> lock(blacklistMutex_);
+    blacklistedKeys_[key] = glfwGetTime() + BLACKLIST_COOLDOWN_SEC;
 }
 
 // Phase 6: Added shaderProgram parameter for per-mesh fade
@@ -943,21 +992,66 @@ void RockMeshManager::WorkerLoop() {
             }
         }
         
+        // Check blacklist before fetching (avoid wasting bandwidth on known-bad keys)
+        if (IsBlacklisted(nodeKey)) {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end()) {
+                it->second.state = RockMeshState::Failed;
+                it->second.error = "blacklisted (terminal HTTP error)";
+            }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.blacklistSkipCount++;
+            }
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
+            continue;
+        }
+        
         // Fetch from network if cache miss (with rate limiting)
         if (!cacheHit) {
+            // Look up per-node epoch from BulkMetadata (fixes HTTP 400)
+            std::string nodeEpoch;
+            if (octreeIndex_ && octreeIndex_->IsInitialized()) {
+                uint32_t ep = octreeIndex_->GetNodeEpoch(nodeKey);
+                nodeEpoch = std::to_string(ep);
+            }
+            if (config_.rockMeshRuntimeDebug) {
+                std::cout << "[RockMesh:Worker] FETCHING: " << nodeKey
+                          << " epoch=" << (nodeEpoch.empty() ? lastEpoch : nodeEpoch) << "\n";
+                std::cout.flush();
+            }
             if (rateLimiter_) rateLimiter_->WaitForSlot();
-            fetchResult = client.FetchNodeData(nodeKey);
+            fetchResult = client.FetchNodeData(nodeKey, nodeEpoch);
         }
         if (!fetchResult.success) {
+            // Classify HTTP error
+            int httpCode = fetchResult.httpCode;
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.failureCount++;
+                if (httpCode == 400) stats_.failedHttp400Count++;
+                else if (httpCode == 404) stats_.failedHttp404Count++;
+                else if (httpCode > 0) stats_.failedHttpOtherCount++;
+                else stats_.failedNetworkCount++;
+            }
+            // Blacklist terminal errors (400/404 won't change on retry)
+            if (httpCode == 400 || httpCode == 404) {
+                BlacklistKey(nodeKey);
+            }
+            if (config_.rockMeshRuntimeDebug) {
+                std::cerr << "[RockMesh:Worker] FETCH FAILED: " << nodeKey 
+                          << " http=" << httpCode
+                          << " err=" << fetchResult.errorMessage << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
                 it->second.state = RockMeshState::Failed;
                 it->second.error = fetchResult.errorMessage;
-            }
-            {
-                std::lock_guard<std::mutex> statsLock(statsMutex_);
-                stats_.failureCount++;
             }
             // Remove from in-flight
             {
@@ -997,8 +1091,17 @@ void RockMeshManager::WorkerLoop() {
         }
         
         // Parse
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Worker] FETCH OK: " << nodeKey 
+                      << " bytes=" << fetchResult.data.size()
+                      << (cacheHit ? " (cache)" : " (network)") << "\n";
+        }
         ParsedNodeData parsed = RockTreeNodeDataParser::Parse(fetchResult.data);
         if (!parsed.success) {
+            if (config_.rockMeshRuntimeDebug) {
+                std::cerr << "[RockMesh:Worker] PARSE FAILED: " << nodeKey
+                          << " err=" << parsed.error << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1016,11 +1119,55 @@ void RockMeshManager::WorkerLoop() {
             }
             continue;
         }
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Worker] PARSE OK: " << nodeKey
+                      << " V=" << parsed.vertexCount
+                      << " T=" << parsed.triangleCount
+                      << " tex=" << (parsed.texture.valid ? "yes" : "no")
+                      << " uv=" << (parsed.hasTexCoords ? "yes" : "no")
+                      << " normals=" << (parsed.hasNormals ? "yes" : "no")
+                      << "\n";
+        }
         
-        // Build CPU mesh
+        // Build CPU mesh and carry upload epoch from entry
         RockMeshCpu cpu = BuildMesh(nodeKey, parsed);
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end()) {
+                cpu.uploadEpoch = it->second.uploadEpoch;
+            }
+        }
+        
+        // Check epoch freshness after build (may have gone stale during fetch+parse).
+        // This runs regardless of cpu.valid — a stale build that also failed should
+        // still be counted as stale rather than as a build failure.
+        if (!IsUploadEpochCurrent(nodeKey, cpu.uploadEpoch)) {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            auto it = entries_.find(nodeKey);
+            if (it != entries_.end()) {
+                it->second.state = RockMeshState::Stale;
+            }
+            {
+                std::lock_guard<std::mutex> statsLock(statsMutex_);
+                stats_.staleUploadSkips++;
+                stats_.staleUploadBytes += static_cast<int>(
+                    cpu.vertices.size() * sizeof(float) +
+                    cpu.indices.size() * sizeof(uint32_t) +
+                    cpu.rgba.size());
+            }
+            {
+                std::lock_guard<std::mutex> inFlightLock(inFlightMutex_);
+                inFlightSet_.erase(nodeKey);
+            }
+            continue;
+        }
         
         if (!cpu.valid) {
+            if (config_.rockMeshRuntimeDebug) {
+                std::cerr << "[RockMesh:Worker] BUILD FAILED: " << nodeKey
+                          << " err=" << (cpu.error.empty() ? "unknown" : cpu.error) << "\n";
+            }
             std::lock_guard<std::mutex> lock(stateMutex_);
             auto it = entries_.find(nodeKey);
             if (it != entries_.end()) {
@@ -1037,6 +1184,13 @@ void RockMeshManager::WorkerLoop() {
                 inFlightSet_.erase(nodeKey);
             }
             continue;
+        }
+        if (config_.rockMeshRuntimeDebug) {
+            std::cout << "[RockMesh:Worker] BUILD OK: " << nodeKey
+                      << " verts=" << cpu.vertices.size() / 9
+                      << " idx=" << cpu.indices.size()
+                      << " tex=" << (cpu.hasTexture ? "yes" : "no")
+                      << " rgba=" << cpu.rgba.size() << "B\n";
         }
         
         // Queue for upload
@@ -1152,10 +1306,10 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
     bool hasInvalidVertex = false;
     
     for (int i = 0; i < V; ++i) {
-        // Local position (int16 / 32768)
-        double lx = parsed.positions[i * 3 + 0] / 32768.0;
-        double ly = parsed.positions[i * 3 + 1] / 32768.0;
-        double lz = parsed.positions[i * 3 + 2] / 32768.0;
+        // Local position (uint8 / 255, delta-decoded from GE vertex stream)
+        double lx = parsed.positions[i * 3 + 0] / 255.0;
+        double ly = parsed.positions[i * 3 + 1] / 255.0;
+        double lz = parsed.positions[i * 3 + 2] / 255.0;
         
         // Transform to world (km)
         glm::dvec4 local(lx, ly, lz, 1.0);
@@ -1236,13 +1390,13 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         cpu.vertices[i * 9 + 2] = relativePos.z;
     }
     
-    // Build UVs
-    if (parsed.hasUvQuant && !parsed.uv.empty()) {
+    // Build UVs from decoded texture coordinates (field 7 or field 2)
+    if (parsed.hasTexCoords && !parsed.texCoords.empty()) {
         for (int i = 0; i < V; ++i) {
-            uint16_t u16 = parsed.uv[i * 2 + 0];
-            uint16_t v16 = parsed.uv[i * 2 + 1];
+            uint16_t u16 = parsed.texCoords[i * 2 + 0];
+            uint16_t v16 = parsed.texCoords[i * 2 + 1];
             float u, v;
-            parsed.uvQuant.Decode(u16, v16, u, v, config_.geMeshFlipV);
+            parsed.uvQuant.Decode(u16, v16, u, v);
             cpu.vertices[i * 9 + 6] = u;
             cpu.vertices[i * 9 + 7] = v;
         }
@@ -1254,55 +1408,70 @@ RockMeshCpu RockMeshManager::BuildMesh(const std::string& nodeKey, const ParsedN
         }
     }
     
-    // Build normals (from triangle list)
-    std::vector<glm::vec3> normals(V, glm::vec3(0.0f));
-    std::vector<int> normalCounts(V, 0);
-    
-    for (int t = 0; t < T; ++t) {
-        uint32_t i0 = parsed.indices[t * 3 + 0];
-        uint32_t i1 = parsed.indices[t * 3 + 1];
-        uint32_t i2 = parsed.indices[t * 3 + 2];
+    // Build normals: prefer GE pre-computed normals, fallback to cross-product
+    if (parsed.hasNormals && static_cast<int>(parsed.normals.size()) >= V * 3) {
+        // GE octahedral-decoded normals: uint8 [0-255], 128 = zero
+        for (int i = 0; i < V; ++i) {
+            float nx = (parsed.normals[i * 3 + 0] - 127.0f) / 127.0f;
+            float ny = (parsed.normals[i * 3 + 1] - 127.0f) / 127.0f;
+            float nz = (parsed.normals[i * 3 + 2] - 127.0f) / 127.0f;
+            float len = std::sqrt(nx*nx + ny*ny + nz*nz);
+            if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
+            else { nx = 0.0f; ny = 0.0f; nz = 1.0f; }
+            cpu.vertices[i * 9 + 3] = nx;
+            cpu.vertices[i * 9 + 4] = ny;
+            cpu.vertices[i * 9 + 5] = nz;
+        }
+    } else {
+        // Fallback: compute normals from triangle list cross products
+        std::vector<glm::vec3> normals(V, glm::vec3(0.0f));
+        std::vector<int> normalCounts(V, 0);
         
-        if (i0 >= V || i1 >= V || i2 >= V) continue;  // Safety
-        
-        glm::vec3 p0(cpu.vertices[i0 * 9 + 0], cpu.vertices[i0 * 9 + 1], cpu.vertices[i0 * 9 + 2]);
-        glm::vec3 p1(cpu.vertices[i1 * 9 + 0], cpu.vertices[i1 * 9 + 1], cpu.vertices[i1 * 9 + 2]);
-        glm::vec3 p2(cpu.vertices[i2 * 9 + 0], cpu.vertices[i2 * 9 + 1], cpu.vertices[i2 * 9 + 2]);
-        
-        glm::vec3 e0 = p1 - p0;
-        glm::vec3 e1 = p2 - p0;
-        glm::vec3 cross = glm::cross(e0, e1);
-        float crossLen2 = glm::dot(cross, cross);
-        
-        // Skip degenerate triangles
-        if (crossLen2 < 1e-10f) continue;
-        
-        glm::vec3 n = glm::normalize(cross);
-        
-        // Outward enforce
-        glm::vec3 centerPos = (p0 + p1 + p2) / 3.0f;
-        if (glm::dot(n, centerPos) < 0.0f) {
-            n = -n;
+        for (int t = 0; t < T; ++t) {
+            uint32_t i0 = parsed.indices[t * 3 + 0];
+            uint32_t i1 = parsed.indices[t * 3 + 1];
+            uint32_t i2 = parsed.indices[t * 3 + 2];
+            
+            if (i0 >= static_cast<uint32_t>(V) || i1 >= static_cast<uint32_t>(V) || i2 >= static_cast<uint32_t>(V)) continue;
+            
+            glm::vec3 p0(cpu.vertices[i0 * 9 + 0], cpu.vertices[i0 * 9 + 1], cpu.vertices[i0 * 9 + 2]);
+            glm::vec3 p1(cpu.vertices[i1 * 9 + 0], cpu.vertices[i1 * 9 + 1], cpu.vertices[i1 * 9 + 2]);
+            glm::vec3 p2(cpu.vertices[i2 * 9 + 0], cpu.vertices[i2 * 9 + 1], cpu.vertices[i2 * 9 + 2]);
+            
+            glm::vec3 e0 = p1 - p0;
+            glm::vec3 e1 = p2 - p0;
+            glm::vec3 cross = glm::cross(e0, e1);
+            float crossLen2 = glm::dot(cross, cross);
+            if (crossLen2 < 1e-10f) continue;
+            
+            glm::vec3 n = glm::normalize(cross);
+            
+            // Outward enforce: use world-space triangle center as radial reference
+            glm::dvec3 centerWorld = (worldPositions[i0] + worldPositions[i1] + worldPositions[i2]) / 3.0;
+            glm::vec3 outwardDir = glm::normalize(glm::vec3(centerWorld));
+            if (glm::dot(n, outwardDir) < 0.0f) {
+                n = -n;
+            }
+            
+            normals[i0] += n;
+            normals[i1] += n;
+            normals[i2] += n;
+            normalCounts[i0]++;
+            normalCounts[i1]++;
+            normalCounts[i2]++;
         }
         
-        normals[i0] += n;
-        normals[i1] += n;
-        normals[i2] += n;
-        normalCounts[i0]++;
-        normalCounts[i1]++;
-        normalCounts[i2]++;
-    }
-    
-    for (int i = 0; i < V; ++i) {
-        if (normalCounts[i] > 0) {
-            glm::vec3 n = glm::normalize(normals[i] / static_cast<float>(normalCounts[i]));
-            cpu.vertices[i * 9 + 3] = n.x;
-            cpu.vertices[i * 9 + 4] = n.y;
-            cpu.vertices[i * 9 + 5] = n.z;
-        } else {
-            cpu.vertices[i * 9 + 3] = 0.0f;
-            cpu.vertices[i * 9 + 4] = 0.0f;
-            cpu.vertices[i * 9 + 5] = 1.0f;
+        for (int i = 0; i < V; ++i) {
+            if (normalCounts[i] > 0) {
+                glm::vec3 n = glm::normalize(normals[i] / static_cast<float>(normalCounts[i]));
+                cpu.vertices[i * 9 + 3] = n.x;
+                cpu.vertices[i * 9 + 4] = n.y;
+                cpu.vertices[i * 9 + 5] = n.z;
+            } else {
+                cpu.vertices[i * 9 + 3] = 0.0f;
+                cpu.vertices[i * 9 + 4] = 0.0f;
+                cpu.vertices[i * 9 + 5] = 1.0f;
+            }
         }
     }
     
@@ -1384,9 +1553,11 @@ void RockMeshManager::MarkStaleEntries(const std::unordered_set<std::string>& vi
             if (entry.state == RockMeshState::Uploaded) {
                 // Mark as stale for LRU eviction
                 entry.state = RockMeshState::Stale;
+                InvalidateUploadEpoch(nodeKey);
             } else if (entry.state == RockMeshState::Queued || 
                        entry.state == RockMeshState::Fetching) {
-                // Will be dropped by generation check in worker
+                // Invalidate epoch so in-flight work for this key is discarded
+                InvalidateUploadEpoch(nodeKey);
             }
         }
     }
@@ -1427,6 +1598,8 @@ void RockMeshManager::EvictIfNeeded() {
         if (entryIt != entries_.end() && entryIt->second.state == RockMeshState::Stale) {
             // Destroy GPU resources
             entryIt->second.gpu.Destroy();
+            // Cleanup epoch tracking
+            RemoveUploadEpoch(nodeKey);
             // Remove from maps
             lruMap_.erase(nodeKey);
             entries_.erase(entryIt);

@@ -185,6 +185,7 @@ private:
     bool ResizeTier(Tier& tier, GLint newMaxLayers);
     LayerHandle AllocLayerInTier(Tier& tier);
     void FreeLayerInTier(Tier& tier, LayerHandle handle);
+    int RegisterTierInternal(const TierConfig& config);
 
 private:
     Config config_;

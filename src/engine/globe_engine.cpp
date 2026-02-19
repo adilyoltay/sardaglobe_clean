@@ -80,6 +80,7 @@ const char* ProviderLabel(DemProviderType provider) {
 
 GlobeEngine::GlobeEngine(const Config& config)
     : config_(config) {
+    showDebugPanel_ = config.showDebugPanelEnabled;
 }
 
 GlobeEngine::~GlobeEngine() {
@@ -164,10 +165,13 @@ bool GlobeEngine::Init() {
     std::cout << "OpenGL: " << glGetString(GL_VERSION) << std::endl;
     
     // P0-2: GL capability check for Texture2DArray (after GL context is ready)
-    const bool requestedTextureArray = config_.useTexture2DArray;  // User intent
+    textureArrayRequested_ = config_.useTexture2DArray;  // User intent
+    textureArrayMaxLayers_ = 0;
+    textureArrayEffective_ = false;
     if (config_.useTexture2DArray) {
         GLint maxLayers = 0;
         glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        textureArrayMaxLayers_ = maxLayers;
         
         // Check GL error first - if query failed, safe fallback
         GLenum err = glGetError();
@@ -176,16 +180,18 @@ bool GlobeEngine::Init() {
         if (glError || maxLayers < 128) {
             // Insufficient support - fallback to atlas
             config_.useTexture2DArray = false;
+            textureArrayEffective_ = false;
             std::cout << "[Texture] requested=Array, effective=Atlas/2D (unavailable" 
                       << (glError ? ", GL error)" : ", maxLayers=" + std::to_string(maxLayers) + " < 128)")
                       << "\n";
         } else {
+            textureArrayEffective_ = true;
             std::cout << "[Texture] requested=Array, effective=Array (maxLayers=" << maxLayers << ")\n";
         }
     } else {
+        textureArrayEffective_ = false;
         std::cout << "[Texture] requested=Atlas/2D, effective=Atlas/2D (user disabled)\n";
     }
-    (void)requestedTextureArray;  // Mark as used for potential future debug output
     
     // Init camera system (Google Earth parity)
     camera_ = std::make_unique<earth::PerspectiveCamera>();
@@ -253,53 +259,11 @@ bool GlobeEngine::Init() {
                   << ", backoff=" << config_.demBatchBackoffMs << "ms"
                   << std::endl;
 
-        // Resolve GE epoch from RockMesh octree when requested.
-        std::string resolvedGeEpoch = config_.geEpoch;
-        const bool wantGeEpochAutoDetect = (selectedProvider == DemProviderType::GoogleEarth) &&
-                                          config_.geEpochAutoDetect &&
-                                          config_.geMeshEnabled() &&
-                                          config_.rockMeshRenderEnabled &&  // P0: Kill-switch check
-                                          resolvedGeEpoch.empty();
-
-        if (wantGeEpochAutoDetect) {
-            if (!rockMeshManager_ && config_.rockMeshRenderEnabled) {  // P0: Kill-switch guard
-                rockMeshManager_ = std::make_unique<RockMeshManager>(config_);
-                if (!rockMeshManager_->Init()) {
-                    std::cerr << "[DEM] Warning: RockMesh manager init failed while resolving GE epoch\n";
-                    rockMeshManager_.reset();
-                } else {
-                    for (const auto& qk : config_.geMeshQuadKeys) {
-                        rockMeshManager_->Request(qk);
-                    }
-                }
-            }
-
-            if (rockMeshManager_) {
-                constexpr int kEpochResolveAttempts = 2;
-                for (int attempt = 0; attempt < kEpochResolveAttempts && resolvedGeEpoch.empty(); ++attempt) {
-                    const int waitMs = (attempt == 0) ? 900 : 1400;
-                    const auto deadline =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
-                    while (std::chrono::steady_clock::now() < deadline) {
-                        resolvedGeEpoch = rockMeshManager_->GetResolvedEpoch();
-                        if (!resolvedGeEpoch.empty()) {
-                            break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-                    }
-                    if (resolvedGeEpoch.empty() && attempt + 1 < kEpochResolveAttempts) {
-                        std::cerr << "[DEM] GE epoch auto-detect retrying..." << std::endl;
-                    }
-                }
-            }
-
-            if (!resolvedGeEpoch.empty()) {
-                std::cout << "[DEM] Auto-resolved GE epoch from RockMesh: "
-                          << resolvedGeEpoch << "\n";
-            } else {
-                std::cerr << "[DEM] GE epoch auto-detect timed out; using default endpoint epoch token\n";
-            }
-        }
+        // Ge-startup resolver now provides GE epoch at startup.
+        // Runtime DEM init uses resolved configuration only and does not block on octree probing.
+        const std::string resolvedGeEpoch = config_.geEpoch.empty()
+                                                ? std::string("latest")
+                                                : config_.geEpoch;
 
         demConfig.providerType = selectedProvider;
         demConfig.meshN = config_.demMeshN;
@@ -2205,6 +2169,51 @@ void GlobeEngine::Update(double dt, double currentTime) {
         }
         // Phase 6: Update fade values for seamless transitions
         rockMeshManager_->UpdateFades(static_cast<float>(dt));
+        
+        // Runtime debug: periodic state distribution dump
+        // Always runs first 30s (6 dumps); afterwards only if rockMeshRuntimeDebug is on
+        {
+            static double lastDumpTime = 0.0;
+            static int dumpCount = 0;
+            double now = glfwGetTime();
+            bool shouldDump = (dumpCount < 6 || config_.rockMeshRuntimeDebug) 
+                              && now - lastDumpTime > 5.0;
+            if (shouldDump) {
+                lastDumpTime = now;
+                dumpCount++;
+                auto rs = rockMeshManager_->GetStats();
+                size_t uploaded = rockMeshManager_->GetUploadedCount();
+                std::cout << "[RockMesh:Pipeline] t=" << static_cast<int>(now) << "s"
+                          << " uploaded=" << uploaded
+                          << " failed=" << rs.failureCount
+                          << " (400:" << rs.failedHttp400Count
+                          << " 404:" << rs.failedHttp404Count
+                          << " net:" << rs.failedNetworkCount
+                          << " other:" << rs.failedHttpOtherCount << ")"
+                          << " blacklisted=" << rs.blacklistSkipCount
+                          << " inFlight=" << rs.inFlightCount
+                          << " staleDrops=" << rs.staleDropCount
+                          << " genDrops=" << rs.generationDrops
+                          << "\n";
+                // Discard counters (always show if nonzero)
+                int totalDiscards = rs.discardInvalidTransform + rs.discardInvalidScale +
+                                    rs.discardInvalidBounds + rs.discardNonFiniteVertex +
+                                    rs.discardAabbExceeded + rs.discardVertexDistanceExceeded;
+                if (totalDiscards > 0) {
+                    std::cout << "[RockMesh:Pipeline] DISCARDS=" << totalDiscards
+                              << " (tfm:" << rs.discardInvalidTransform
+                              << " scl:" << rs.discardInvalidScale
+                              << " bnd:" << rs.discardInvalidBounds
+                              << " vtx:" << rs.discardNonFiniteVertex
+                              << " aabb:" << rs.discardAabbExceeded
+                              << " dst:" << rs.discardVertexDistanceExceeded << ")\n";
+                }
+                if (uploaded == 0 && rs.failureCount > 0) {
+                    std::cerr << "[RockMesh:Pipeline] WARNING: " << rs.failureCount 
+                              << " failures, 0 uploads — check Worker/Upload logs above\n";
+                }
+            }
+        }
     }
     
     frameTimings_.meshBuildMs = (glfwGetTime() * 1000.0) - meshStartMs;
@@ -2550,6 +2559,7 @@ void GlobeEngine::Render() {
         demManager_.get(),
         config_.useRteRender,
         config_.fallbackRequireParentUntilChildrenReady,
+        config_.useTexture2DArray,
         snapshot->useDistanceBasedTerrainMorph,  // P1-5: Distance-based morph from snapshot
         snapshot->terrainMorphDistanceRangeKm,   // P1-5: Morph band width from snapshot
         config_.enableTerrainMorphTimeFallback   // P1-5: Time fallback on invalid distance
@@ -2859,43 +2869,8 @@ void GlobeEngine::Render() {
     // Render pivot gizmo (Google Earth style target icon)
     RenderPivot(mvp);
     
-    // Render RockTree meshes (Phase 5 Sprint 1)
-    if (config_.rockMeshRenderEnabled && rockMeshManager_ && rockMeshManager_->GetUploadedCount() > 0) {
-        // Enable polygon offset to prevent z-fighting with base terrain
-        glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(-1.0f, -1.0f);
-        
-        // Disable culling for first bring-up (helps debug visibility)
-        bool cullWasEnabled = glIsEnabled(GL_CULL_FACE);
-        glDisable(GL_CULL_FACE);
-        
-        // Bind tile shader with neutral uniforms
-        // Faz 1C: RockMeshManager now handles per-mesh RTE uniforms internally
-        GLuint tileProgram = shaderManager_->GetTileProgram();
-        if (tileProgram != 0) {
-            glUseProgram(tileProgram);
-            
-            // Set global uniforms for rockmesh rendering
-            // uTerrainMorph = 1.0 (fully morphed)
-            GLint morphLoc = glGetUniformLocation(tileProgram, "uTerrainMorph");
-            if (morphLoc >= 0) glUniform1f(morphLoc, 1.0f);
-            
-            // MVP matrix (per-mesh uniforms like uFade, uTexScaleOffsetMain, RTE are set by RockMeshManager)
-            GLint mvpLoc = glGetUniformLocation(tileProgram, "uMVP");
-            if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
-        }
-        
-        // Draw all rockmeshes
-        // Phase 6: Pass shader program for per-mesh fade
-        // Faz 1C: Pass RTE flag for consistent behavior with tile path
-        rockMeshManager_->Render(tileProgram, config_.useRteRender);
-        
-        // Restore state
-        if (cullWasEnabled) {
-            glEnable(GL_CULL_FACE);
-        }
-        glDisable(GL_POLYGON_OFFSET_FILL);
-    }
+    // Render RockTree meshes (isolated in dedicated method)
+    RenderRockMeshes(mvp);
     
     // Update debug stats
     debugStats_.fps = fps_;
@@ -2962,8 +2937,18 @@ void GlobeEngine::Render() {
     debugStats_.visibleTiles = drawStats.renderableLeaves + drawStats.fallbackTiles;
     debugStats_.drawCalls = renderStats.drawCalls;
     debugStats_.trianglesRendered = renderStats.trianglesRendered;
+    debugStats_.textureArrayRequested = textureArrayRequested_;
+    debugStats_.textureArrayEffective = textureArrayEffective_;
+    debugStats_.textureArrayMaxLayers = textureArrayMaxLayers_;
     debugStats_.instancedBatches = renderStats.instancedBatches;
     debugStats_.instancedTiles = renderStats.instancedTiles;
+    debugStats_.instancedArrayBatches = renderStats.instancedArrayBatches;
+    debugStats_.instancedArrayTiles = renderStats.instancedArrayTiles;
+    debugStats_.instancedArraySkipsNotArray = renderStats.instancedArraySkipsNotArray;
+    debugStats_.instancedArraySkipsMissingLayer = renderStats.instancedArraySkipsMissingLayer;
+    debugStats_.arrayMetadataInvalidSkips = renderStats.arrayMetadataInvalidSkips;
+    debugStats_.arrayCrossfadeTo2dFallbacks = renderStats.arrayCrossfadeTo2dFallbacks;
+    debugStats_.arraySinglePathFallbacks = renderStats.arraySinglePathFallbacks;
     debugStats_.atlasEnabled = textureManager_ && textureManager_->IsAtlasEnabled();
     debugStats_.atlasPages = textureManager_ ? textureManager_->GetAtlasPageCount() : 0;
     debugStats_.atlasUsedSlots = textureManager_ ? textureManager_->GetAtlasUsedSlots() : 0;
@@ -2991,6 +2976,8 @@ void GlobeEngine::Render() {
     debugStats_.meshRevisionDoubleBumpTiles = meshRevisionDoubleBumpTilesFrame_;
     debugStats_.demCoEvictions = demCoEvictions_;
     debugStats_.tilesUsingAncestorDem = tilesUsingAncestorDem;
+    debugStats_.terrainMode = config_.resolvedTerrainMode;
+    debugStats_.terrainModeReason = config_.resolvedTerrainModeReason;
     debugStats_.seamGapP95M = seamGapP95M;
     debugStats_.seamGapMaxM = seamGapMaxM;
     debugStats_.cliffEdgeCount = cliffEdgeCount;
@@ -3026,6 +3013,12 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshDiskCacheHits = rockStats.diskCacheHits;
         debugStats_.rockMeshDiskCacheMisses = rockStats.diskCacheMisses;
         debugStats_.rockMeshStaleDrops = rockStats.staleDropCount;
+        // HTTP error classification
+        debugStats_.rockMeshHttp400 = rockStats.failedHttp400Count;
+        debugStats_.rockMeshHttp404 = rockStats.failedHttp404Count;
+        debugStats_.rockMeshNetwork = rockStats.failedNetworkCount;
+        debugStats_.rockMeshHttpOther = rockStats.failedHttpOtherCount;
+        debugStats_.rockMeshBlacklisted = rockStats.blacklistSkipCount;
         // P0-P2: Vertex explosion mitigation counters
         debugStats_.rockMeshDiscardInvalidTransform = rockStats.discardInvalidTransform;
         debugStats_.rockMeshDiscardInvalidScale = rockStats.discardInvalidScale;
@@ -3051,8 +3044,64 @@ void GlobeEngine::Render() {
         debugStats_.rockMeshFallbackTextureUsed = 0;
     }
     
+    const double nowSec = glfwGetTime();
+    if (config_.renderStatsLogging &&
+        config_.renderStatsLogIntervalSec > 0.0f &&
+        (lastRenderStatsLogTimeSec_ <= 0.0 ||
+         (nowSec - lastRenderStatsLogTimeSec_) >= static_cast<double>(config_.renderStatsLogIntervalSec))) {
+        lastRenderStatsLogTimeSec_ = nowSec;
+        std::cout << "[Render][STATS]"
+                  << " frame=" << frameSerial_
+                  << " draw=" << debugStats_.drawCalls
+                  << " tri=" << debugStats_.trianglesRendered
+                  << " leaves=" << debugStats_.leafNoTexture + debugStats_.leafNoTerrain + debugStats_.leafNoMesh
+                  << " renderable=" << debugStats_.renderableLeaves
+                  << " fallback=" << debugStats_.fallbackTiles
+                  << " placeholders=" << debugStats_.placeholderTiles
+                  << " texArray=req:" << (debugStats_.textureArrayRequested ? "array" : "atlas")
+                  << " eff:" << (debugStats_.textureArrayEffective ? "array" : "atlas")
+                  << " maxLayers=" << debugStats_.textureArrayMaxLayers
+                  << " demFlat=" << debugStats_.demFlatLeaves
+                  << " demPending=" << debugStats_.demPendingLeaves
+                  << " arrayMetaInvalid=" << debugStats_.arrayMetadataInvalidSkips
+                  << " arrayCrossfade=" << debugStats_.arrayCrossfadeTo2dFallbacks
+                  << " arrayInstSkips=" << debugStats_.instancedArraySkipsNotArray
+                  << " arrayInstMissLayer=" << debugStats_.instancedArraySkipsMissingLayer
+                  << " arraySinglePath=" << renderStats.arraySinglePathFallbacks
+                  << " terrainMode=" << (debugStats_.terrainMode.empty() ? "default" : debugStats_.terrainMode)
+                  << " modeReason=" << (debugStats_.terrainModeReason.empty() ? "n/a" : debugStats_.terrainModeReason)
+                  << " fps=" << debugStats_.fps
+                  << " frameMs=" << debugStats_.renderMs
+                  << "\n";
+    }
+
+    if (config_.viewDebugLogging &&
+        config_.viewDebugLogIntervalSec > 0.0f &&
+        (lastViewDebugLogTimeSec_ <= 0.0 ||
+         (nowSec - lastViewDebugLogTimeSec_) >= static_cast<double>(config_.viewDebugLogIntervalSec))) {
+        lastViewDebugLogTimeSec_ = nowSec;
+        glm::dvec3 centerPoint{0.0, 0.0, 0.0};
+        const bool centerWorldHit = PickGlobe(config_.windowWidth * 0.5, config_.windowHeight * 0.5, centerPoint);
+        const double centerDepthKm = centerWorldHit
+            ? (glm::length(centerPoint) - earth::EARTH_RADIUS_KM)
+            : 1.0;
+        std::cout << "[ViewDebugState]"
+                  << " frame=" << frameSerial_
+                  << " centerWorldHit=" << (centerWorldHit ? 1 : 0)
+                  << " centerDepth=" << centerDepthKm
+                  << " centerLat=" << debugStats_.latitude
+                  << " centerLon=" << debugStats_.longitude
+                  << " centerAltKm=" << debugStats_.altitude / 1000.0
+                  << " heading=" << debugStats_.heading
+                  << " tilt=" << debugStats_.tilt
+                  << " pick=" << (centerWorldHit ? "ok" : "miss")
+                  << "\n";
+    }
+
     // Render ImGui debug panel
-    RenderDebugPanel();
+    if (config_.showDebugPanelEnabled) {
+        RenderDebugPanel();
+    }
 
     frameTimings_.renderMs = (glfwGetTime() * 1000.0) - renderStartMs;
     frameTimings_.totalMs = frameTimings_.totalMs + frameTimings_.renderMs;
@@ -3396,6 +3445,18 @@ void GlobeEngine::RenderDebugPanel() {
             ImGui::Text("Triangles: %d", debugStats_.trianglesRendered);
             ImGui::Text("Instanced: %d batches / %d tiles",
                         debugStats_.instancedBatches, debugStats_.instancedTiles);
+            ImGui::Text("Instanced(Array): %d batches / %d tiles",
+                        debugStats_.instancedArrayBatches, debugStats_.instancedArrayTiles);
+            ImGui::Text("Texture Path: req=%s eff=%s maxLayers=%d",
+                        debugStats_.textureArrayRequested ? "array" : "atlas",
+                        debugStats_.textureArrayEffective ? "array" : "atlas",
+                        debugStats_.textureArrayMaxLayers);
+            ImGui::Text("Array fallback: %d notArray / %d missingLayer / %d crossfade->2D / %d singlePath",
+                        debugStats_.instancedArraySkipsNotArray,
+                        debugStats_.instancedArraySkipsMissingLayer,
+                        debugStats_.arrayCrossfadeTo2dFallbacks,
+                        debugStats_.arraySinglePathFallbacks);
+            ImGui::Text("Array metadata invalid skips: %d", debugStats_.arrayMetadataInvalidSkips);
             if (debugStats_.atlasEnabled) {
                 ImGui::Text("Atlas Slots: %d / %d (%d pages)",
                             debugStats_.atlasUsedSlots,
@@ -3494,6 +3555,14 @@ void GlobeEngine::RenderDebugPanel() {
                 ImGui::Text("Uploaded: %d", debugStats_.rockMeshUploaded);
                 ImGui::Text("Pending: %d | InFlight: %d", debugStats_.rockMeshPending, debugStats_.rockMeshInFlight);
                 ImGui::Text("Failed: %d | Stale Drops: %d", debugStats_.rockMeshFailed, debugStats_.rockMeshStaleDrops);
+                // HTTP error breakdown
+                if (debugStats_.rockMeshFailed > 0) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                                       "  HTTP 400:%d  404:%d  Net:%d  Other:%d  Blacklisted:%d",
+                                       debugStats_.rockMeshHttp400, debugStats_.rockMeshHttp404,
+                                       debugStats_.rockMeshNetwork, debugStats_.rockMeshHttpOther,
+                                       debugStats_.rockMeshBlacklisted);
+                }
                 ImGui::Text("Disk Cache Hit/Miss: %d / %d", 
                             debugStats_.rockMeshDiskCacheHits, debugStats_.rockMeshDiskCacheMisses);
                 // P0-P2: Vertex explosion mitigation telemetry
@@ -3660,7 +3729,10 @@ void GlobeEngine::RenderDebugPanel() {
                 frameRequested_ = true;
             }
             
-            ImGui::Text("Terrain Mode: CPU Mesh Bake");
+            ImGui::Text("Terrain Mode: %s", debugStats_.terrainMode.empty() ? "unknown" : debugStats_.terrainMode.c_str());
+            if (!debugStats_.terrainModeReason.empty()) {
+                ImGui::Text("Terrain Mode Reason: %s", debugStats_.terrainModeReason.c_str());
+            }
             
             // P0-1: Atmosphere controls
             ImGui::Spacing();
@@ -3819,6 +3891,109 @@ void GlobeEngine::InitPivotGizmo() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
     
     glBindVertexArray(0);
+}
+
+void GlobeEngine::RenderRockMeshes(const glm::mat4& mvp) {
+    if (!config_.rockMeshRenderEnabled || !rockMeshManager_ || rockMeshManager_->GetUploadedCount() == 0) {
+        return;
+    }
+    
+    // Enable polygon offset to prevent z-fighting with base terrain
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-1.0f, -1.0f);
+    
+    // Disable culling for first bring-up (helps debug visibility)
+    bool cullWasEnabled = glIsEnabled(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);
+    
+    // Bind tile shader with deterministic uniform state for RockMesh pass.
+    // The tile shader carries many uniforms from the previous tile batch —
+    // every one must be explicitly reset to safe defaults to prevent stale
+    // state from leaking into the RockMesh draw calls.
+    const GLuint tileProgram = shaderManager_->GetTileProgram();
+    if (tileProgram == 0) {
+        // No shader available — restore state and bail
+        if (cullWasEnabled) glEnable(GL_CULL_FACE);
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        return;
+    }
+    
+    glUseProgram(tileProgram);
+    
+    // --- Global uniforms (set once per RockMesh pass) ---
+    GLint mvpLoc = glGetUniformLocation(tileProgram, "uMVP");
+    if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+    
+    // Terrain morph: 1.0 = fully morphed (no displacement reduction)
+    GLint morphLoc = glGetUniformLocation(tileProgram, "uTerrainMorph");
+    if (morphLoc >= 0) glUniform1f(morphLoc, 1.0f);
+    
+    // Log-depth: must match tile pass to share depth buffer correctly
+    const bool useLogDepth = config_.logDepthEnabled && !config_.reversedZEnabled;
+    GLint logDepthLoc = glGetUniformLocation(tileProgram, "uUseLogDepth");
+    if (logDepthLoc >= 0) glUniform1i(logDepthLoc, useLogDepth ? 1 : 0);
+    GLint logDepthFarLoc = glGetUniformLocation(tileProgram, "uLogDepthFar");
+    if (logDepthFarLoc >= 0) glUniform1f(logDepthFarLoc, currentFarPlaneKm_);
+    
+    // Crossfade/unpop: disabled for RockMesh (no tile ancestor blending)
+    GLint crossfadeLoc = glGetUniformLocation(tileProgram, "uRasterCrossfade");
+    if (crossfadeLoc >= 0) glUniform1i(crossfadeLoc, 0);
+    GLint unpopBlendLoc = glGetUniformLocation(tileProgram, "uUnpopBlend");
+    if (unpopBlendLoc >= 0) glUniform1f(unpopBlendLoc, 0.0f);
+    
+    // Corner LODs: no bilinear LOD interpolation for RockMesh
+    GLint cornerLodsLoc = glGetUniformLocation(tileProgram, "uCornerLods");
+    if (cornerLodsLoc >= 0) glUniform4f(cornerLodsLoc, 0.0f, 0.0f, 0.0f, 0.0f);
+    
+    // Distance-based morph: disabled (use uTerrainMorph directly)
+    GLint distMorphLoc = glGetUniformLocation(tileProgram, "uUseDistanceBasedMorph");
+    if (distMorphLoc >= 0) glUniform1i(distMorphLoc, 0);
+    
+    // Texture2D mode: RockMesh uses its own GL_TEXTURE_2D on unit 0
+    // Force 2D path to avoid sampler2DArray mismatch from tile batch
+    GLint useTexture2DLoc = glGetUniformLocation(tileProgram, "uUseTexture2D");
+    if (useTexture2DLoc >= 0) glUniform1i(useTexture2DLoc, 1);
+    
+    // Sampler binding: uTexture → unit 0 (RockMesh binds its texture there)
+    GLint textureLoc = glGetUniformLocation(tileProgram, "uTexture");
+    if (textureLoc >= 0) glUniform1i(textureLoc, 0);
+    
+    // Per-mesh uniforms (uFade, uTexScaleOffsetMain, RTE origin) are
+    // set by RockMeshManager::Render() for each draw call.
+    
+    // Draw all rockmeshes
+    rockMeshManager_->Render(tileProgram, config_.useRteRender);
+    
+    // GL error check after RockMesh draw (one-shot to avoid spam)
+    {
+        static bool glErrorChecked = false;
+        if (!glErrorChecked) {
+            GLenum err = glGetError();
+            if (err != GL_NO_ERROR) {
+                std::cerr << "[RockMesh:Render] GL error after draw: 0x" 
+                          << std::hex << err << std::dec << "\n";
+            }
+            glErrorChecked = true;
+        }
+    }
+    
+    // One-shot diagnostic log on first successful render
+    if (!rockMeshFirstRenderLogged_) {
+        size_t meshCount = rockMeshManager_->GetUploadedCount();
+        std::cout << "[RockMesh] First render: " << meshCount << " meshes"
+                  << ", shader=" << tileProgram
+                  << ", logDepth=" << (useLogDepth ? "ON" : "OFF")
+                  << "/" << currentFarPlaneKm_ << "km"
+                  << ", RTE=" << (config_.useRteRender ? "ON" : "OFF")
+                  << "\n";
+        rockMeshFirstRenderLogged_ = true;
+    }
+    
+    // Restore state
+    if (cullWasEnabled) {
+        glEnable(GL_CULL_FACE);
+    }
+    glDisable(GL_POLYGON_OFFSET_FILL);
 }
 
 void GlobeEngine::RenderPivot(const glm::mat4& viewProj) {

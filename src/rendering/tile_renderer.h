@@ -24,6 +24,13 @@ public:
         int trianglesRendered = 0;
         int instancedBatches = 0;
         int instancedTiles = 0;
+        int instancedArrayBatches = 0;
+        int instancedArrayTiles = 0;
+        int instancedArraySkipsNotArray = 0;
+        int instancedArraySkipsMissingLayer = 0;
+        int arrayMetadataInvalidSkips = 0;
+        int arrayCrossfadeTo2dFallbacks = 0;
+        int arraySinglePathFallbacks = 0;
     };
 
     enum class TextureTarget : uint8_t {

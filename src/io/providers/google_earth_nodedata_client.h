@@ -40,7 +40,9 @@ public:
     
     // Fetch NodeData for a given node key (quadkey string)
     // This is a synchronous blocking call - caller should run in worker thread
-    NodeDataResult FetchNodeData(const std::string& nodeKey);
+    // epochOverride: if non-empty, use this epoch instead of the default
+    NodeDataResult FetchNodeData(const std::string& nodeKey,
+                                 const std::string& epochOverride = "");
 
     // Set epoch dynamically (from PlanetoidMetadata via octree index)
     void SetEpoch(const std::string& epoch) { epoch_ = epoch; }

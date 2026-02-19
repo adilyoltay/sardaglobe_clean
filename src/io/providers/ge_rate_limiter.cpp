@@ -6,7 +6,7 @@
 namespace globe {
 
 GeRateLimiter::GeRateLimiter(int minIntervalMs)
-    : lastRequest_(std::chrono::steady_clock::time_point::min()),
+    : lastRequest_(),  // Default-constructed = epoch (zero), first WaitForSlot passes instantly
       minInterval_(minIntervalMs) {
 }
 

@@ -164,6 +164,7 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
         ss << "uniform sampler2DArray uPhotoTileTextureUnpopArray;\n";
         ss << "uniform int uUnpopTextureLayer;\n";
         ss << "uniform int uUnpopUsesArray;\n";
+        ss << "uniform vec4 uTexScaleOffsetMain;\n";   // xy=scale, zw=offset for main raster
         ss << "uniform float uUnpopBlend;\n";
         ss << "uniform int uRasterCrossfade;\n";       // 0=single texture, 1=crossfade
         ss << "uniform vec4 uTexScaleOffsetUnpop;\n"; // xy=scale, zw=offset for unpop
@@ -210,12 +211,13 @@ std::string ShaderManager::BuildFragmentShader(ShaderFlags flags) {
     ss << "void main() {\n";
     
     if (useArray) {
+        ss << "    vec2 uvMain = vTexCoord * uTexScaleOffsetMain.xy + uTexScaleOffsetMain.zw;\n";
         // Texture array path - supports both array and 2D placeholder
         ss << "    vec4 texColor;\n";
         ss << "    if (uUseTexture2D == 1) {\n";
-        ss << "        texColor = texture(uTexture, vTexCoord);\n";
+        ss << "        texColor = texture(uTexture, uvMain);\n";
         ss << "    } else {\n";
-        ss << "        texColor = texture(uTextureArray, vec3(vTexCoord, float(uTextureLayer)));\n";
+        ss << "        texColor = texture(uTextureArray, vec3(uvMain, float(uTextureLayer)));\n";
         ss << "    }\n";
         ss << "    if (uRasterCrossfade == 1) {\n";
         ss << "        vec2 uvUnpop = vTexCoord * uTexScaleOffsetUnpop.xy + uTexScaleOffsetUnpop.zw;\n";

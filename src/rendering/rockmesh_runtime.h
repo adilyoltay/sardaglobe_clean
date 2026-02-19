@@ -36,6 +36,9 @@ struct RockMeshCpu {
     int triangleCount = 0;
     bool valid = false;
     std::string error;
+    
+    // Epoch for stale upload prevention (set by ProcessPriorityQueue, checked by ProcessUploads)
+    uint64_t uploadEpoch = 0;
 };
 
 // GPU-side mesh resources (main thread only)

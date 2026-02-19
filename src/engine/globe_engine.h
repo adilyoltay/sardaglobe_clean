@@ -110,6 +110,9 @@ private:
     std::unique_ptr<TextureManager> textureManager_;
     std::unique_ptr<ShaderManager> shaderManager_;
     std::unique_ptr<TileRenderer> tileRenderer_;
+    bool textureArrayRequested_ = false;
+    bool textureArrayEffective_ = false;
+    int textureArrayMaxLayers_ = 0;
     std::unique_ptr<TileMeshScheduler> meshScheduler_;
     std::unique_ptr<DemManager> demManager_;
     int demProviderEffectiveMaxZoom_ = 15;  // Runtime effective DEM cap after provider clamp
@@ -285,8 +288,18 @@ private:
         int atlasPages = 0;
         int atlasUsedSlots = 0;
         int atlasCapacitySlots = 0;
+        bool textureArrayRequested = false;
+        bool textureArrayEffective = false;
+        int textureArrayMaxLayers = 0;
         int instancedBatches = 0;
         int instancedTiles = 0;
+        int instancedArrayBatches = 0;
+        int instancedArrayTiles = 0;
+        int instancedArraySkipsNotArray = 0;
+        int instancedArraySkipsMissingLayer = 0;
+        int arrayMetadataInvalidSkips = 0;
+        int arrayCrossfadeTo2dFallbacks = 0;
+        int arraySinglePathFallbacks = 0;
         float cameraSpeedKmPerSec = 0.0f;
         double demWaitMs = 0.0;
         size_t meshRebuildCount = 0;
@@ -305,6 +318,8 @@ private:
         int meshRevisionBumpsFrame = 0;            // Tiles bumped once in single-commit stage
         int meshRevisionDoubleBumpTiles = 0;       // Tiles with >1 revision reason bit in a frame
         int tilesUsingAncestorDem = 0;
+        std::string terrainMode;                   // Resolved startup terrain mode
+        std::string terrainModeReason;             // Why that terrain mode was chosen
         size_t demCoEvictions = 0;
         double seamGapP95M = 0.0;
         double seamGapMaxM = 0.0;
@@ -324,6 +339,12 @@ private:
         int rockMeshDiskCacheHits = 0;   // Served from disk cache
         int rockMeshDiskCacheMisses = 0; // Network fetch required
         int rockMeshStaleDrops = 0;      // Dropped due to stale generation
+        // HTTP error classification
+        int rockMeshHttp400 = 0;         // Bad request errors
+        int rockMeshHttp404 = 0;         // Not found errors
+        int rockMeshNetwork = 0;         // Network/timeout errors
+        int rockMeshHttpOther = 0;       // Other HTTP errors
+        int rockMeshBlacklisted = 0;     // Skipped (terminal error blacklist)
         float rockMeshFade = 1.0f;       // Current fade value (0.0-1.0)
         bool rockMeshEnabled = false;    // Whether RockMesh system is active
         // P0-P2: RockMesh vertex explosion mitigation counters
@@ -337,6 +358,8 @@ private:
     };
     DebugStats debugStats_;
     bool showDebugPanel_ = true;
+    double lastRenderStatsLogTimeSec_ = 0.0;
+    double lastViewDebugLogTimeSec_ = 0.0;
 
     // Render-time quorum counters (computed during Update; displayed in RenderDebugPanel).
     int renderQuorumDowngrades_ = 0;
@@ -373,6 +396,10 @@ private:
     void InitImGui();
     void ShutdownImGui();
     void RenderDebugPanel();
+    
+    // RockMesh render pass (isolated shader state + uniform setup)
+    void RenderRockMeshes(const glm::mat4& mvp);
+    bool rockMeshFirstRenderLogged_ = false;  // One-shot diagnostic log guard
     
     // Pivot gizmo (Google Earth style target icon)
     void InitPivotGizmo();

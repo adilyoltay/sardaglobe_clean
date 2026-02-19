@@ -29,6 +29,9 @@ public:
         int renderFallbackDivergenceLeaves = 0;  // Render leaf set still needed fallback due missing terrain
         int demUsedButCoverageMismatchLeaves = 0;  // DEM coverage exists, tile.demUsed is false
         int missing = 0;            // True gaps (no ancestor, no mesh)
+        int arrayMetadataInvalidSkips = 0;      // Renderable checks rejected due invalid array metadata
+        int arraySinglePathFallbacks = 0;       // Single-tile array fallback reasons
+        int arrayCrossfadeTo2dFallbacks = 0;    // Crossfade fallback from array metadata issue
     };
     
     RenderFrame(TileRenderer& tileRenderer, ShaderManager& shaderManager);
@@ -64,7 +67,8 @@ private:
     Tile* FindRenderableAncestor(const TileKey& key,
                                  std::unordered_map<TileKey, Tile>& tiles,
                                  uint32_t loadingTexture,
-                                 bool allowPlaceholder);
+                                 bool allowPlaceholder,
+                                 bool useTextureArray);
 
     TileRenderer& tileRenderer_;
     ShaderManager& shaderManager_;

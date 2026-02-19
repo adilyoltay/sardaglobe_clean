@@ -62,6 +62,29 @@ inline int AdaptiveMeshSegments(int level, int meshSegments, int demMeshN, bool 
 }
 
 // Globe engine configuration
+// Terrain pipeline mode for startup decision.
+// Auto: run strict GE/NodeData probe and select GeRockMesh on success.
+// GeRockMesh: force GE 3D mesh mode (DEM disabled unless explicitly enabled).
+// TerrainRgbDem: force DEM terrain path.
+enum class TerrainPipelineMode {
+    Auto = 0,
+    GeRockMesh,
+    TerrainRgbDem
+};
+
+inline const char* TerrainPipelineModeToString(TerrainPipelineMode mode) {
+    switch (mode) {
+        case TerrainPipelineMode::Auto:
+            return "auto";
+        case TerrainPipelineMode::GeRockMesh:
+            return "ge-rockmesh";
+        case TerrainPipelineMode::TerrainRgbDem:
+            return "terrain-rgb";
+        default:
+            return "unknown";
+    }
+}
+
 struct Config {
     // Tile sources
     std::string tileUrl;              // Base tile URL template ({z}/{x}/{y})
@@ -135,6 +158,9 @@ struct Config {
                geMeshEndpoint.find("{quadkey}") != std::string::npos;
     }
     
+    // RockMesh runtime debug (per-mesh fetch/parse/build/upload logs)
+    bool rockMeshRuntimeDebug = false;              // Gate verbose [RockMesh:Worker/Upload] logs
+    
     // RockMesh (NodeData) vertex explosion mitigation (P0-P2)
     bool rockMeshRenderEnabled = true;              // Master kill-switch for RockMesh
     bool rockMeshSanityEnabled = true;              // Enable validation gates
@@ -187,6 +213,17 @@ struct Config {
     bool adaptiveResourceLimits = false;
     
     // Features
+    // Startup terrain pipeline policy (legacy compatibility preserved by startup resolver).
+    // Auto: probe GE NodeData availability -> ge-rockmesh on success, otherwise terrain-rgb.
+    TerrainPipelineMode terrainMode = TerrainPipelineMode::Auto;
+    // Probe policy and tuning.
+    bool geStartupProbeStrict = true;
+    std::string geStartupProbeNodeKey = "0213";
+    int geStartupProbeTimeoutSec = 5;
+    // Resolved startup mode and reason for telemetry/debug.
+    std::string resolvedTerrainMode = "";
+    std::string resolvedTerrainModeReason = "";
+
     bool demEnabled = true;           // Enable terrain by default (uses GE elevation API)
     bool vectorEnabled = false;
     bool wireframeMode = false;
@@ -211,9 +248,9 @@ struct Config {
     size_t pboUploadSize = 4 * 1024 * 1024; // Default PBO buffer size (4MB)
     
     // Faz 2B: Texture2DArray (layer-based texture storage)
-    // P0-2: Default enabled for GE visual parity (bleeding prevention)
-    // Runtime capability check in GlobeEngine::Init() may auto-fallback to atlas
-    bool useTexture2DArray = true;  // Enable Texture2DArray (prevents bleeding, default true)
+    // Disabled by default to avoid startup regressions on some GL drivers.
+    // Runtime capability check in GlobeEngine::Init() may auto-enable on stable environments.
+    bool useTexture2DArray = false;  // Enable Texture2DArray (default false for stability)
     
     // Faz 3: Performance optimizations
     // Horizon Culling
@@ -274,10 +311,10 @@ struct Config {
     int demVisiblePinBudget = 1024;   // Max visible/neighbor DEM keys pinned against eviction
     // Height scale architecture: separated base scale and exaggeration for GE parity
     double demHeightScaleBase = 1.0;       // Base scale: Terrain-RGB → meters (true elevation)
-    double demExaggerationFactor = 2.5;    // Visual exaggeration for rendering (2.5x)
+    double demExaggerationFactor = 1.0;    // Visual exaggeration for rendering (1.0 = true scale)
     
     // DEPRECATED: Use demHeightScaleBase * demExaggerationFactor instead
-    double demHeightScale = 2.5;           // Legacy combined value for backward compatibility
+    double demHeightScale = 1.0;           // Legacy combined value for backward compatibility
     bool demRasterCoEviction = true;  // Evict DEM cache entries when matching raster tile is evicted
     int demEdgeBlendSegments = 2;     // Edge coherence blend band (in vertex rings). 0 disables blending.
     bool demDebug = false;            // Enable DEM debug logging
@@ -304,6 +341,11 @@ struct Config {
 
     // Debug
     bool showDebugInfo = true;
+    bool renderStatsLogging = false;
+    float renderStatsLogIntervalSec = 1.0f;
+    bool viewDebugLogging = false;
+    float viewDebugLogIntervalSec = 1.0f;
+    bool showDebugPanelEnabled = true;
     bool logNetwork = false;
     std::string smokeScene = "default";  // Smoke scene preset (default | aegean)
 

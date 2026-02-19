@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
-#include <cassert>
 
 namespace globe {
 
@@ -50,7 +49,13 @@ inline void ResetCrossfadeState(ShaderManager& shaderManager, bool useTextureArr
     }
 }
 
-std::size_t gUnpopArrayTo2DFallbacks = 0;
+inline bool HasValidArrayTile(const Tile& tile) {
+    return tile.usesTextureArray &&
+           tile.textureLayerHandle != -1 &&
+           tile.textureArrayLayer >= 0 &&
+           tile.textureArrayTier >= 0 &&
+           tile.textureId != 0;
+}
 
 struct DrawCallBreakdown {
     int drawCalls = 0;
@@ -310,6 +315,9 @@ TileRenderer::~TileRenderer() {
 }
 
 uint32_t TileRenderer::CompileShader(uint32_t type, const char* source) {
+    if (!glCreateShader || !glShaderSource || !glCompileShader || !glGetShaderiv) {
+        return 0;
+    }
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
     glCompileShader(shader);
@@ -326,6 +334,9 @@ uint32_t TileRenderer::CompileShader(uint32_t type, const char* source) {
 }
 
 uint32_t TileRenderer::LinkProgram(uint32_t vertexShader, uint32_t fragmentShader) {
+    if (!glCreateProgram || !glAttachShader || !glLinkProgram || !glGetProgramiv) {
+        return 0;
+    }
     GLuint program = glCreateProgram();
     glAttachShader(program, vertexShader);
     glAttachShader(program, fragmentShader);
@@ -343,6 +354,9 @@ uint32_t TileRenderer::LinkProgram(uint32_t vertexShader, uint32_t fragmentShade
 }
 
 bool TileRenderer::InitInstancedResources() {
+    if (!glCreateShader || !glCreateProgram) {
+        return false;
+    }
     // Standard 2D instanced shader
     uint32_t vertexShader = CompileShader(GL_VERTEX_SHADER, kInstancedFlatTileVertexShader);
     uint32_t fragmentShader = CompileShader(GL_FRAGMENT_SHADER, kInstancedFlatTileFragmentShader);
@@ -396,6 +410,28 @@ bool TileRenderer::InitInstancedResources() {
 }
 
 void TileRenderer::DestroyInstancedResources() {
+    if (!glDeleteBuffers || !glDeleteVertexArrays || !glDeleteProgram) {
+        instancedInstanceVbo_ = 0;
+        instancedGridEbo_ = 0;
+        instancedGridVbo_ = 0;
+        instancedVao_ = 0;
+        instancedProgram_ = 0;
+        instancedArrayInstanceVbo_ = 0;
+        instancedArrayVao_ = 0;
+        instancedArrayProgram_ = 0;
+        instancedArrayMvpLoc_ = -1;
+        instancedArrayTextureLoc_ = -1;
+        instancedArrayUseLogDepthLoc_ = -1;
+        instancedArrayLogDepthFarLoc_ = -1;
+        instancedArrayTextureLayerLoc_ = -1;
+        instancedSegments_ = -1;
+        instancedIndexCount_ = 0;
+        instancedMvpLoc_ = -1;
+        instancedTextureLoc_ = -1;
+        instancedUseLogDepthLoc_ = -1;
+        instancedLogDepthFarLoc_ = -1;
+        return;
+    }
     if (instancedInstanceVbo_ != 0) {
         glDeleteBuffers(1, &instancedInstanceVbo_);
         instancedInstanceVbo_ = 0;
@@ -543,9 +579,16 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
     
     // Faz 2B: Texture array uses different sampler
     if (useTextureArray) {
-        glUniform1i(shaderManager_.GetTextureArrayLocation(), 0);
-        glUniform1i(shaderManager_.GetUseTexture2DLocation(), 0);  // Default to array mode
-        glUniform1i(shaderManager_.GetPhotoTileTextureUnpopArrayLocation(), 2);
+        // Unit 0: sampler2DArray (primary array texture)
+        // Unit 1: sampler2D (2D fallback for non-array tiles / placeholders)
+        // Unit 2: sampler2D (crossfade ancestor 2D)
+        // Unit 3: sampler2DArray (crossfade ancestor array)
+        // CRITICAL: sampler2D and sampler2DArray must NEVER share the same
+        // texture unit — macOS Metal returns zero-texture on type mismatch.
+        glUniform1i(shaderManager_.GetTextureArrayLocation(), 0);      // uTextureArray → unit 0
+        glUniform1i(shaderManager_.GetTextureLocation(), 1);           // uTexture → unit 1
+        glUniform1i(shaderManager_.GetUseTexture2DLocation(), 0);      // Default to array mode
+        glUniform1i(shaderManager_.GetPhotoTileTextureUnpopArrayLocation(), 3); // uPhotoTileTextureUnpopArray → unit 3
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 0);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), 0);
         // uTextureLayer will be set per-tile in RenderTile
@@ -554,7 +597,7 @@ void TileRenderer::BeginBatch(const glm::mat4& mvp, bool wireframe,
     }
     
     glUniform1f(shaderManager_.GetFadeLocation(), 1.0f);
-    glUniform1i(shaderManager_.GetTextureUnpopLocation(), 2);  // Unpop texture on unit 2
+    glUniform1i(shaderManager_.GetTextureUnpopLocation(), 2);  // uPhotoTileTextureUnpop → unit 2 (sampler2D)
     glUniform1f(shaderManager_.GetUnpopBlendLocation(), 1.0f);
     glUniform4f(shaderManager_.GetTexScaleOffsetMainLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
     glUniform4f(shaderManager_.GetTexScaleOffsetUnpopLocation(), 1.0f, 1.0f, 0.0f, 0.0f);
@@ -579,19 +622,35 @@ void TileRenderer::RenderTile(const Tile& tile, float terrainMorph) {
     if (!batchActive_) return;
     // Renderable = hasMesh && textureId != 0 (not IsReady!)
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
+
+    // If array mode is disabled but the tile was uploaded into array storage,
+    // fail fast and avoid binding a GL_TEXTURE_2D_ARRAY with GL_TEXTURE_2D.
+    if (!useTextureArrayBatch_ && tile.usesTextureArray) {
+        ++stats_.arrayMetadataInvalidSkips;
+        ++stats_.arraySinglePathFallbacks;
+        return;
+    }
     
     // Faz 2B: Bind texture (array or 2D)
-    glActiveTexture(GL_TEXTURE0);
     const bool useArrayTexture =
-        useTextureArrayBatch_ && tile.usesTextureArray && tile.textureArrayLayer >= 0;
+        useTextureArrayBatch_ && tile.usesTextureArray;
     if (useArrayTexture) {
-        // Texture array path - bind array and set layer
+        if (!HasValidArrayTile(tile)) {
+            ++stats_.arrayMetadataInvalidSkips;
+            ++stats_.arraySinglePathFallbacks;
+            return;
+        }
+        // Texture array path - bind array on unit 0 and set layer
+        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D_ARRAY, tile.textureId);
         LogTextureBindTelemetry("RenderTile.mainArray", GL_TEXTURE_2D_ARRAY, tile.textureId, tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetTextureLayerLocation(), tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetUseTexture2DLocation(), 0);
     } else {
-        // Legacy 2D texture path
+        // Legacy 2D texture path — use unit 1 when array batch is active
+        // to avoid sampler type mismatch with sampler2DArray on unit 0.
+        const GLenum texUnit = useTextureArrayBatch_ ? GL_TEXTURE1 : GL_TEXTURE0;
+        glActiveTexture(texUnit);
         glBindTexture(GL_TEXTURE_2D, tile.textureId);
         LogTextureBindTelemetry("RenderTile.main2D", GL_TEXTURE_2D, tile.textureId, -1);
         if (useTextureArrayBatch_) {
@@ -625,10 +684,13 @@ void TileRenderer::RenderTileWithTexture(const Tile& tile, uint32_t textureId, f
     
     // Faz 2B: Placeholder uses GL_TEXTURE_2D even in array mode.
     // Tell shader to use 2D sampler path for this draw.
+    // Bind on unit 1 when array batch active to avoid sampler type mismatch.
     if (useTextureArrayBatch_) {
         glUniform1i(shaderManager_.GetUseTexture2DLocation(), 1);
+        glActiveTexture(GL_TEXTURE1);
+    } else {
+        glActiveTexture(GL_TEXTURE0);
     }
-    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, textureId);
     ApplyPerTileUniforms(shaderManager_, tile, glm::vec4(1.0f, 1.0f, 0.0f, 0.0f), useRteBatch_);
     glUniform1f(shaderManager_.GetTerrainMorphLocation(), std::clamp(terrainMorph, 0.0f, 1.0f));
@@ -661,11 +723,13 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     if (!useTextureArrayBatch_) {
         unpopTarget = TextureTarget::k2D;
     }
-    if (useTextureArrayBatch_ &&
-        unpopTarget == TextureTarget::kArray &&
-        unpopTextureLayer < 0) {
-        assert(false && "RenderTileWithCrossfade received array target without valid array layer");
-        ++gUnpopArrayTo2DFallbacks;
+    const bool invalidUnpopArray = useTextureArrayBatch_ &&
+                                  unpopTarget == TextureTarget::kArray &&
+                                  unpopTextureLayer < 0;
+    if (invalidUnpopArray) {
+        ++stats_.arrayMetadataInvalidSkips;
+        ++stats_.arrayCrossfadeTo2dFallbacks;
+        ++stats_.arraySinglePathFallbacks;
         unpopTarget = TextureTarget::k2D;
     }
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) {
@@ -680,18 +744,14 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
         return;
     }
 
-    // Safety: if caller marks ancestor as array-backed but omits valid layer index,
-    // avoid binding array id to GL_TEXTURE_2D sampler (undefined behavior).
-    // Degrade gracefully to non-crossfade tile render in this edge case.
-    if (useTextureArrayBatch_ &&
-        unpopTarget == TextureTarget::kArray &&
-        unpopTextureLayer < 0) {
+    // When array mode is disabled, never bind array textures as 2D textures.
+    if (!useTextureArrayBatch_ && tile.usesTextureArray) {
+        ++stats_.arrayMetadataInvalidSkips;
+        ++stats_.arrayCrossfadeTo2dFallbacks;
+        ++stats_.arraySinglePathFallbacks;
         ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
-        RenderTile(tile, terrainMorph);
         return;
     }
-
-    assert(unpopTextureId != 0);
 
     // Faz 2B: Ensure array mode for this draw (in case previous was 2D placeholder)
     if (useTextureArrayBatch_) {
@@ -699,15 +759,23 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     }
 
     // Faz 2B: Bind child texture (array or 2D)
-    glActiveTexture(GL_TEXTURE0);
-    const bool useMainTextureArray =
-        useTextureArrayBatch_ && tile.usesTextureArray && tile.textureArrayLayer >= 0;
+    const bool useMainTextureArray = useTextureArrayBatch_ && tile.usesTextureArray;
+    if (useMainTextureArray && !HasValidArrayTile(tile)) {
+        ++stats_.arrayMetadataInvalidSkips;
+        ++stats_.arraySinglePathFallbacks;
+        ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
+        return;
+    }
     if (useMainTextureArray) {
+        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D_ARRAY, tile.textureId);
         LogTextureBindTelemetry("RenderTileWithCrossfade.mainArray", GL_TEXTURE_2D_ARRAY,
                                 tile.textureId, tile.textureArrayLayer);
         glUniform1i(shaderManager_.GetTextureLayerLocation(), tile.textureArrayLayer);
     } else {
+        // 2D fallback on unit 1 when array batch active
+        const GLenum texUnit = useTextureArrayBatch_ ? GL_TEXTURE1 : GL_TEXTURE0;
+        glActiveTexture(texUnit);
         if (useTextureArrayBatch_) {
             glUniform1i(shaderManager_.GetUseTexture2DLocation(), 1);
         }
@@ -716,19 +784,21 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     }
     ApplyPerTileUniforms(shaderManager_, tile, tile.texScaleOffset, useRteBatch_);
 
-    // Bind unpop (ancestor) texture on unit 2 (array or 2D)
-    glActiveTexture(GL_TEXTURE2);
+    // Bind unpop (ancestor) texture: array on unit 3, 2D on unit 2
+    // Separate units prevent sampler type mismatch on macOS Metal.
     const bool useUnpopArray = useTextureArrayBatch_ &&
                                unpopTarget == TextureTarget::kArray &&
                                unpopTextureLayer >= 0 &&
                                unpopTextureId != 0;
     if (useUnpopArray) {
+        glActiveTexture(GL_TEXTURE3);
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 1);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), unpopTextureLayer);
         glBindTexture(GL_TEXTURE_2D_ARRAY, unpopTextureId);
         LogTextureBindTelemetry("RenderTileWithCrossfade.unpopArray", GL_TEXTURE_2D_ARRAY,
                                 unpopTextureId, unpopTextureLayer);
     } else {
+        glActiveTexture(GL_TEXTURE2);
         glUniform1i(shaderManager_.GetUnpopUsesArrayLocation(), 0);
         glUniform1i(shaderManager_.GetUnpopTextureLayerLocation(), 0);
         glBindTexture(GL_TEXTURE_2D, unpopTextureId);
@@ -781,6 +851,16 @@ void TileRenderer::RenderFlatTilesInstanced(uint32_t textureId,
     int renderedTiles = 0;
     for (const FlatTileInstance& instance : instances) {
         if (instance.tile == nullptr || !instance.tile->hasMesh || instance.tile->textureId == 0) {
+            ++stats_.arraySinglePathFallbacks;
+            continue;
+        }
+        if (instance.tile->usesTextureArray) {
+            if (useTextureArrayBatch_) {
+                ++stats_.instancedArraySkipsNotArray;
+            } else {
+                ++stats_.arrayMetadataInvalidSkips;
+            }
+            ++stats_.arraySinglePathFallbacks;
             continue;
         }
         Extent extent = instance.tile->extent;
@@ -869,7 +949,20 @@ void TileRenderer::RenderFlatTilesInstancedArray(uint32_t textureArrayId,
             continue;
         }
         // Only array-backed tiles can be rendered with this path
-        if (!instance.tile->usesTextureArray || instance.tile->textureArrayLayer < 0) {
+        if (!useTextureArrayBatch_) {
+            continue;
+        }
+        if (!instance.tile->usesTextureArray ||
+            instance.tile->textureArrayLayer < 0 ||
+            instance.tile->textureLayerHandle < 0 ||
+            instance.tile->textureArrayTier < 0 ||
+            instance.tile->textureId != textureArrayId) {
+            ++stats_.arraySinglePathFallbacks;
+            if (!instance.tile->usesTextureArray) {
+                ++stats_.instancedArraySkipsNotArray;
+            } else {
+                ++stats_.instancedArraySkipsMissingLayer;
+            }
             continue;
         }
         Extent extent = instance.tile->extent;

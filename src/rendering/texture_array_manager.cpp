@@ -224,7 +224,10 @@ bool TextureArrayManager::ResizeTier(Tier& tier, GLint newMaxLayers) {
 
 int TextureArrayManager::RegisterTier(const TierConfig& config) {
     std::lock_guard<std::mutex> lock(tiersMutex_);
-    
+    return RegisterTierInternal(config);
+}
+
+int TextureArrayManager::RegisterTierInternal(const TierConfig& config) {
     Tier tier;
     tier.config = config;
     
@@ -234,7 +237,7 @@ int TextureArrayManager::RegisterTier(const TierConfig& config) {
     
     int tierId = static_cast<int>(tiers_.size());
     tiers_.push_back(std::move(tier));
-    
+
     return tierId;
 }
 
@@ -262,7 +265,7 @@ int TextureArrayManager::GetOrCreateTier(GLsizei width, GLsizei height, bool gen
     config.generateMipmaps = generateMipmaps;
     config.maxMipLevels = 0;
     
-    return RegisterTier(config);
+    return RegisterTierInternal(config);
 }
 
 LayerHandle TextureArrayManager::AllocLayerInTier(Tier& tier) {

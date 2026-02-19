@@ -1,5 +1,7 @@
 // BulkMetadata Protobuf Parser
-// Decodes Google Earth BulkMetadata response (octree child availability)
+// Decodes Google Earth BulkMetadata response (dense quadtree node metadata).
+// GE uses a dense 4-ary quadtree (digits 0-3). Flags field 1: bit 0 = hasNodeData,
+// bit 1 = hasBulkMetadata, bits 2+ = texture format availability.
 // Response: https://kh.google.com/rt/earth/BulkMetadata/pb=!1m2!1s{path}!2u{epoch}
 
 #pragma once
@@ -10,20 +12,20 @@
 
 namespace globe {
 
-// Metadata for a single octree node within BulkMetadata
+// Metadata for a single quadtree node within BulkMetadata
 struct OctreeNodeMeta {
-    uint32_t epoch = 0;              // Node's epoch version
-    uint32_t flags = 0;              // Raw flags field
-    uint8_t availableChildren = 0;   // Bitmask: which children (0-7) have data
-    bool hasNodeData = false;        // Whether this node has mesh data
-    bool hasBulkMetadata = false;    // Whether this node has further BulkMetadata
+    uint32_t epoch = 0;              // Node's epoch version (0 = inherit from ancestor)
+    uint32_t flags = 0;              // Raw flags field (available_texture_formats_mask)
+    uint8_t availableChildren = 0;   // Dense quadtree: always 0x0F (all 4 children implicit)
+    bool hasNodeData = false;        // Whether this node has mesh data (flags bit 0)
+    bool hasBulkMetadata = false;    // Whether this node has further BulkMetadata (flags bit 1)
 
-    // Check if specific child (0-7) exists
+    // Check if specific child (0-3) exists (always true in dense quadtree)
     bool HasChild(int childIndex) const {
         return (availableChildren & (1 << childIndex)) != 0;
     }
 
-    // Get count of available children
+    // Get count of available children (4 in dense quadtree)
     int ChildCount() const {
         int count = 0;
         uint8_t mask = availableChildren;
@@ -34,7 +36,7 @@ struct OctreeNodeMeta {
 
 // Parsed BulkMetadata result
 struct BulkMetadataResult {
-    std::string basePath;                    // Octree path prefix this covers
+    std::string basePath;                    // Quadtree path prefix this covers
     std::vector<OctreeNodeMeta> nodes;       // Node metadata entries
     bool valid = false;
     std::string error;
@@ -50,7 +52,7 @@ struct BulkMetadataResult {
 };
 
 // Parser for BulkMetadata protobuf response
-// Decodes repeated NodeMetadata entries with child availability bitmasks
+// Decodes repeated NodeMetadata entries (dense quadtree, 4 children per node)
 class BulkMetadataParser {
 public:
     static BulkMetadataResult Parse(const std::vector<uint8_t>& data,
