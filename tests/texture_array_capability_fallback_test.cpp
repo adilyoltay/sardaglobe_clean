@@ -33,8 +33,8 @@ int main() {
     // Test 1: Config default value (P0-2 requirement)
     {
         Config config;
-        Check(config.useTexture2DArray == true, 
-              "P0-2: useTexture2DArray defaults to true");
+        Check(config.useTexture2DArray == false,
+              "Texture2DArray is stable by default (disabled)");
     }
     
     // Test 2: Config can be explicitly disabled
@@ -66,7 +66,7 @@ int main() {
     
     // Fallback behavior documentation
     std::cout << "\n=== P0-2 Fallback Chain Documentation ===\n";
-    std::cout << "1. Config default: useTexture2DArray = true (GE visual parity)\n";
+    std::cout << "1. Config default: useTexture2DArray = false (stable default)\n";
     std::cout << "2. GlobeEngine::Init() queries GL_MAX_ARRAY_TEXTURE_LAYERS\n";
     std::cout << "3. If maxLayers < 128 OR GL error: config_.useTexture2DArray = false\n";
     std::cout << "4. Log format: requested=Array/Atlas, effective=Array/Atlas\n";

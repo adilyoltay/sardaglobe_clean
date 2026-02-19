@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
-#include <cassert>
 
 namespace globe {
 
@@ -49,8 +48,6 @@ inline void ResetCrossfadeState(ShaderManager& shaderManager, bool useTextureArr
         glUniform1i(shaderManager.GetUseTexture2DLocation(), 0);
     }
 }
-
-std::size_t gUnpopArrayTo2DFallbacks = 0;
 
 inline bool HasValidArrayTile(const Tile& tile) {
     return tile.usesTextureArray &&
@@ -587,6 +584,14 @@ void TileRenderer::RenderTile(const Tile& tile, float terrainMorph) {
     if (!batchActive_) return;
     // Renderable = hasMesh && textureId != 0 (not IsReady!)
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) return;
+
+    // If array mode is disabled but the tile was uploaded into array storage,
+    // fail fast and avoid binding a GL_TEXTURE_2D_ARRAY with GL_TEXTURE_2D.
+    if (!useTextureArrayBatch_ && tile.usesTextureArray) {
+        ++stats_.arrayMetadataInvalidSkips;
+        ++stats_.arraySinglePathFallbacks;
+        return;
+    }
     
     // Faz 2B: Bind texture (array or 2D)
     glActiveTexture(GL_TEXTURE0);
@@ -674,12 +679,13 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
     if (!useTextureArrayBatch_) {
         unpopTarget = TextureTarget::k2D;
     }
-    if (useTextureArrayBatch_ &&
-        unpopTarget == TextureTarget::kArray &&
-        unpopTextureLayer < 0) {
-        assert(false && "RenderTileWithCrossfade received array target without valid array layer");
-        ++gUnpopArrayTo2DFallbacks;
+    const bool invalidUnpopArray = useTextureArrayBatch_ &&
+                                  unpopTarget == TextureTarget::kArray &&
+                                  unpopTextureLayer < 0;
+    if (invalidUnpopArray) {
+        ++stats_.arrayMetadataInvalidSkips;
         ++stats_.arrayCrossfadeTo2dFallbacks;
+        ++stats_.arraySinglePathFallbacks;
         unpopTarget = TextureTarget::k2D;
     }
     if (!tile.hasMesh || tile.textureId == 0 || tile.vao == 0) {
@@ -694,18 +700,14 @@ void TileRenderer::RenderTileWithCrossfade(const Tile& tile,
         return;
     }
 
-    // Safety: if caller marks ancestor as array-backed but omits valid layer index,
-    // avoid binding array id to GL_TEXTURE_2D sampler (undefined behavior).
-    // Degrade gracefully to non-crossfade tile render in this edge case.
-    if (useTextureArrayBatch_ &&
-        unpopTarget == TextureTarget::kArray &&
-        unpopTextureLayer < 0) {
+    // When array mode is disabled, never bind array textures as 2D textures.
+    if (!useTextureArrayBatch_ && tile.usesTextureArray) {
+        ++stats_.arrayMetadataInvalidSkips;
+        ++stats_.arrayCrossfadeTo2dFallbacks;
+        ++stats_.arraySinglePathFallbacks;
         ResetCrossfadeState(shaderManager_, useTextureArrayBatch_);
-        RenderTile(tile, terrainMorph);
         return;
     }
-
-    assert(unpopTextureId != 0);
 
     // Faz 2B: Ensure array mode for this draw (in case previous was 2D placeholder)
     if (useTextureArrayBatch_) {
@@ -806,6 +808,8 @@ void TileRenderer::RenderFlatTilesInstanced(uint32_t textureId,
         if (instance.tile->usesTextureArray) {
             if (useTextureArrayBatch_) {
                 ++stats_.instancedArraySkipsNotArray;
+            } else {
+                ++stats_.arrayMetadataInvalidSkips;
             }
             ++stats_.arraySinglePathFallbacks;
             continue;
@@ -896,6 +900,9 @@ void TileRenderer::RenderFlatTilesInstancedArray(uint32_t textureArrayId,
             continue;
         }
         // Only array-backed tiles can be rendered with this path
+        if (!useTextureArrayBatch_) {
+            continue;
+        }
         if (!instance.tile->usesTextureArray ||
             instance.tile->textureArrayLayer < 0 ||
             instance.tile->textureLayerHandle < 0 ||

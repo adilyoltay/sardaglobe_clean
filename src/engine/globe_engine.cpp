@@ -165,10 +165,13 @@ bool GlobeEngine::Init() {
     std::cout << "OpenGL: " << glGetString(GL_VERSION) << std::endl;
     
     // P0-2: GL capability check for Texture2DArray (after GL context is ready)
-    const bool requestedTextureArray = config_.useTexture2DArray;  // User intent
+    textureArrayRequested_ = config_.useTexture2DArray;  // User intent
+    textureArrayMaxLayers_ = 0;
+    textureArrayEffective_ = false;
     if (config_.useTexture2DArray) {
         GLint maxLayers = 0;
         glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        textureArrayMaxLayers_ = maxLayers;
         
         // Check GL error first - if query failed, safe fallback
         GLenum err = glGetError();
@@ -177,16 +180,18 @@ bool GlobeEngine::Init() {
         if (glError || maxLayers < 128) {
             // Insufficient support - fallback to atlas
             config_.useTexture2DArray = false;
+            textureArrayEffective_ = false;
             std::cout << "[Texture] requested=Array, effective=Atlas/2D (unavailable" 
                       << (glError ? ", GL error)" : ", maxLayers=" + std::to_string(maxLayers) + " < 128)")
                       << "\n";
         } else {
+            textureArrayEffective_ = true;
             std::cout << "[Texture] requested=Array, effective=Array (maxLayers=" << maxLayers << ")\n";
         }
     } else {
+        textureArrayEffective_ = false;
         std::cout << "[Texture] requested=Atlas/2D, effective=Atlas/2D (user disabled)\n";
     }
-    (void)requestedTextureArray;  // Mark as used for potential future debug output
     
     // Init camera system (Google Earth parity)
     camera_ = std::make_unique<earth::PerspectiveCamera>();
@@ -2964,12 +2969,16 @@ void GlobeEngine::Render() {
     debugStats_.visibleTiles = drawStats.renderableLeaves + drawStats.fallbackTiles;
     debugStats_.drawCalls = renderStats.drawCalls;
     debugStats_.trianglesRendered = renderStats.trianglesRendered;
+    debugStats_.textureArrayRequested = textureArrayRequested_;
+    debugStats_.textureArrayEffective = textureArrayEffective_;
+    debugStats_.textureArrayMaxLayers = textureArrayMaxLayers_;
     debugStats_.instancedBatches = renderStats.instancedBatches;
     debugStats_.instancedTiles = renderStats.instancedTiles;
     debugStats_.instancedArrayBatches = renderStats.instancedArrayBatches;
     debugStats_.instancedArrayTiles = renderStats.instancedArrayTiles;
     debugStats_.instancedArraySkipsNotArray = renderStats.instancedArraySkipsNotArray;
     debugStats_.instancedArraySkipsMissingLayer = renderStats.instancedArraySkipsMissingLayer;
+    debugStats_.arrayMetadataInvalidSkips = renderStats.arrayMetadataInvalidSkips;
     debugStats_.arrayCrossfadeTo2dFallbacks = renderStats.arrayCrossfadeTo2dFallbacks;
     debugStats_.arraySinglePathFallbacks = renderStats.arraySinglePathFallbacks;
     debugStats_.atlasEnabled = textureManager_ && textureManager_->IsAtlasEnabled();
@@ -3073,8 +3082,12 @@ void GlobeEngine::Render() {
                   << " renderable=" << debugStats_.renderableLeaves
                   << " fallback=" << debugStats_.fallbackTiles
                   << " placeholders=" << debugStats_.placeholderTiles
+                  << " texArray=req:" << (debugStats_.textureArrayRequested ? "array" : "atlas")
+                  << " eff:" << (debugStats_.textureArrayEffective ? "array" : "atlas")
+                  << " maxLayers=" << debugStats_.textureArrayMaxLayers
                   << " demFlat=" << debugStats_.demFlatLeaves
                   << " demPending=" << debugStats_.demPendingLeaves
+                  << " arrayMetaInvalid=" << debugStats_.arrayMetadataInvalidSkips
                   << " arrayCrossfade=" << debugStats_.arrayCrossfadeTo2dFallbacks
                   << " arrayInstSkips=" << debugStats_.instancedArraySkipsNotArray
                   << " arrayInstMissLayer=" << debugStats_.instancedArraySkipsMissingLayer
@@ -3456,11 +3469,16 @@ void GlobeEngine::RenderDebugPanel() {
                         debugStats_.instancedBatches, debugStats_.instancedTiles);
             ImGui::Text("Instanced(Array): %d batches / %d tiles",
                         debugStats_.instancedArrayBatches, debugStats_.instancedArrayTiles);
+            ImGui::Text("Texture Path: req=%s eff=%s maxLayers=%d",
+                        debugStats_.textureArrayRequested ? "array" : "atlas",
+                        debugStats_.textureArrayEffective ? "array" : "atlas",
+                        debugStats_.textureArrayMaxLayers);
             ImGui::Text("Array fallback: %d notArray / %d missingLayer / %d crossfade->2D / %d singlePath",
                         debugStats_.instancedArraySkipsNotArray,
                         debugStats_.instancedArraySkipsMissingLayer,
                         debugStats_.arrayCrossfadeTo2dFallbacks,
                         debugStats_.arraySinglePathFallbacks);
+            ImGui::Text("Array metadata invalid skips: %d", debugStats_.arrayMetadataInvalidSkips);
             if (debugStats_.atlasEnabled) {
                 ImGui::Text("Atlas Slots: %d / %d (%d pages)",
                             debugStats_.atlasUsedSlots,

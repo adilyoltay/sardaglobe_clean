@@ -4,19 +4,22 @@
 Bu doküman, `native_globe_clean` projesinde bu oturumda yapılan geliştirmeleri, onayları, test sonuçlarını ve kalan işleri sonraki asistana hızlı transfer için tek kaynakta toplar.
 
 ## Bağlam ve Durum Özeti
-1. Aktif branch: `main`
+1. Aktif branch: `terrain-forward`
 2. Remote: `origin` -> `https://github.com/adilyoltay/sardaglobe_clean.git`
-3. En yeni commit: `da6fea7`
-4. Ana fonksiyonel commit: `3962748` (P0/P1 tamamlayıcı değişiklikler)
-5. Çalışma alanı: temiz (`git status --short` boş)
+3. En yeni commit: `2a6bff0`
+4. Ana fonksiyonel commit hattı: `3962748` + `cdf3c3c` (`useTexture2DArray` rollback) + sonrası stabilizasyon yamaları
+5. Çalışma alanı: geçerli oturumda yapılan düzeltmeler sonrası kirli (commit edilecek)
 
 ## Commit zinciri (referans)
-1. `da6fea7` — `docs: add session handover and remaining work tracker`
-2. `3962748` — `chore: finalize p0/p1 updates and harden p1-4`
-3. `7dd12af` — `Fix DEM terrain render authority to depend on coverage instead of provider health`
-4. `f37684c` — `Adjust DEM terrain clamp and preserve DEM upgrade mesh results`
-5. `9761eaa` — `chore: ignore runtime test artifacts from patch`
-6. `c2257d1` — `GE parity: stabilize seam/quorum pipeline and visual smoke gates`
+1. `2a6bff0` — `Fix adaptive distance terrain morph and terrain tests`
+2. `cdf3c3c` — `fix: disable Texture2DArray default to avoid blank screen regression`
+3. `25991b8` — `docs: expand handoff progress with detailed session context`
+4. `da6fea7` — `docs: add session handover and remaining work tracker`
+5. `3962748` — `chore: finalize p0/p1 updates and harden p1-4`
+6. `7dd12af` — `Fix DEM terrain render authority to depend on coverage instead of provider health`
+7. `f37684c` — `Adjust DEM terrain clamp and preserve DEM upgrade mesh results`
+8. `9761eaa` — `chore: ignore runtime test artifacts from patch`
+9. `c2257d1` — `GE parity: stabilize seam/quorum pipeline and visual smoke gates`
 
 ## Kapsam (Bu oturumda hedeflenen hedefler)
 1. P0-2 Texture2DArray default açma ve fallback
@@ -30,7 +33,7 @@ Bu doküman, `native_globe_clean` projesinde bu oturumda yapılan geliştirmeler
 
 ### P0-2 Texture2DArray default + fallback hardening
 - Hedef: terrain tile bleeding riskini azaltmak için texture array path'i varsayılan açmak
-- Uygulama: `useTexture2DArray` default true
+- Durum: rollback sonrası kalıcı davranış `useTexture2DArray = false` (explicit `--texture-array` ile açılabilir)
 - GL yetenek kontrolü: `GL_MAX_ARRAY_TEXTURE_LAYERS` ile gate
 - Eşik: `<128` olursa array path fallback
 - Log standardı: `requested` ve `effective` ayrımı
@@ -116,15 +119,16 @@ Bu doküman, `native_globe_clean` projesinde bu oturumda yapılan geliştirmeler
 3. `./build/native_globe --help | rg dem` ile CLI parametrelerinin varlığı kontrol
 4. Tile URL servisi 401 veriyorsa auth yöntemini aktif etme veya endpoint değişimi planla
 
-## Kalan görevler (öncelik + etkisi)
-1. P1-5 GPU Terrain Morph: `uCornerLods` ile uyumlu morph transition tasarımının uygulanması
-2. P1-1 Water Rendering: Okyanus/deniz görsel karakterinin tamamlanması
-3. P1-6 Predictive Prefetcher: Predicted quadkey prefetch + TTL + cache pollution korumasının eklenmesi
-4. P1-2 Label/Annotation: Görsel UX ve navigasyonun tamamlanması
-5. P1-7/1-8 RockMesh atlas ve LOD geçişi: Atlas/path ve fade sisteminin eklenmesi
-6. DEM batch ölçüm ve görsel metrik otomasyonu
+## Kalan kritik görevler (öncelik + etkisi)
+1. `useTexture2DArray=true` senaryosunda A/B smoke (OSM vs custom) ile kalan siyah ekran varyantlarının son kez karşılaştırılması
+2. Array metadata invariantleri için kalan fallbacks ve uyarılar (`arrayMetadataInvalidSkips`, `arrayCrossfadeTo2dFallbacks`, `arraySinglePathFallbacks`) izlenmesi
+3. P1-1 Water Rendering: Okyanus/deniz görsel karakterinin tamamlanması
+4. P1-6 Predictive Prefetcher: Predicted quadkey prefetch + TTL + cache pollution korumasının eklenmesi
+5. P1-2 Label/Annotation: Görsel UX ve navigasyonun tamamlanması
+6. P1-7/1-8 RockMesh atlas ve LOD geçişi: Atlas/path ve fade sisteminin eklenmesi
+7. DEM batch ölçüm ve görsel metrik otomasyonu
 
 ## Notlar
 1. `predictive_prefetcher.*` dosyaları mevcut ama tam entegrasyon/ops geçerliliği ayrı bir adım gerektiriyor
-2. Geçici olarak en güçlü engel teknik değil, servis erişim katmanıdır
-3. Yeni oturumda ilk kontrol: tile source erişimi ve GL loglarında `effective=Array` doğrulanması
+2. Geçici olarak en güçlü engellerden biri Texture2DArray açıkken sampler/katman uyuşmazlıkları olabilir
+3. Yeni oturumda ilk kontrol: `--smoke --no-atmosphere --no-rockmesh --dem-provider terrain-rgb` + `--texture-array` / `--no-texture-array` karşılaştırması

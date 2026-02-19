@@ -110,6 +110,9 @@ private:
     std::unique_ptr<TextureManager> textureManager_;
     std::unique_ptr<ShaderManager> shaderManager_;
     std::unique_ptr<TileRenderer> tileRenderer_;
+    bool textureArrayRequested_ = false;
+    bool textureArrayEffective_ = false;
+    int textureArrayMaxLayers_ = 0;
     std::unique_ptr<TileMeshScheduler> meshScheduler_;
     std::unique_ptr<DemManager> demManager_;
     int demProviderEffectiveMaxZoom_ = 15;  // Runtime effective DEM cap after provider clamp
@@ -285,12 +288,16 @@ private:
         int atlasPages = 0;
         int atlasUsedSlots = 0;
         int atlasCapacitySlots = 0;
+        bool textureArrayRequested = false;
+        bool textureArrayEffective = false;
+        int textureArrayMaxLayers = 0;
         int instancedBatches = 0;
         int instancedTiles = 0;
         int instancedArrayBatches = 0;
         int instancedArrayTiles = 0;
         int instancedArraySkipsNotArray = 0;
         int instancedArraySkipsMissingLayer = 0;
+        int arrayMetadataInvalidSkips = 0;
         int arrayCrossfadeTo2dFallbacks = 0;
         int arraySinglePathFallbacks = 0;
         float cameraSpeedKmPerSec = 0.0f;
