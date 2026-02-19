@@ -1,4 +1,5 @@
 #include "google_earth_elevation_provider.h"
+#include "ge_headers.h"
 #include "protobuf_wire.h"
 #include <iostream>
 #include <algorithm>
@@ -184,39 +185,19 @@ GoogleEarthElevationProvider::~GoogleEarthElevationProvider() = default;
 
 std::vector<std::pair<std::string, std::string>> 
 GoogleEarthElevationProvider::BuildRequestHeaders() const {
-    auto headers = config_.headers;
-
-    bool hasCustomAuthorization = false;
-    for (const auto& header : headers) {
-        if (header.first == "Authorization") {
-            hasCustomAuthorization = true;
+    auto headers = ge_headers::BuildStandardHeaders();
+    // Elevation API uses POST with protobuf body — add Content-Type
+    headers.push_back({"Content-Type", "application/x-protobuf"});
+    // Elevation endpoint is same-site (kh.google.com -> earth.google.com)
+    // Override the default cross-site value set by BuildStandardHeaders
+    for (auto& [key, value] : headers) {
+        if (key == "Sec-Fetch-Site") {
+            value = "same-site";
             break;
         }
     }
-    
-    // Add auth token if present and no explicit Authorization header was provided
-    if (!hasCustomAuthorization && !config_.authToken.empty()) {
-        headers.push_back({"Authorization", "Bearer " + config_.authToken});
-    }
-    
-    // Google Earth Web spoofing (Robust)
-    // Match the exact headers sent by the web client (Chrome)
-    headers.push_back({"Content-Type", "application/x-protobuf"});
-    headers.push_back({"Accept", "application/x-protobuf"});
-    headers.push_back({"Accept-Language", "en-US,en;q=0.9"});
-    headers.push_back({"Accept-Encoding", "gzip, deflate, br"});
-    // Latest Chrome on macOS (Intel)
-    headers.push_back({"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"});
-    headers.push_back({"Referer", "https://earth.google.com/"});
-    headers.push_back({"Origin", "https://earth.google.com"});
-    headers.push_back({"Sec-Ch-Ua", "\"Not A(Brand)\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\""});
-    headers.push_back({"Sec-Ch-Ua-Mobile", "?0"});
-    headers.push_back({"Sec-Ch-Ua-Platform", "\"macOS\""});
-    headers.push_back({"Sec-Fetch-Dest", "empty"});
-    headers.push_back({"Sec-Fetch-Mode", "cors"});
-    headers.push_back({"Sec-Fetch-Site", "same-site"});
-    headers.push_back({"X-Client-Data", "CI+2yQEIprbJAQipncoBCKDhygEIkqHLAQj6mM0B"});
-    
+    ge_headers::AppendCustomHeaders(headers, config_.headers);
+    ge_headers::AppendBearerTokenIfNeeded(headers, config_.authToken);
     return headers;
 }
 

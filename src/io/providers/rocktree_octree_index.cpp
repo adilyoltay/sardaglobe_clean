@@ -1,6 +1,7 @@
 // RockTree Octree Index Implementation
 
 #include "rocktree_octree_index.h"
+#include "ge_headers.h"
 #include <iostream>
 #include <algorithm>
 #include <cmath>
@@ -58,25 +59,7 @@ RockTreeOctreeIndex::~RockTreeOctreeIndex() = default;
 
 std::vector<std::pair<std::string, std::string>>
 RockTreeOctreeIndex::BuildHeaders() const {
-    // Google Earth Web spoofing headers
-    // These headers mimic the official Google Earth web client to avoid CAPTCHA
-    return {
-        {"Accept", "application/x-protobuf"},
-        {"Accept-Language", "en-US,en;q=0.9"},
-        {"Accept-Encoding", "gzip, deflate, br"},
-        {"User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/121.0.0.0 Safari/537.36"},
-        {"Referer", "https://earth.google.com/"},
-        {"Origin", "https://earth.google.com"},
-        {"Sec-Ch-Ua", "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\""},
-        {"Sec-Ch-Ua-Mobile", "?0"},
-        {"Sec-Ch-Ua-Platform", "\"macOS\""},
-        {"Sec-Fetch-Dest", "empty"},
-        {"Sec-Fetch-Mode", "cors"},
-        {"Sec-Fetch-Site", "cross-site"},
-        {"X-Client-Data", "CI+2yQEIprbJAQipncoBCKDhygEIkqHLAQj6mM0B"}  // Base64 encoded client capabilities
-    };
+    return ge_headers::BuildStandardHeaders();
 }
 
 bool RockTreeOctreeIndex::Init() {
