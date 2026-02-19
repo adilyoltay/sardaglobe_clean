@@ -98,6 +98,10 @@ struct ParsedNodeData {
     std::vector<uint8_t> rawTexCoords;      // Mesh field 7 raw bytes
     std::vector<uint8_t> rawLayerAndOctant; // Mesh field 8 raw bytes
     
+    // UV offset/scale from Mesh field 10 (carried to post-processing)
+    float uvOffsetAndScale[4] = {};
+    bool hasUvOffsetAndScale = false;
+    
     // Error state
     std::string error;
     bool success = false;

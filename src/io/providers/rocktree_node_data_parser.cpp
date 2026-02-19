@@ -125,8 +125,11 @@ bool RockTreeNodeDataParser::UnpackTexCoords(const uint8_t* data, size_t len, in
     size_t count = static_cast<size_t>(vertexCount);
     if (len < 4 + count * 4) return false;
     
-    uint16_t u_mod = 1 + *reinterpret_cast<const uint16_t*>(data + 0);
-    uint16_t v_mod = 1 + *reinterpret_cast<const uint16_t*>(data + 2);
+    uint16_t u_mod_raw, v_mod_raw;
+    memcpy(&u_mod_raw, data + 0, sizeof(uint16_t));
+    memcpy(&v_mod_raw, data + 2, sizeof(uint16_t));
+    uint16_t u_mod = 1 + u_mod_raw;
+    uint16_t v_mod = 1 + v_mod_raw;
     const uint8_t* d = data + 4;
     
     outUV.resize(count * 2);
@@ -208,7 +211,8 @@ bool RockTreeNodeDataParser::UnpackForNormals(const uint8_t* data, size_t len,
     // Format: uint16 count + uint8 scale + count*2 octahedral-encoded normal pairs
     if (len < 3) return false;
     
-    uint16_t count = *reinterpret_cast<const uint16_t*>(data);
+    uint16_t count;
+    memcpy(&count, data, sizeof(uint16_t));
     if (count * 2 != static_cast<int>(len) - 3) return false;
     int s = data[2];
     const uint8_t* d = data + 3;
@@ -409,6 +413,20 @@ bool RockTreeNodeDataParser::ParseTopLevel(ParsedNodeData& out, const uint8_t* d
         }
     }
     
+    // Apply UV offset/scale override from field 10 if present,
+    // otherwise apply retroplasma V-flip fallback when field 7 decoded.
+    // This MUST run after UnpackTexCoords sets hasTexCoords and uvQuant.
+    if (out.hasUvOffsetAndScale) {
+        out.uvQuant.offsetU = out.uvOffsetAndScale[0];
+        out.uvQuant.offsetV = out.uvOffsetAndScale[1];
+        out.uvQuant.scaleU = out.uvOffsetAndScale[2];
+        out.uvQuant.scaleV = out.uvOffsetAndScale[3];
+    } else if (out.hasTexCoords) {
+        // retroplasma fallback: uv_offset[1] -= 1/uv_scale[1]; uv_scale[1] *= -1
+        out.uvQuant.offsetV -= 1.0f / out.uvQuant.scaleV;
+        out.uvQuant.scaleV *= -1.0f;
+    }
+    
     // Decode normals from raw field 11 using for_normals palette
     if (!out.rawNormals.empty() && out.vertexCount > 0) {
         if (UnpackNormals(out.rawNormals.data(), out.rawNormals.size(),
@@ -427,8 +445,6 @@ bool RockTreeNodeDataParser::ParseTopLevel(ParsedNodeData& out, const uint8_t* d
 
 bool RockTreeNodeDataParser::ParseMesh(ParsedNodeData& out, const uint8_t* data, size_t len) {
     size_t pos = 0;
-    bool hasUvOffsetAndScale = false;
-    float uvOffsetAndScale[4] = {};
     
     while (pos < len) {
         uint32_t fieldNum;
@@ -489,10 +505,9 @@ bool RockTreeNodeDataParser::ParseMesh(ParsedNodeData& out, const uint8_t* data,
                 out.rawLayerAndOctant.assign(data + pos, data + pos + length);
             } else if (fieldNum == 10) {
                 // Mesh field 10: uv_offset_and_scale (4 floats, packed repeated)
-                // This is a packed repeated float field
                 if (length >= 16) {
-                    if (ReadFloatArray(data + pos, length, uvOffsetAndScale, 4)) {
-                        hasUvOffsetAndScale = true;
+                    if (ReadFloatArray(data + pos, length, out.uvOffsetAndScale, 4)) {
+                        out.hasUvOffsetAndScale = true;
                     }
                 }
             } else if (fieldNum == 11) {
@@ -507,19 +522,6 @@ bool RockTreeNodeDataParser::ParseMesh(ParsedNodeData& out, const uint8_t* data,
                 return false;
             }
         }
-    }
-    
-    // Apply UV offset/scale override from field 10 if present
-    // (retroplasma: if uv_offset_and_scale_size() == 4, override the computed values)
-    if (hasUvOffsetAndScale) {
-        out.uvQuant.offsetU = uvOffsetAndScale[0];
-        out.uvQuant.offsetV = uvOffsetAndScale[1];
-        out.uvQuant.scaleU = uvOffsetAndScale[2];
-        out.uvQuant.scaleV = uvOffsetAndScale[3];
-    } else if (out.hasTexCoords) {
-        // retroplasma fallback: uv_offset[1] -= 1/uv_scale[1]; uv_scale[1] *= -1
-        out.uvQuant.offsetV -= 1.0f / out.uvQuant.scaleV;
-        out.uvQuant.scaleV *= -1.0f;
     }
     
     // Vertex count DoS limit

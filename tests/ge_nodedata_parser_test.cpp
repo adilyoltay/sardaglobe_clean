@@ -411,6 +411,110 @@ int main() {
         std::cout << "  UnpackForNormals + UnpackNormals: OK\n";
     }
 
+    // Test 13: V-flip fallback when field 7 present but field 10 absent
+    {
+        // Build NodeData with field 7 (texture_coordinates) but NO field 10
+        // The V-flip fallback should apply: offsetV -= 1/scaleV, scaleV *= -1
+        
+        // 3 vertices
+        std::vector<uint8_t> positions = {0,0,0, 100,0,0, 0,100,0};
+        auto vertexData = BuildVertexData(positions);
+        
+        // Build field 7 data: 4-byte header + 3*4 data bytes
+        // u_mod-1 = 255 (u_mod = 256), v_mod-1 = 255 (v_mod = 256)
+        std::vector<uint8_t> texCoordData;
+        uint16_t u_mod_m1 = 255, v_mod_m1 = 255;
+        texCoordData.resize(4);
+        memcpy(texCoordData.data() + 0, &u_mod_m1, 2);
+        memcpy(texCoordData.data() + 2, &v_mod_m1, 2);
+        // 3 vertices * 4 bytes (u_lo, v_lo, u_hi, v_hi planar)
+        texCoordData.resize(4 + 3 * 4, 0);  // all zero deltas
+        
+        // Strip
+        std::vector<uint16_t> strip = {0, 1, 2};
+        auto indexData = BuildIndexData(strip);
+        
+        // Build mesh with field 7 but NO field 10
+        std::vector<uint8_t> mesh;
+        AppendFieldRaw(mesh, 1, vertexData.data(), vertexData.size());
+        AppendFieldRaw(mesh, 3, indexData.data(), indexData.size());
+        AppendFieldRaw(mesh, 7, texCoordData.data(), texCoordData.size());
+        // Intentionally NO field 10
+        
+        // Build top-level
+        std::vector<uint8_t> topLevel;
+        double tfm[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 6371000,0,0,1};
+        AppendFieldRaw(topLevel, 1, reinterpret_cast<const uint8_t*>(tfm), 128);
+        AppendField(topLevel, 2, mesh);
+        
+        ParsedNodeData result = RockTreeNodeDataParser::Parse(topLevel);
+        
+        failed += !Expect(result.success, "Field7-no-field10 should parse OK");
+        failed += !Expect(result.hasTexCoords, "Should have texCoords from field 7");
+        failed += !Expect(!result.hasUvOffsetAndScale, "Should NOT have field 10 override");
+        
+        // UnpackTexCoords computes: scaleV = 1/256 = 0.00390625, offsetV = 0.5
+        // V-flip fallback: offsetV -= 1/scaleV = 0.5 - 256 = -255.5
+        //                  scaleV *= -1 = -0.00390625
+        float expectedScaleV = -1.0f / 256.0f;
+        float expectedOffsetV = 0.5f - 256.0f;
+        failed += !Expect(std::abs(result.uvQuant.scaleV - expectedScaleV) < 1e-6f,
+                         "V-flip fallback should negate scaleV");
+        failed += !Expect(std::abs(result.uvQuant.offsetV - expectedOffsetV) < 1e-3f,
+                         "V-flip fallback should adjust offsetV");
+        
+        std::cout << "  V-flip fallback (field7 no field10): scaleV=" 
+                  << result.uvQuant.scaleV << " offsetV=" << result.uvQuant.offsetV << " OK\n";
+    }
+    
+    // Test 14: Unaligned buffer UV/forNormals parsing (UB prevention)
+    {
+        // Create a buffer with 1-byte offset to ensure uint16 reads are unaligned
+        std::vector<uint8_t> aligned(32, 0);
+        
+        // Test UnpackTexCoords with unaligned data
+        // Place tex coord header at offset 1 (odd address)
+        std::vector<uint8_t> padded(1, 0xAA);  // 1-byte padding
+        uint16_t u_mod_m1 = 127, v_mod_m1 = 127;
+        padded.resize(padded.size() + 4);
+        memcpy(padded.data() + 1, &u_mod_m1, 2);
+        memcpy(padded.data() + 3, &v_mod_m1, 2);
+        // 2 vertices * 4 bytes data
+        padded.resize(padded.size() + 2 * 4, 0);
+        
+        std::vector<uint16_t> outUV;
+        UvQuantization outQuant;
+        bool ok = RockTreeNodeDataParser::UnpackTexCoords(
+            padded.data() + 1, padded.size() - 1, 2, outUV, outQuant);
+        
+        failed += !Expect(ok, "UnpackTexCoords with unaligned buffer should succeed");
+        failed += !Expect(outUV.size() == 4, "Should have 4 UV values (2 verts)");
+        float expectedScale = 1.0f / 128.0f;
+        failed += !Expect(std::abs(outQuant.scaleU - expectedScale) < 1e-6f,
+                         "Unaligned UV scale should be correct");
+        
+        // Test UnpackForNormals with unaligned data
+        std::vector<uint8_t> normPadded(1, 0xBB);  // 1-byte padding
+        uint16_t normCount = 1;
+        normPadded.resize(normPadded.size() + 3);
+        memcpy(normPadded.data() + 1, &normCount, 2);  // count at odd address
+        normPadded[3] = 0;  // scale
+        // 1 normal * 2 bytes
+        normPadded.push_back(128);  // a
+        normPadded.push_back(128);  // f
+        
+        std::vector<uint8_t> palette;
+        int paletteCount = 0;
+        ok = RockTreeNodeDataParser::UnpackForNormals(
+            normPadded.data() + 1, normPadded.size() - 1, palette, paletteCount);
+        
+        failed += !Expect(ok, "UnpackForNormals with unaligned buffer should succeed");
+        failed += !Expect(paletteCount == 1, "Unaligned palette count should be 1");
+        failed += !Expect(palette.size() == 3, "Unaligned palette should have 3 bytes");
+        
+        std::cout << "  Unaligned buffer parsing: OK\n";
+    }
+
     if (failed == 0) {
         std::cout << "GeNodeDataParserTest PASSED\n";
         return 0;
